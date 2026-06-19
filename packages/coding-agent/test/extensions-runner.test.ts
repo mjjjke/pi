@@ -85,6 +85,7 @@ describe("ExtensionRunner", () => {
 		getContextUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
+		requestNewSession: async () => ({ queued: false, reason: "already_pending" }),
 	};
 
 	describe("project_trust", () => {
@@ -530,6 +531,157 @@ describe("ExtensionRunner", () => {
 			const ctx = runner.createContext();
 			expect(ctx.mode).toBe("tui");
 			expect(ctx.hasUI).toBe(true);
+		});
+
+		it("rejects requestNewSession outside supported event emission", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const ctx = runner.createContext();
+			expect(() => ctx.requestNewSession()).toThrow(
+				"ctx.requestNewSession() can only be called from an agent_end extension handler.",
+			);
+		});
+	});
+
+	describe("requestNewSession", () => {
+		it("allows agent_end handlers to call the bound deferred request handler", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("agent_end", async (_event, ctx) => {
+						await ctx.requestNewSession({ parentSession: "parent-session.jsonl" });
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "request-new-session.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const requestNewSession = vi.fn(async () => ({ queued: false as const, reason: "already_pending" as const }));
+			runner.bindCore(extensionActions, {
+				...extensionContextActions,
+				requestNewSession,
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+
+			expect(requestNewSession).toHaveBeenCalledWith({ parentSession: "parent-session.jsonl" });
+		});
+
+		it("keeps requestNewSession authorization scoped to each emitted context", async () => {
+			let resolveResumeInput: () => void = () => {};
+			let resolveReleaseAgentEnd: () => void = () => {};
+			let resolveInputStarted: () => void = () => {};
+			let resolveAgentEndStarted: () => void = () => {};
+			let resolveInputDone: () => void = () => {};
+			const inputStarted = new Promise<void>((resolve) => {
+				resolveInputStarted = resolve;
+			});
+			const agentEndStarted = new Promise<void>((resolve) => {
+				resolveAgentEndStarted = resolve;
+			});
+			const inputDone = new Promise<void>((resolve) => {
+				resolveInputDone = resolve;
+			});
+			const state = {
+				resumeInput: new Promise<void>((resolve) => {
+					resolveResumeInput = resolve;
+				}),
+				releaseAgentEnd: new Promise<void>((resolve) => {
+					resolveReleaseAgentEnd = resolve;
+				}),
+				inputStarted: resolveInputStarted,
+				agentEndStarted: resolveAgentEndStarted,
+				inputDone: resolveInputDone,
+				inputResult: undefined as string | undefined,
+			};
+			const globalRecord = globalThis as typeof globalThis & { __piRequestNewSessionRace?: typeof state };
+			globalRecord.__piRequestNewSessionRace = state;
+			const extCode = `
+				export default function(pi) {
+					const state = globalThis.__piRequestNewSessionRace;
+					pi.on("input", async (_event, ctx) => {
+						state.inputStarted();
+						await state.resumeInput;
+						try {
+							await ctx.requestNewSession();
+							state.inputResult = "allowed";
+						} catch (error) {
+							state.inputResult = error instanceof Error ? error.message : String(error);
+						}
+						state.inputDone();
+					});
+					pi.on("agent_end", async () => {
+						state.agentEndStarted();
+						await state.releaseAgentEnd;
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "request-new-session-race.ts"), extCode);
+
+			try {
+				const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir,
+					sessionManager,
+					modelRegistry,
+				);
+				const requestNewSession = vi.fn(extensionContextActions.requestNewSession);
+				runner.bindCore(extensionActions, {
+					...extensionContextActions,
+					requestNewSession,
+				});
+
+				const inputPromise = runner.emitInput("hello", undefined, "interactive");
+				await inputStarted;
+				const agentEndPromise = runner.emit({ type: "agent_end", messages: [] });
+				await agentEndStarted;
+				resolveResumeInput();
+				await inputDone;
+				resolveReleaseAgentEnd();
+				await Promise.all([inputPromise, agentEndPromise]);
+
+				expect(requestNewSession).not.toHaveBeenCalled();
+				expect(state.inputResult).toBe(
+					"ctx.requestNewSession() can only be called from an agent_end extension handler.",
+				);
+			} finally {
+				delete globalRecord.__piRequestNewSessionRace;
+			}
+		});
+
+		it("reports unsupported event usage as an extension error", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("message_end", async (_event, ctx) => {
+						await ctx.requestNewSession();
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "bad-request-new-session.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const requestNewSession = vi.fn(extensionContextActions.requestNewSession);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(`${error.event}: ${error.error}`));
+			runner.bindCore(extensionActions, {
+				...extensionContextActions,
+				requestNewSession,
+			});
+
+			await runner.emitMessageEnd({
+				type: "message_end",
+				message: { role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() },
+			});
+
+			expect(requestNewSession).not.toHaveBeenCalled();
+			expect(errors).toEqual([
+				"message_end: ctx.requestNewSession() can only be called from an agent_end extension handler.",
+			]);
 		});
 	});
 

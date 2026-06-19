@@ -1706,6 +1706,9 @@ export class InteractiveMode {
 				})();
 			},
 			getSystemPrompt: () => this.session.systemPrompt,
+			requestNewSession: () => {
+				throw new Error("ctx.requestNewSession() can only be called from an agent_end extension handler.");
+			},
 		});
 
 		// Set up the extension shortcut handler on the default editor

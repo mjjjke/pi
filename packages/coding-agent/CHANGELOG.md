@@ -83,6 +83,7 @@
 
 ### Added
 
+- Added extension `ctx.requestNewSession()` for safe deferred new-session replacement from `agent_end` handlers.
 - Added extension `pi.appendDeveloperMessage()` for passive persisted developer instruction messages.
 - Added linked-fork `pi update` support that delegates self-updates to a nested low-reasoning pi agent with only the read, bash, edit, and write built-in tools for rebasing local forks onto the latest release tag, rebuilding, and checking them.
 

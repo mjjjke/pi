@@ -540,6 +540,16 @@ pi.on("agent_start", async (_event, ctx) => {});
 
 pi.on("agent_end", async (event, ctx) => {
   // event.messages - messages from this prompt
+
+  // agent_end can request a deferred fresh session after this event finishes.
+  const result = await ctx.requestNewSession({
+    parentSession: ctx.sessionManager.getSessionFile(),
+    withSession: async (freshCtx) => {
+      await freshCtx.sendUserMessage("Continue in the fresh session.");
+    },
+  });
+  // Do not await result.completion inside this handler; it resolves after
+  // agent_end emission finishes and the deferred replacement runs.
 });
 ```
 
@@ -1053,6 +1063,59 @@ pi.on("before_agent_start", (event, ctx) => {
   console.log(`System prompt length: ${prompt.length}`);
 });
 ```
+
+### ctx.requestNewSession(options?)
+
+Request a deferred session replacement from an event handler. This is currently supported only from `agent_end` handlers; calls from other events, tools, commands, or shortcuts throw explicitly.
+
+`requestNewSession()` does not replace the session immediately. It queues one replacement and Pi runs it after the current `agent_end` emission finishes. If a request is already pending for that `agent_end`, the next call returns `{ queued: false, reason: "already_pending" }`.
+
+```typescript
+pi.on("agent_end", async (_event, ctx) => {
+  const parentSession = ctx.sessionManager.getSessionFile();
+  const request = await ctx.requestNewSession({
+    parentSession,
+    setup: async (sm) => {
+      sm.appendCustomEntry("my-extension-state", { ready: true });
+    },
+    withSession: async (freshCtx) => {
+      await freshCtx.sendMessage({
+        customType: "my-handoff",
+        content: "Handoff context",
+        display: true,
+      });
+      await freshCtx.sendUserMessage("Continue from the handoff.", { deliverAs: "followUp" });
+    },
+  });
+
+  if (!request.queued) {
+    ctx.ui.notify("Another extension already requested a fresh session", "warning");
+    return;
+  }
+
+  request.completion.then(
+    (result) => {
+      if (result.cancelled) {
+        // Cancelled by session_before_switch.
+      }
+    },
+    (error) => {
+      // Replacement failed (e.g. unsupported mode); handle or log the error.
+    },
+  );
+});
+```
+
+Options match `ctx.newSession()`:
+- `parentSession`: parent session file to record in the new session header
+- `setup`: mutate the new session's `SessionManager` before `withSession` runs
+- `withSession`: run post-switch work against a fresh `ReplacedSessionContext`
+
+Use only the `freshCtx` passed to `withSession` after replacement. The old `pi` and old `ctx` become stale after a successful replacement, just like `ctx.newSession()`.
+
+`request.completion` resolves with `{ cancelled }` once the deferred replacement runs, but it rejects if the replacement fails (for example, when the current mode has no session-replacement support). Always attach a rejection handler if you observe `completion`, or the failure signal is lost.
+
+Do not `await request.completion` inside the same `agent_end` handler that queued it; the completion promise settles only after `agent_end` handlers return and the deferred replacement runs.
 
 ## ExtensionCommandContext
 

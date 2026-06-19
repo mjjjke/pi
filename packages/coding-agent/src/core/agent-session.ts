@@ -72,6 +72,8 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
+	type RequestNewSessionOptions,
+	type RequestNewSessionResult,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionStartEvent,
@@ -250,6 +252,12 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface PendingNewSessionRequest {
+	options?: RequestNewSessionOptions;
+	resolve: (result: { cancelled: boolean }) => void;
+	reject: (error: unknown) => void;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -307,6 +315,8 @@ export class AgentSession {
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
 	private _isEmittingAgentEndExtensionEvent = false;
+	private _pendingNewSessionRequest: PendingNewSessionRequest | undefined;
+	private _skipPostAgentRunAfterDeferredNewSessionRequest = false;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -521,6 +531,13 @@ export class AgentSession {
 		// Notify all listeners
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
 
+		if (event.type === "agent_end") {
+			const requestResult = await this._drainPendingNewSessionRequest();
+			if (requestResult === "replaced") {
+				this._skipPostAgentRunAfterDeferredNewSessionRequest = true;
+			}
+		}
+
 		// Handle session persistence
 		if (event.type === "message_end") {
 			// Check if this is a custom message from extensions
@@ -564,6 +581,62 @@ export class AgentSession {
 			}
 		}
 	};
+
+	private async _requestNewSession(options?: RequestNewSessionOptions): Promise<RequestNewSessionResult> {
+		if (this._pendingNewSessionRequest) {
+			return { queued: false, reason: "already_pending" };
+		}
+
+		let resolveCompletion: (result: { cancelled: boolean }) => void = () => {};
+		let rejectCompletion: (error: unknown) => void = () => {};
+		const completion = new Promise<{ cancelled: boolean }>((resolve, reject) => {
+			resolveCompletion = resolve;
+			rejectCompletion = reject;
+		});
+		completion.catch(() => undefined);
+
+		this._pendingNewSessionRequest = {
+			options,
+			resolve: resolveCompletion,
+			reject: rejectCompletion,
+		};
+		return { queued: true, completion };
+	}
+
+	private async _drainPendingNewSessionRequest(): Promise<"none" | "cancelled" | "replaced" | "failed"> {
+		const request = this._pendingNewSessionRequest;
+		if (!request) {
+			return "none";
+		}
+		this._pendingNewSessionRequest = undefined;
+
+		const newSession = this._extensionCommandContextActions?.newSession;
+		if (!newSession) {
+			const error = new Error("ctx.requestNewSession() requires session replacement support in this mode.");
+			request.reject(error);
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "request_new_session",
+				error: error.message,
+			});
+			return "failed";
+		}
+
+		try {
+			const result = await newSession(request.options);
+			request.resolve(result);
+			return result.cancelled ? "cancelled" : "replaced";
+		} catch (error) {
+			request.reject(error);
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "request_new_session",
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			return "failed";
+		}
+	}
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		const settings = this.settingsManager.getRetrySettings();
@@ -969,6 +1042,12 @@ export class AgentSession {
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
+		if (this._skipPostAgentRunAfterDeferredNewSessionRequest) {
+			this._skipPostAgentRunAfterDeferredNewSessionRequest = false;
+			this._lastAssistantMessage = undefined;
+			return false;
+		}
+
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
@@ -2329,6 +2408,7 @@ export class AgentSession {
 					})();
 				},
 				getSystemPrompt: () => this.systemPrompt,
+				requestNewSession: (options) => this._requestNewSession(options),
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
 			},
 			{
