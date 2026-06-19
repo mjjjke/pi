@@ -36,6 +36,7 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+import { instructionContentToText, isInstructionMessage } from "../providers/instruction-messages.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -898,7 +899,13 @@ function buildParams(
 	const compat = getAnthropicCompat(model);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl, compat.allowEmptySignature),
+		messages: convertMessages(
+			context.messages,
+			model,
+			isOAuthToken,
+			cacheControl,
+			compat.allowEmptySignature,
+		) as MessageParam[],
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -998,22 +1005,43 @@ function normalizeToolCallId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 }
 
-function convertMessages(
+type AnthropicSystemMessageParam = { role: "system"; content: ContentBlockParam[] };
+type AnthropicMessageParam = MessageParam | AnthropicSystemMessageParam;
+
+export function convertMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
-): MessageParam[] {
-	const params: MessageParam[] = [];
+): AnthropicMessageParam[] {
+	const params: AnthropicMessageParam[] = [];
 
 	// Transform messages for cross-provider compatibility
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
 
+	const pendingInstructions: string[] = [];
+	let canPlacePendingInstruction = false;
+	const flushPendingInstructions = () => {
+		if (pendingInstructions.length === 0) return;
+		if (canPlacePendingInstruction) {
+			params.push({
+				role: "system",
+				content: [{ type: "text", text: pendingInstructions.join("\n\n") }],
+			});
+		}
+		pendingInstructions.length = 0;
+	};
+
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
 
-		if (msg.role === "user") {
+		if (isInstructionMessage(msg)) {
+			const text = sanitizeSurrogates(instructionContentToText(msg.content));
+			if (text.trim().length === 0) continue;
+			pendingInstructions.push(text);
+		} else if (msg.role === "user") {
+			const previousParamCount = params.length;
 			if (typeof msg.content === "string") {
 				if (msg.content.trim().length > 0) {
 					params.push({
@@ -1045,13 +1073,18 @@ function convertMessages(
 					}
 					return true;
 				});
-				if (filteredBlocks.length === 0) continue;
-				params.push({
-					role: "user",
-					content: filteredBlocks,
-				});
+				if (filteredBlocks.length > 0) {
+					params.push({
+						role: "user",
+						content: filteredBlocks,
+					});
+				}
+			}
+			if (params.length > previousParamCount) {
+				canPlacePendingInstruction = true;
 			}
 		} else if (msg.role === "assistant") {
+			flushPendingInstructions();
 			const blocks: ContentBlockParam[] = [];
 
 			for (const block of msg.content) {
@@ -1103,11 +1136,15 @@ function convertMessages(
 					});
 				}
 			}
-			if (blocks.length === 0) continue;
+			if (blocks.length === 0) {
+				canPlacePendingInstruction = false;
+				continue;
+			}
 			params.push({
 				role: "assistant",
 				content: blocks,
 			});
+			canPlacePendingInstruction = false;
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
@@ -1141,20 +1178,36 @@ function convertMessages(
 				role: "user",
 				content: toolResults,
 			});
+			canPlacePendingInstruction = true;
 		}
 	}
+	if (canPlacePendingInstruction) {
+		flushPendingInstructions();
+	}
 
-	// Add cache_control to the last user message to cache conversation history
+	// Add cache_control to the last user message to cache conversation history.
+	// Mid-conversation system messages may legally follow the last user; keep the
+	// cache marker on the real conversation message instead of the instruction.
 	if (cacheControl && params.length > 0) {
-		const lastMessage = params[params.length - 1];
-		if (lastMessage.role === "user") {
+		let lastUserIndex = -1;
+		for (let i = params.length - 1; i >= 0; i--) {
+			if (params[i].role === "user") {
+				lastUserIndex = i;
+				break;
+			}
+		}
+		const trailingMessages = lastUserIndex >= 0 ? params.slice(lastUserIndex + 1) : [];
+		const canCacheLastUser = trailingMessages.every((message) => message.role === "system");
+		if (lastUserIndex >= 0 && canCacheLastUser) {
+			const lastMessage = params[lastUserIndex];
 			if (Array.isArray(lastMessage.content)) {
 				const lastBlock = lastMessage.content[lastMessage.content.length - 1];
 				if (
 					lastBlock &&
 					(lastBlock.type === "text" || lastBlock.type === "image" || lastBlock.type === "tool_result")
 				) {
-					(lastBlock as any).cache_control = cacheControl;
+					(lastBlock as ContentBlockParam & { cache_control?: CacheControlEphemeral }).cache_control =
+						cacheControl;
 				}
 			} else if (typeof lastMessage.content === "string") {
 				lastMessage.content = [
@@ -1163,7 +1216,7 @@ function convertMessages(
 						text: lastMessage.content,
 						cache_control: cacheControl,
 					},
-				] as any;
+				];
 			}
 		}
 	}

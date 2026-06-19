@@ -284,6 +284,12 @@ describe("harness compaction", () => {
 			timestamp: Date.now(),
 		};
 
+		expect(estimateTokens({ role: "system", content: "system instruction", timestamp: Date.now() })).toBeGreaterThan(
+			0,
+		);
+		expect(
+			estimateTokens({ role: "developer", content: "developer instruction", timestamp: Date.now() }),
+		).toBeGreaterThan(0);
 		expect(estimateTokens({ role: "user", content: "plain user", timestamp: Date.now() })).toBeGreaterThan(0);
 		expect(estimateTokens(assistantWithThinkingAndTool)).toBeGreaterThan(0);
 		expect(estimateTokens(customString)).toBeGreaterThan(0);
@@ -427,6 +433,20 @@ describe("harness compaction", () => {
 		const compaction = createCompactionEntry("already compacted", "entry-keep");
 		expect(getOrThrow(prepareCompaction([compaction], DEFAULT_COMPACTION_SETTINGS))).toBeUndefined();
 		expect(getOrThrow(prepareCompaction([], DEFAULT_COMPACTION_SETTINGS))).toBeUndefined();
+	});
+
+	it("serializes conversation with instruction messages", () => {
+		const result = serializeConversation([
+			{ role: "system", content: "system instruction", timestamp: Date.now() },
+			{
+				role: "developer",
+				content: [{ type: "text", text: "developer instruction" }],
+				timestamp: Date.now(),
+			},
+		] as Message[]);
+
+		expect(result).toContain("[System]: system instruction");
+		expect(result).toContain("[Developer]: developer instruction");
 	});
 
 	it("serializes conversation with truncated tool results", () => {

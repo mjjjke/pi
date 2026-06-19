@@ -378,6 +378,8 @@ export interface ExtensionCommandContext extends ExtensionContext {
  * This is passed to `withSession()` callbacks on `newSession()`, `fork()`, and `switchSession()`.
  */
 export interface ReplacedSessionContext extends ExtensionCommandContext {
+	appendDeveloperMessage(content: string | TextContent[]): void;
+
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -1234,6 +1236,14 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
+	/**
+	 * Append a passive, persisted developer instruction message to the conversation.
+	 * Canonical role is `developer`; the wire role is resolved per provider at
+	 * serialization (Anthropic → system; OpenAI → developer, or system when the
+	 * model lacks developer-role support). Does NOT trigger a turn.
+	 */
+	appendDeveloperMessage(content: string | TextContent[]): void;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1416,7 +1426,9 @@ export interface ProviderModelConfig {
 	maxTokens: number;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
-	/** OpenAI compatibility settings. */
+	/** Model-level feature support metadata. */
+	capabilities?: Model<Api>["capabilities"];
+	/** Provider/API compatibility settings. */
 	compat?: Model<Api>["compat"];
 }
 
@@ -1458,6 +1470,8 @@ export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: { deliverAs?: "steer" | "followUp" },
 ) => void;
+
+export type AppendDeveloperMessageHandler = (content: string | TextContent[]) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
@@ -1517,6 +1531,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	appendDeveloperMessage: AppendDeveloperMessageHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

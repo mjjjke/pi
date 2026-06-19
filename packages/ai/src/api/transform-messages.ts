@@ -1,3 +1,4 @@
+import { isInstructionMessage, supportsMidConversationInstructionMessages } from "../providers/instruction-messages.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -69,11 +70,14 @@ export function transformMessages<TApi extends Api>(
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 	const imageAwareMessages = downgradeUnsupportedImages(messages, model);
+	const instructionAwareMessages = supportsMidConversationInstructionMessages(model)
+		? imageAwareMessages
+		: imageAwareMessages.filter((message) => !isInstructionMessage(message));
 
 	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
-	const transformed = imageAwareMessages.map((msg) => {
-		// User messages pass through unchanged
-		if (msg.role === "user") {
+	const transformed = instructionAwareMessages.map((msg) => {
+		// User and instruction messages pass through unchanged
+		if (msg.role === "user" || isInstructionMessage(msg)) {
 			return msg;
 		}
 
@@ -204,8 +208,8 @@ export function transformMessages<TApi extends Api>(
 		} else if (msg.role === "toolResult") {
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
-		} else if (msg.role === "user") {
-			// User message interrupts tool flow - insert synthetic results for orphaned calls
+		} else if (msg.role === "user" || isInstructionMessage(msg)) {
+			// User and instruction messages interrupt tool flow - insert synthetic results for orphaned calls
 			insertSyntheticToolResults();
 			result.push(msg);
 		} else {

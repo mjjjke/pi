@@ -383,6 +383,32 @@ describe("ModelRegistry", () => {
 			expect(compat?.maxTokensField).toBe("max_completion_tokens");
 		});
 
+		test("custom model capabilities are parsed", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					models: [
+						{
+							id: "demo-model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+							capabilities: { midConversationInstructionMessages: true },
+						},
+					],
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			expect(registry.find("demo", "demo-model")?.capabilities).toEqual({
+				midConversationInstructionMessages: true,
+			});
+		});
+
 		test("provider-level compat applies to built-in models", () => {
 			writeRawModelsJson({
 				openrouter: {
@@ -707,6 +733,24 @@ describe("ModelRegistry", () => {
 			// Should have both the new routing AND preserve other compat settings
 			const compat = sonnet?.compat as OpenAICompletionsCompat | undefined;
 			expect(compat?.openRouterRouting).toEqual({ order: ["anthropic", "together"] });
+		});
+
+		test("model override merges capabilities", () => {
+			writeRawModelsJson({
+				openrouter: {
+					modelOverrides: {
+						"anthropic/claude-sonnet-4": {
+							capabilities: { midConversationInstructionMessages: false },
+						},
+					},
+				},
+			});
+
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const models = getModelsForProvider(registry, "openrouter");
+			const sonnet = models.find((m) => m.id === "anthropic/claude-sonnet-4");
+
+			expect(sonnet?.capabilities?.midConversationInstructionMessages).toBe(false);
 		});
 
 		test("multiple model overrides on same provider", () => {

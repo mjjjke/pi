@@ -72,6 +72,18 @@ interface ToolCall {
 ### Base Message Types (from pi-ai)
 
 ```typescript
+interface SystemMessage {
+  role: "system";
+  content: string | TextContent[];
+  timestamp: number;  // Unix ms
+}
+
+interface DeveloperMessage {
+  role: "developer";
+  content: string | TextContent[];
+  timestamp: number;  // Unix ms
+}
+
 interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
@@ -159,6 +171,8 @@ interface CompactionSummaryMessage {
 
 ```typescript
 type AgentMessage =
+  | SystemMessage
+  | DeveloperMessage
   | UserMessage
   | AssistantMessage
   | ToolResultMessage
@@ -203,9 +217,12 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 
 ```json
 {"type":"message","id":"a1b2c3d4","parentId":"prev1234","timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"Hello"}}
-{"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi!"}],"provider":"anthropic","model":"claude-sonnet-4-5","usage":{...},"stopReason":"stop"}}
-{"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false}}
+{"type":"message","id":"b2c3d4e5","parentId":"a1b2c3d4","timestamp":"2024-12-03T14:00:01.500Z","message":{"role":"developer","content":"Prefer concise answers.","timestamp":1701612001500}}
+{"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi!"}],"provider":"anthropic","model":"claude-opus-4-8","usage":{...},"stopReason":"stop"}}
+{"type":"message","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false}}
 ```
+
+`system` and `developer` entries are text-only instruction messages. They can be injected ephemerally by extensions in the `context` event; extensions can also persist passive developer instructions with `pi.appendDeveloperMessage()`. Providers that do not support mid-conversation instruction messages drop them at serialization time rather than failing the session.
 
 ### ModelChangeEntry
 

@@ -178,6 +178,9 @@ function toolResultToText(message: ToolResultMessage): string {
 }
 
 function messageToText(message: Message): string {
+	if (message.role === "system" || message.role === "developer") {
+		return contentToText(message.content);
+	}
 	if (message.role === "user") {
 		return contentToText(message.content);
 	}

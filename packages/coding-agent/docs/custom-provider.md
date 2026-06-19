@@ -706,6 +706,12 @@ interface ProviderModelConfig {
   /** Custom headers for this specific model. */
   headers?: Record<string, string>;
 
+  /** Model-level feature support metadata. */
+  capabilities?: {
+    /** Allows first-class mid-conversation system/developer messages. */
+    midConversationInstructionMessages?: boolean;
+  };
+
   /** Compatibility settings for the selected API. */
   compat?: {
     // openai-completions
@@ -735,3 +741,4 @@ interface ProviderModelConfig {
 
 `openrouter` sends `reasoning: { effort }`. `deepseek` sends `thinking: { type: "enabled" | "disabled" }` and `reasoning_effort` when enabled. `together` sends `reasoning: { enabled }` and also `reasoning_effort` when `supportsReasoningEffort` is enabled. `qwen` is for DashScope-style top-level `enable_thinking`. Use `qwen-chat-template` for local Qwen-compatible servers that read `chat_template_kwargs.enable_thinking` and need `preserve_thinking`. Use `chat-template` for configurable `chat_template_kwargs`, for example DeepSeek V3.x behind vLLM with `chatTemplateKwargs: { "thinking": { "$var": "thinking.enabled" } }`.
 `cacheControlFormat: "anthropic"` applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content.
+Use `capabilities.midConversationInstructionMessages` for model features such as first-class mid-conversation `system`/`developer` messages; keep `compat` for provider wire-format quirks.

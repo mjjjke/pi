@@ -629,11 +629,36 @@ pi.on("context", async (event, ctx) => {
 });
 ```
 
+You can also inject first-class mid-conversation instruction messages. These are text-only `system` or `developer` messages passed through provider serialization without rewriting provider payloads:
+
+```typescript
+import { supportsMidConversationInstructionMessages } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("context", async (event, ctx) => {
+    if (!ctx.model || !supportsMidConversationInstructionMessages(ctx.model)) {
+      ctx.ui.notify("Current model does not support mid-conversation instructions", "warning");
+      return;
+    }
+
+    return {
+      messages: [
+        ...event.messages,
+        { role: "developer", content: "Prefer minimal, reversible changes.", timestamp: Date.now() },
+      ],
+    };
+  });
+}
+```
+
+If a persisted or context-injected `system` or `developer` instruction message reaches a model/provider that does not support it, Pi drops that instruction at provider serialization time rather than failing the request. Use `supportsMidConversationInstructionMessages()` when an extension should warn or skip proactively. For custom models, enable this only with model metadata: `capabilities: { midConversationInstructionMessages: true }`. Pi normalizes Anthropic instruction placement automatically, serializing first-class instruction messages as Anthropic `system` messages in a valid position.
+
 #### before_provider_request
 
 Fired after the provider-specific payload is built, right before the request is sent. Handlers run in extension load order. Returning `undefined` keeps the payload unchanged. Returning any other value replaces the payload for later handlers and for the actual request.
 
-This hook can rewrite provider-level system instructions or remove them entirely. Those payload-level changes are not reflected by `ctx.getSystemPrompt()`, which reports Pi's system prompt string rather than the final serialized provider payload.
+Prefer the `context` event with first-class `system`/`developer` messages for high-priority instructions. Use this hook for debugging provider serialization, cache behavior, or provider-specific experiments that cannot be expressed in Pi's message model. Payload-level changes are not reflected by `ctx.getSystemPrompt()`, which reports Pi's system prompt string rather than the final serialized provider payload.
 
 ```typescript
 pi.on("before_provider_request", (event, ctx) => {
@@ -1182,7 +1207,7 @@ pi.registerCommand("switch", {
 
 ### Session replacement lifecycle and footguns
 
-`withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
+`withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with `appendDeveloperMessage()` plus async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
 
 Lifecycle and footguns:
 - `withSession` runs only after the old session has emitted `session_shutdown`, the old runtime has been torn down, the replacement session has been rebound, and the new extension instance has already received `session_start`.
@@ -1386,6 +1411,17 @@ pi.sendUserMessage("And then summarize", { deliverAs: "followUp" });
 When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
+
+### pi.appendDeveloperMessage(content)
+
+Append a passive, persisted developer instruction message to the conversation. The canonical role is `developer`; the wire role is resolved per provider at serialization (Anthropic serializes it as `system`; OpenAI uses `developer`, or `system` when the model lacks developer-role support). This does **not** trigger a turn.
+
+```typescript
+pi.appendDeveloperMessage("Prefer concise, reversible changes.");
+pi.appendDeveloperMessage([{ type: "text", text: "Stay in plan mode until approved." }]);
+```
+
+Blank content is ignored. Calls are allowed while the session is idle and from `agent_end` handlers. Calls during other active-run events, including `before_provider_request`, throw; wait for idle first if an interactive action occurs mid-stream.
 
 ### pi.appendEntry(customType, data?)
 

@@ -13,6 +13,11 @@ import type {
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
 import { calculateCost } from "../models.ts";
+import {
+	instructionContentToText,
+	isInstructionMessage,
+	resolveInstructionRole,
+} from "../providers/instruction-messages.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -134,7 +139,14 @@ export function convertResponsesMessages<TApi extends Api>(
 
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
-		if (msg.role === "user") {
+		if (isInstructionMessage(msg)) {
+			const content = sanitizeSurrogates(instructionContentToText(msg.content));
+			if (content.trim().length === 0) continue;
+			messages.push({
+				role: resolveInstructionRole(model, msg.role),
+				content: [{ type: "input_text", text: content }],
+			});
+		} else if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				messages.push({
 					role: "user",

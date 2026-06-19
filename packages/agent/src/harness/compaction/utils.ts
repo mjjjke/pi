@@ -92,7 +92,16 @@ export function serializeConversation(messages: Message[]): string {
 	const parts: string[] = [];
 
 	for (const msg of messages) {
-		if (msg.role === "user") {
+		if (msg.role === "system" || msg.role === "developer") {
+			const content =
+				typeof msg.content === "string"
+					? msg.content
+					: msg.content
+							.filter((c): c is { type: "text"; text: string } => c.type === "text")
+							.map((c) => c.text)
+							.join("");
+			if (content) parts.push(`[${msg.role === "system" ? "System" : "Developer"}]: ${content}`);
+		} else if (msg.role === "user") {
 			const content =
 				typeof msg.content === "string"
 					? msg.content

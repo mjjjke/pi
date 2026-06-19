@@ -3177,6 +3177,12 @@ export class InteractiveMode {
 				// Tool results are rendered inline with tool calls, handled separately
 				break;
 			}
+			case "system":
+			case "developer": {
+				// Mid-conversation instruction messages are provider-facing context.
+				// They are preserved in session state but not rendered as chat turns.
+				break;
+			}
 			default: {
 				const _exhaustive: never = message;
 			}

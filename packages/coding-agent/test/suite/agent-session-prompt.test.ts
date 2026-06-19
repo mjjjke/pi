@@ -248,6 +248,57 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
+	it("appendDeveloperMessage persists passively from idle extension commands", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("mask", {
+						description: "mask",
+						handler: async () => {
+							pi.appendDeveloperMessage("Prefer minimal diffs.");
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("should stay queued")]);
+
+		await harness.session.prompt("/mask");
+
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["developer"]);
+		expect(getMessageText(harness.session.messages[0]!)).toBe("Prefer minimal diffs.");
+		const entries = harness.sessionManager.getEntries();
+		expect(entries).toHaveLength(1);
+		expect(entries[0]).toMatchObject({
+			type: "message",
+			message: { role: "developer", content: "Prefer minimal diffs." },
+		});
+	});
+
+	it("appendDeveloperMessage ignores blank content", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("blank", {
+						description: "blank",
+						handler: async () => {
+							pi.appendDeveloperMessage("   ");
+							pi.appendDeveloperMessage([{ type: "text", text: "\t" }]);
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		await harness.session.prompt("/blank");
+
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.sessionManager.getEntries()).toEqual([]);
+	});
+
 	it("sendUserMessage while idle triggers a turn", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -258,6 +309,137 @@ describe("AgentSession prompt characterization", () => {
 
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 		expect(getMessageText(harness.session.messages[0]!)).toBe("from extension");
+	});
+
+	it("appendDeveloperMessage is allowed from agent_end handlers and affects the next turn", async () => {
+		const idleDuringAgentEnd: boolean[] = [];
+		const secondTurnRoles: string[][] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("agent_end", (_event, ctx) => {
+						idleDuringAgentEnd.push(ctx.isIdle());
+						if (idleDuringAgentEnd.length === 1) {
+							pi.appendDeveloperMessage("Post-turn mask.");
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			(context) => {
+				secondTurnRoles.push(context.messages.map((message) => message.role));
+				return fauxAssistantMessage("second");
+			},
+		]);
+
+		await harness.session.prompt("first prompt");
+		await harness.session.prompt("second prompt");
+
+		expect(idleDuringAgentEnd[0]).toBe(false);
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"developer",
+			"user",
+			"assistant",
+		]);
+		expect(secondTurnRoles[0]).toEqual(["user", "assistant", "developer", "user"]);
+		const developerEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "developer");
+		expect(developerEntry).toMatchObject({
+			type: "message",
+			message: { role: "developer", content: "Post-turn mask." },
+		});
+	});
+
+	it("appendDeveloperMessage remains allowed after async agent_end handler work", async () => {
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("agent_end", async () => {
+						await Promise.resolve();
+						pi.appendDeveloperMessage("Async post-turn mask.");
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("prompt");
+
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant", "developer"]);
+		expect(getMessageText(harness.session.messages[2]!)).toBe("Async post-turn mask.");
+	});
+
+	it("appendDeveloperMessage does not block queued agent_end follow-ups", async () => {
+		const followUpContexts: string[][] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					let queued = false;
+					pi.on("agent_end", () => {
+						if (queued) return;
+						queued = true;
+						pi.appendDeveloperMessage("Follow-up mask.");
+						pi.sendUserMessage("follow-up", { deliverAs: "followUp" });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			(context) => {
+				followUpContexts.push(context.messages.map((message) => message.role));
+				return fauxAssistantMessage("followed");
+			},
+		]);
+
+		await harness.session.prompt("prompt");
+
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"developer",
+			"user",
+			"assistant",
+		]);
+		expect(followUpContexts[0]).toEqual(["user", "assistant", "developer", "user"]);
+	});
+
+	it("appendDeveloperMessage rejects active-run handlers before agent_end", async () => {
+		let errorMessage: string | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_end", (event) => {
+						if (event.message.role !== "user" || errorMessage) return;
+						try {
+							pi.appendDeveloperMessage("Too early.");
+						} catch (error) {
+							errorMessage = error instanceof Error ? error.message : String(error);
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("prompt");
+
+		expect(errorMessage).toMatch(/idle or from an agent_end extension handler/);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "message" && entry.message.role === "developer"),
+		).toBe(false);
 	});
 
 	it("does not report streamingBehavior to input handlers while idle", async () => {

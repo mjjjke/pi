@@ -368,6 +368,18 @@ export interface Usage {
 
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
+export interface SystemMessage {
+	role: "system";
+	content: string | TextContent[];
+	timestamp: number; // Unix timestamp in milliseconds
+}
+
+export interface DeveloperMessage {
+	role: "developer";
+	content: string | TextContent[];
+	timestamp: number; // Unix timestamp in milliseconds
+}
+
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
@@ -399,7 +411,7 @@ export interface ToolResultMessage<TDetails = any> {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;
+export type Message = SystemMessage | DeveloperMessage | UserMessage | AssistantMessage | ToolResultMessage;
 
 export type ImagesInputContent = TextContent | ImageContent;
 export type ImagesOutputContent = TextContent | ImageContent;
@@ -569,6 +581,11 @@ export interface AnthropicMessagesCompat {
 	allowEmptySignature?: boolean;
 }
 
+export interface ModelCapabilities {
+	/** Whether this model supports first-class mid-conversation system/developer messages. */
+	midConversationInstructionMessages?: boolean;
+}
+
 /**
  * OpenRouter provider routing preferences.
  * Controls which upstream providers OpenRouter routes requests to.
@@ -679,10 +696,12 @@ export interface Model<TApi extends Api> {
 	contextWindow: number;
 	maxTokens: number;
 	headers?: Record<string, string>;
+	/** Model-level feature support metadata. */
+	capabilities?: ModelCapabilities;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"
 		? OpenAICompletionsCompat
-		: TApi extends "openai-responses"
+		: TApi extends "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
 			? OpenAIResponsesCompat
 			: TApi extends "anthropic-messages"
 				? AnthropicMessagesCompat

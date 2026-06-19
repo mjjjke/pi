@@ -178,6 +178,7 @@ describe("regression #2860: replaced session callbacks", () => {
 								} catch {
 									stalePiThrows = true;
 								}
+								replacedCtx.appendDeveloperMessage("Replacement session mask.");
 								await replacedCtx.sendUserMessage("Hello from the new session!");
 							},
 						});
@@ -197,6 +198,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(staleCtxThrows).toBe(true);
 		expect(stalePiThrows).toBe(true);
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
+			"developer:Replacement session mask.",
 			"user:Hello from the new session!",
 			"assistant:hello reply",
 		]);

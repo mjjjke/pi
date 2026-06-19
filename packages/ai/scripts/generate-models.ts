@@ -9,7 +9,18 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/api/cloudflare.ts";
-import type { AnthropicMessagesCompat, Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.ts";
+import {
+	anthropicSupportsMidConversationInstructions,
+	openAiSupportsMidConversationInstructions,
+} from "../src/providers/instruction-messages.ts";
+import type {
+	AnthropicMessagesCompat,
+	Api,
+	KnownProvider,
+	Model,
+	ModelCapabilities,
+	OpenAICompletionsCompat,
+} from "../src/types.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -224,6 +235,45 @@ const GITHUB_COPILOT_THINKING_LEVEL_OVERRIDES = {
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
+}
+
+const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
+
+function getNativeModelId(modelId: string): string {
+	return modelId.split("/").at(-1) ?? modelId;
+}
+
+function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities | undefined {
+	const capabilities: ModelCapabilities = { ...model.capabilities };
+	switch (model.api) {
+		case "anthropic-messages": {
+			const nativeModelId = getNativeModelId(model.id);
+			if (
+				capabilities.midConversationInstructionMessages === undefined &&
+				model.provider === "anthropic" &&
+				nativeModelId.startsWith("claude-") &&
+				anthropicSupportsMidConversationInstructions(nativeModelId)
+			) {
+				capabilities.midConversationInstructionMessages = true;
+			}
+			break;
+		}
+		case "openai-completions":
+		case "openai-responses":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			if (
+				capabilities.midConversationInstructionMessages === undefined &&
+				FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(model.provider) &&
+				openAiSupportsMidConversationInstructions(model.id)
+			) {
+				capabilities.midConversationInstructionMessages = true;
+			}
+			break;
+		default:
+			break;
+	}
+	return Object.values(capabilities).some((value) => value !== undefined) ? capabilities : undefined;
 }
 
 function getTogetherCompat(modelId: string, reasoning: boolean): OpenAICompletionsCompat {
@@ -2270,6 +2320,10 @@ async function generateModels() {
 		}
 		if (model.headers) {
 			output += `${indent}\theaders: ${JSON.stringify(model.headers)},\n`;
+		}
+		const capabilities = getGeneratedCapabilities(model);
+		if (capabilities) {
+			output += `${indent}\tcapabilities: ${JSON.stringify(capabilities)},\n`;
 		}
 		if (model.compat) {
 			output += `${indent}\tcompat: ${JSON.stringify(model.compat)},\n`;

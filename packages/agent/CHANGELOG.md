@@ -29,6 +29,7 @@
 ### Fixed
 
 - Fixed Node execution environment commands through legacy WSL `bash.exe` to pass scripts over stdin so shell variables expand in the target bash ([#5893](https://github.com/earendil-works/pi/issues/5893)).
+- Fixed queued continuations to ignore trailing passive instruction messages when deciding whether to drain queued messages.
 
 ## [0.79.8] - 2026-06-19
 

@@ -7,6 +7,7 @@ import type {
 	FunctionTool,
 } from "@mistralai/mistralai/models/components";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { isInstructionMessage } from "../providers/instruction-messages.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -514,6 +515,10 @@ function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompl
 	const result: ChatCompletionStreamRequestMessage[] = [];
 
 	for (const msg of messages) {
+		if (isInstructionMessage(msg)) {
+			throw new Error("Mistral Conversations does not support mid-conversation system/developer messages.");
+		}
+
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				result.push({ role: "user", content: sanitizeSurrogates(msg.content) });

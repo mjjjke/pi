@@ -81,6 +81,10 @@
 
 - Added inherited configurable `chat-template` thinking support for OpenAI-compatible providers that use `chat_template_kwargs`, such as DeepSeek models behind vLLM ([#5673](https://github.com/earendil-works/pi/issues/5673)).
 
+### Added
+
+- Added extension `pi.appendDeveloperMessage()` for passive persisted developer instruction messages.
+
 ### Fixed
 
 - Fixed inherited Fireworks GLM-5.2 metadata to use the OpenAI-compatible Chat Completions endpoint with `reasoning_effort` support ([#5923](https://github.com/earendil-works/pi/issues/5923)).

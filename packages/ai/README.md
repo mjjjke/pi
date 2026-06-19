@@ -124,6 +124,14 @@ const context: Context = {
   tools
 };
 
+// Optional: inject a first-class mid-conversation instruction for supported models
+// (requires model.capabilities.midConversationInstructionMessages; unsupported models fail fast)
+context.messages.push({
+  role: 'developer',
+  content: 'Prefer concise answers for the next response.',
+  timestamp: Date.now()
+});
+
 // Option 1: Streaming with all event types.
 // Auth resolves through the provider (OPENAI_API_KEY from the environment here).
 const s = models.stream(model, context);
@@ -1001,6 +1009,8 @@ Some OpenAI-compatible servers do not understand the `developer` role used for r
 
 Use model-level `thinkingLevelMap` to describe model-specific thinking controls. Keys are pi thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`). Missing keys use provider defaults, string values are sent to the provider, and `null` marks a level unsupported.
 
+Use model-level `capabilities` for model features. For example, set `capabilities: { midConversationInstructionMessages: true }` only for models/endpoints that accept first-class in-conversation `system`/`developer` messages.
+
 ```typescript
 const ollamaReasoningModel: Model<'openai-completions'> = {
   id: 'gpt-oss:20b',
@@ -1059,7 +1069,7 @@ Importing an implementation module loads its SDK. The `./api/<id>.lazy` wrappers
 
 ### OpenAI Compatibility Settings
 
-The `openai-completions` API is implemented by many providers with minor differences. By default, the library auto-detects compatibility settings based on `baseUrl` for a small set of known OpenAI-compatible providers (Cerebras, xAI, Chutes, DeepSeek, NVIDIA NIM, Together AI, zAi, OpenCode, Cloudflare Workers AI, etc.). For custom proxies or unknown endpoints, you can override these settings via the `compat` field. For `openai-responses` models, the compat field supports Responses-specific flags.
+The `openai-completions` API is implemented by many providers with minor differences. By default, the library auto-detects compatibility settings based on `baseUrl` for a small set of known OpenAI-compatible providers (Cerebras, xAI, Chutes, DeepSeek, NVIDIA NIM, Together AI, zAi, OpenCode, Cloudflare Workers AI, etc.). For custom proxies or unknown endpoints, you can override these wire-format settings via the `compat` field. Model features, such as support for mid-conversation instruction messages, belong in `capabilities`. For `openai-responses` models, the compat field supports Responses-specific flags.
 
 ```typescript
 interface OpenAICompletionsCompat {

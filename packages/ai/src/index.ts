@@ -24,6 +24,7 @@ export * from "./auth/types.ts";
 export * from "./images-models.ts";
 export * from "./models.ts";
 export * from "./providers/faux.ts";
+export * from "./providers/instruction-messages.ts";
 export * from "./session-resources.ts";
 export * from "./types.ts";
 export * from "./utils/diagnostics.ts";

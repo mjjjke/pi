@@ -155,6 +155,10 @@ const ProviderCompatSchema = Type.Union([
 	AnthropicMessagesCompatSchema,
 ]);
 
+const ModelCapabilitiesSchema = Type.Object({
+	midConversationInstructionMessages: Type.Optional(Type.Boolean()),
+});
+
 // Schema for custom model definition
 // Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
 const ModelDefinitionSchema = Type.Object({
@@ -176,6 +180,7 @@ const ModelDefinitionSchema = Type.Object({
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+	capabilities: Type.Optional(ModelCapabilitiesSchema),
 	compat: Type.Optional(ProviderCompatSchema),
 });
 
@@ -196,6 +201,7 @@ const ModelOverrideSchema = Type.Object({
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+	capabilities: Type.Optional(ModelCapabilitiesSchema),
 	compat: Type.Optional(ProviderCompatSchema),
 });
 
@@ -335,6 +341,11 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 			cacheRead: override.cost.cacheRead ?? model.cost.cacheRead,
 			cacheWrite: override.cost.cacheWrite ?? model.cost.cacheWrite,
 		};
+	}
+
+	// Merge capabilities
+	if (override.capabilities !== undefined) {
+		result.capabilities = { ...model.capabilities, ...override.capabilities };
 	}
 
 	// Deep merge compat
@@ -621,6 +632,7 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow ?? 128000,
 					maxTokens: modelDef.maxTokens ?? 16384,
 					headers: undefined,
+					capabilities: modelDef.capabilities,
 					compat,
 				} as Model<Api>);
 			}
@@ -936,6 +948,7 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow,
 					maxTokens: modelDef.maxTokens,
 					headers: undefined,
+					capabilities: modelDef.capabilities,
 					compat: modelDef.compat,
 				} as Model<Api>);
 			}
@@ -985,6 +998,7 @@ export interface ProviderConfigInput {
 		contextWindow: number;
 		maxTokens: number;
 		headers?: Record<string, string>;
+		capabilities?: Model<Api>["capabilities"];
 		compat?: Model<Api>["compat"];
 	}>;
 }

@@ -30,7 +30,12 @@ export type { QueueMode } from "./types.ts";
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
-		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+		(message) =>
+			message.role === "system" ||
+			message.role === "developer" ||
+			message.role === "user" ||
+			message.role === "assistant" ||
+			message.role === "toolResult",
 	);
 }
 
@@ -156,6 +161,18 @@ type ActiveRun = {
 	resolve: () => void;
 	abortController: AbortController;
 };
+
+function isInstructionMessage(message: AgentMessage): boolean {
+	return message.role === "system" || message.role === "developer";
+}
+
+function findLastNonInstructionMessage(messages: AgentMessage[]): AgentMessage | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (!isInstructionMessage(message)) return message;
+	}
+	return undefined;
+}
 
 /**
  * Stateful wrapper around the low-level agent loop.
@@ -340,7 +357,7 @@ export class Agent {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
 		}
 
-		const lastMessage = this._state.messages[this._state.messages.length - 1];
+		const lastMessage = findLastNonInstructionMessage(this._state.messages);
 		if (!lastMessage) {
 			throw new Error("No messages to continue from");
 		}

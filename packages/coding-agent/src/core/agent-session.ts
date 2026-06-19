@@ -23,7 +23,14 @@ import type {
 	AgentTool,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/pi-ai/compat";
+import type {
+	AssistantMessage,
+	DeveloperMessage,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+} from "@earendil-works/pi-ai/compat";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -299,6 +306,7 @@ export class AgentSession {
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _turnIndex = 0;
+	private _isEmittingAgentEndExtensionEvent = false;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -615,7 +623,12 @@ export class AgentSession {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
-			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			this._isEmittingAgentEndExtensionEvent = true;
+			try {
+				await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			} finally {
+				this._isEmittingAgentEndExtensionEvent = false;
+			}
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -1295,6 +1308,28 @@ export class AgentSession {
 				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
 			);
 		}
+	}
+
+	appendDeveloperMessage(content: string | TextContent[]): void {
+		const isBlank =
+			typeof content === "string"
+				? content.trim().length === 0
+				: content.every((part) => part.text.trim().length === 0);
+		if (isBlank) return;
+
+		if (this.isStreaming && !this._isEmittingAgentEndExtensionEvent) {
+			throw new Error(
+				"appendDeveloperMessage() can only be called while idle or from an agent_end extension handler.",
+			);
+		}
+
+		const message: DeveloperMessage = {
+			role: "developer",
+			content,
+			timestamp: Date.now(),
+		};
+		this.agent.state.messages.push(message);
+		this.sessionManager.appendMessage(message);
 	}
 
 	/**
@@ -2237,6 +2272,9 @@ export class AgentSession {
 						});
 					});
 				},
+				appendDeveloperMessage: (content) => {
+					this.appendDeveloperMessage(content);
+				},
 				appendEntry: (customType, data) => {
 					this.sessionManager.appendCustomEntry(customType, data);
 				},
@@ -2535,10 +2573,16 @@ export class AgentSession {
 			errorMessage: message.errorMessage || "Unknown error",
 		});
 
-		// Remove error message from agent state (keep in session for history)
+		// Remove error message from agent state (keep in session for history), ignoring
+		// passive instruction messages appended by agent_end handlers after the failed assistant.
 		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role === "system" || message.role === "developer") continue;
+			if (message.role === "assistant") {
+				this.agent.state.messages = [...messages.slice(0, i), ...messages.slice(i + 1)];
+			}
+			break;
 		}
 
 		// Wait with exponential backoff (abortable)
@@ -3138,6 +3182,7 @@ export class AgentSession {
 			{},
 			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
 		) as ReplacedSessionContext;
+		context.appendDeveloperMessage = (content) => this.appendDeveloperMessage(content);
 		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);
 		return context;
