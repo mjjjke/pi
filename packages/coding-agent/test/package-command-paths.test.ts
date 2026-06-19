@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,14 @@ describe("package commands", () => {
 	function getNewerPatchVersion(): string {
 		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
 		return `${major}.${minor}.${Number.parseInt(patch, 10) + 1}`;
+	}
+
+	function git(args: string[], cwd: string): string {
+		const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+		if (result.status !== 0) {
+			throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+		}
+		return result.stdout.trim();
 	}
 
 	async function runPackageCommandDirectly(args: string[]): Promise<void> {
@@ -374,7 +383,124 @@ describe("package commands", () => {
 		}
 	});
 
-	it("uses the update check version for forced self updates even when current", async () => {
+	it("delegates linked fork self-updates to a nested pi agent", async () => {
+		const repoRoot = join(tempDir, "fork");
+		const forkPackageDir = join(repoRoot, "packages", "coding-agent");
+		const upstreamDir = join(tempDir, "upstream");
+		const fakeEntrypoint = join(tempDir, "fake-pi.cjs");
+		const recordPath = join(tempDir, "fork-update-agent.json");
+		mkdirSync(forkPackageDir, { recursive: true });
+		mkdirSync(upstreamDir, { recursive: true });
+		git(["init", "--initial-branch=main"], repoRoot);
+		git(["remote", "add", "upstream", upstreamDir], repoRoot);
+		writeFileSync(
+			fakeEntrypoint,
+			`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify({argv:process.argv.slice(2),cwd:process.cwd(),env:{PI_FORK_UPDATE_AGENT:process.env.PI_FORK_UPDATE_AGENT,PI_SKIP_VERSION_CHECK:process.env.PI_SKIP_VERSION_CHECK}}));`,
+		);
+		const originalArgv1 = process.argv[1];
+		process.argv[1] = fakeEntrypoint;
+		process.env.PI_PACKAGE_DIR = forkPackageDir;
+		const fetchMock = vi.fn();
+		vi.stubGlobal("fetch", fetchMock);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+			expect(process.exitCode).toBeUndefined();
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(errorSpy).not.toHaveBeenCalled();
+			const record = JSON.parse(readFileSync(recordPath, "utf-8")) as {
+				argv: string[];
+				cwd: string;
+				env: { PI_FORK_UPDATE_AGENT?: string; PI_SKIP_VERSION_CHECK?: string };
+			};
+			expect(record.cwd).toBe(repoRoot);
+			expect(record.argv).toEqual([
+				"--print",
+				"--model",
+				"openai-codex/gpt-5.5",
+				"--thinking",
+				"low",
+				"--no-extensions",
+				"--no-skills",
+				"--tools",
+				"read,bash,edit,write",
+				expect.stringContaining("Update this local pi fork from upstream."),
+			]);
+			expect(record.argv[9]).toContain(`Repository root: ${repoRoot}`);
+			expect(record.env.PI_FORK_UPDATE_AGENT).toBe("1");
+			expect(record.env.PI_SKIP_VERSION_CHECK).toBe("1");
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).toContain("delegating update to pi agent");
+			expect(stdout).toContain("Updated pi fork");
+		} finally {
+			process.argv[1] = originalArgv1;
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("propagates nested pi agent failures during linked fork self-updates", async () => {
+		const repoRoot = join(tempDir, "failing-fork");
+		const forkPackageDir = join(repoRoot, "packages", "coding-agent");
+		const upstreamDir = join(tempDir, "failing-upstream");
+		const fakeEntrypoint = join(tempDir, "fake-pi-fail.cjs");
+		mkdirSync(forkPackageDir, { recursive: true });
+		mkdirSync(upstreamDir, { recursive: true });
+		git(["init", "--initial-branch=main"], repoRoot);
+		git(["remote", "add", "upstream", upstreamDir], repoRoot);
+		writeFileSync(fakeEntrypoint, "process.exit(23);");
+		const originalArgv1 = process.argv[1];
+		process.argv[1] = fakeEntrypoint;
+		process.env.PI_PACKAGE_DIR = forkPackageDir;
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--self"])).resolves.toBeUndefined();
+
+			expect(process.exitCode).toBe(23);
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("pi fork update agent exited with code 23");
+		} finally {
+			process.argv[1] = originalArgv1;
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("does not invoke the fork update agent for extension-only updates", async () => {
+		const repoRoot = join(tempDir, "extension-only-fork");
+		const forkPackageDir = join(repoRoot, "packages", "coding-agent");
+		const upstreamDir = join(tempDir, "extension-only-upstream");
+		const fakeEntrypoint = join(tempDir, "fake-pi-extension-only.cjs");
+		const recordPath = join(tempDir, "should-not-exist.json");
+		mkdirSync(forkPackageDir, { recursive: true });
+		mkdirSync(upstreamDir, { recursive: true });
+		git(["init", "--initial-branch=main"], repoRoot);
+		git(["remote", "add", "upstream", upstreamDir], repoRoot);
+		writeFileSync(fakeEntrypoint, `require("node:fs").writeFileSync(${JSON.stringify(recordPath)},"spawned");`);
+		const originalArgv1 = process.argv[1];
+		process.argv[1] = fakeEntrypoint;
+		process.env.PI_PACKAGE_DIR = forkPackageDir;
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			await expect(runPackageCommandDirectly(["update", "--extensions"])).resolves.toBeUndefined();
+
+			expect(process.exitCode).toBeUndefined();
+			expect(existsSync(recordPath)).toBe(false);
+		} finally {
+			process.argv[1] = originalArgv1;
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("uses global npmCommand and current package name for forced self updates without checking the api", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const projectPrefix = join(tempDir, "project-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");

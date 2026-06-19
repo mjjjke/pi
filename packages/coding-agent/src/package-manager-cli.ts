@@ -22,6 +22,7 @@ import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { spawnProcess } from "./utils/child-process.ts";
+import { detectForkSelfUpdatePlan, runForkSelfUpdateAgent } from "./utils/fork-self-update.ts";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
 	cleanupWindowsSelfUpdateQuarantine,
@@ -142,6 +143,11 @@ Options:
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
+
+Linked fork self-updates:
+  When ${APP_NAME} is running from a local git checkout with an upstream remote, self-updates delegate to
+  a nested ${APP_NAME} agent that rebases, rebuilds, checks, and verifies the linked fork. Set
+  PI_DISABLE_FORK_UPDATE_AGENT=1 to force the package-manager self-update path.
 
 Short forms:
   ${APP_NAME} update                Update pi only
@@ -719,6 +725,23 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
+					const forkUpdatePlan = detectForkSelfUpdatePlan({ packageDir: getPackageDir() });
+					if (forkUpdatePlan) {
+						console.log(
+							chalk.dim(
+								`Detected linked ${APP_NAME} fork at ${forkUpdatePlan.repoRoot}; delegating update to ${APP_NAME} agent.`,
+							),
+						);
+						const forkUpdateExitCode = await runForkSelfUpdateAgent(forkUpdatePlan);
+						if (forkUpdateExitCode !== 0) {
+							console.error(chalk.red(`${APP_NAME} fork update agent exited with code ${forkUpdateExitCode}`));
+							process.exitCode = forkUpdateExitCode;
+							return true;
+						}
+						console.log(chalk.green(`Updated ${APP_NAME} fork`));
+						return true;
+					}
+
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
 					if (!selfUpdatePlan.shouldRun) {
 						return true;
