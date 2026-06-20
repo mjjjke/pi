@@ -41,6 +41,7 @@ const openAICompletionsCompat = {
 	thinkingFormat: "openai",
 	openRouterRouting: {},
 	vercelGatewayRouting: {},
+	chatTemplateKwargs: {},
 	zaiToolStream: false,
 	supportsStrictMode: true,
 	cacheControlFormat: undefined,
