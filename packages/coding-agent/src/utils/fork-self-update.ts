@@ -35,29 +35,34 @@ export function buildForkSelfUpdatePrompt(repoRoot: string): string {
 
 Repository root: ${repoRoot}
 
-You are running from \`pi update\` in a nested Pi print-mode agent with low reasoning and only the read, bash, edit, and write built-in tools enabled. Do not call \`pi update\` from this task.
+You are running from \`pi update\` in a nested Pi print-mode agent with low reasoning and only the read, bash, edit, and write built-in tools enabled. Do not call \`pi update\` from this task. Use a report-only policy for post-rebase fixups: validate and classify remaining changes, but do not commit, autosquash, discard, or otherwise rewrite them unless the user separately requested it.
 
 Required workflow:
 1. Inspect state with \`git status --short\`, \`git branch --show-current\`, \`git remote -v\`, and \`git rev-parse --show-toplevel\`.
 2. Abort and report if the working tree has unrelated uncommitted changes. Allowed pre-existing local changes are only changes that clearly belong to this update flow or the user's fork patch stack; ask/report instead of guessing if unsure.
 3. Fetch upstream release tags with \`git fetch upstream --tags\`.
 4. Select the latest released version tag with \`git tag -l 'v*' --sort=-v:refname | head -1\`, verify it is non-empty, and report it.
-5. Rebase the current branch onto that latest released tag with \`git rebase <latest_tag>\`. Do not rebase onto \`upstream/main\`; it may contain unreleased commits.
-6. If rebase conflicts occur, resolve only files that belong to this fork patch stack or this update. Do not use \`git reset --hard\`, \`git stash\`, \`git clean\`, \`git add .\`, \`git add -A\`, or \`git commit --no-verify\`. Stage only explicit resolved paths. If a conflict is unrelated or unsafe, stop with the rebase in progress and report exact next steps.
+5. Rebase the current branch onto that latest released tag with \`GIT_EDITOR=true git rebase <latest_tag>\`. Do not rebase onto \`upstream/main\`; it may contain unreleased commits.
+6. If rebase conflicts occur, resolve only files that belong to this fork patch stack or this update. Do not use \`git reset --hard\`, \`git stash\`, \`git clean\`, \`git add .\`, \`git add -A\`, or \`git commit --no-verify\`. Stage only explicit resolved paths. Use \`GIT_EDITOR=true git rebase --continue\` for every continue. If a conflict is unrelated or unsafe, stop with the rebase in progress and report exact next steps.
 7. After a successful rebase, run \`npm install --ignore-scripts\`.
-8. Run \`npm run build\`.
-9. Run \`npm run check\`.
-10. Verify the global \`pi\` still points to this repo with:
+8. Run \`npm run build\`, then inspect \`git status --short\`.
+9. Run \`npm run check\`, then inspect \`git status --short\` again.
+10. If validation passes and \`git status --short\` is not empty, run \`git diff --stat\` and inspect relevant diffs enough to classify each changed file as one of: \`conflict-resolution\`, \`generated-by-build/check\`, \`validation-required-fixup\`, or \`unexpected\`.
+11. If any remaining changed file is \`unexpected\`, stop with a warning and do not claim the fork is updated.
+12. Verify the global \`pi\` still points to this repo with:
    - \`which pi\`
    - \`readlink -f "$(which pi)"\`
    - \`pi --version\`
-11. Report final status, latest release tag used, current HEAD, remaining \`git status --short\`, and whether the fork is updated.
+13. Report final status with: latest release tag used, current HEAD, \`which pi\`, resolved \`pi\` path, \`pi --version\`, final \`git status --short\`, \`git diff --stat\` if dirty, classification of remaining changed files, and exactly one status category: \`updated and clean\`, \`updated and validated, but dirty with expected changes\`, \`not fully updated: unexpected dirty changes\`, or \`not updated: stopped due to conflict/error\`.
 
 Safety rules:
 - Do not use destructive git commands.
 - Do not use \`git reset --hard\`, \`git stash\`, \`git clean\`, \`git add .\`, \`git add -A\`, or \`git commit --no-verify\`.
 - Do not force push.
 - Do not commit unless the user separately requested it.
+- Do not autosquash fixups or run interactive history rewrites unless the user separately requested it.
+- Do not discard generated files or validation fixups; report them instead.
+- Never say the fork is fully updated or clean unless \`git status --short\` is empty.
 `;
 }
 
@@ -123,6 +128,7 @@ export async function runForkSelfUpdateAgent(options: RunForkSelfUpdateOptions):
 	const env = {
 		...process.env,
 		...options.env,
+		GIT_EDITOR: "true",
 		PI_FORK_UPDATE_AGENT: "1",
 		PI_SKIP_VERSION_CHECK: "1",
 	};

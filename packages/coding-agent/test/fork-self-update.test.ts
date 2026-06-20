@@ -37,6 +37,23 @@ describe("fork self-update", () => {
 		expect(plan?.prompt).toContain("Repository root: /repo");
 		expect(plan?.prompt).toContain("git fetch upstream --tags");
 		expect(plan?.prompt).toContain("Do not rebase onto `upstream/main`");
+		expect(plan?.prompt).toContain("report-only policy for post-rebase fixups");
+		expect(plan?.prompt).toContain("GIT_EDITOR=true git rebase <latest_tag>");
+		expect(plan?.prompt).toContain("GIT_EDITOR=true git rebase --continue");
+		expect(plan?.prompt).toContain("git diff --stat");
+		expect(plan?.prompt).toContain("classification of remaining changed files");
+		expect(plan?.prompt).toContain("conflict-resolution");
+		expect(plan?.prompt).toContain("generated-by-build/check");
+		expect(plan?.prompt).toContain("validation-required-fixup");
+		expect(plan?.prompt).toContain("unexpected");
+		expect(plan?.prompt).toContain("updated and clean");
+		expect(plan?.prompt).toContain("updated and validated, but dirty with expected changes");
+		expect(plan?.prompt).toContain("not fully updated: unexpected dirty changes");
+		expect(plan?.prompt).toContain("not updated: stopped due to conflict/error");
+		expect(plan?.prompt).toContain("Do not autosquash fixups");
+		expect(plan?.prompt).toContain(
+			"Never say the fork is fully updated or clean unless `git status --short` is empty",
+		);
 	});
 
 	it("does not detect a fork outside a git worktree", () => {
@@ -95,7 +112,7 @@ describe("fork self-update", () => {
 			prompt: buildForkSelfUpdatePrompt("/repo"),
 			execPath: "/node",
 			entrypoint: "/repo/packages/coding-agent/dist/cli.js",
-			env: { EXISTING: "1" },
+			env: { EXISTING: "1", GIT_EDITOR: "code --wait" },
 			spawn: (command, args, options) => {
 				calls.push({ command, args, options });
 				return fakeChildProcess(7);
@@ -121,6 +138,7 @@ describe("fork self-update", () => {
 		]);
 		expect(calls[0]?.options.cwd).toBe("/repo");
 		expect(calls[0]?.options.stdio).toBe("inherit");
+		expect(calls[0]?.options.env.GIT_EDITOR).toBe("true");
 		expect(calls[0]?.options.env.PI_FORK_UPDATE_AGENT).toBe("1");
 		expect(calls[0]?.options.env.PI_SKIP_VERSION_CHECK).toBe("1");
 		expect(calls[0]?.options.env.EXISTING).toBe("1");
