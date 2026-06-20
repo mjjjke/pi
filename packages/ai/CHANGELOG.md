@@ -111,6 +111,7 @@ Migration guide:
 
 - Fixed Fireworks GLM-5.2 metadata to use the OpenAI-compatible Chat Completions endpoint with `reasoning_effort` support ([#5923](https://github.com/earendil-works/pi/issues/5923)).
 - Fixed OpenRouter GLM-5.2 metadata to expose `xhigh` reasoning and send OpenRouter's native `xhigh` effort ([#5770](https://github.com/earendil-works/pi/issues/5770)).
+- Fixed Anthropic subscription OAuth login to use the `https://claude.com/cai/oauth/authorize` endpoint and drop the unused `org:create_api_key` scope.
 - Fixed persisted mid-conversation instruction messages to be dropped on unsupported models instead of failing requests, and normalized Anthropic instruction placement.
 - Fixed GitHub Copilot OAuth model availability to use the authenticated account's model picker catalog ([#5897](https://github.com/earendil-works/pi/issues/5897)).
 
