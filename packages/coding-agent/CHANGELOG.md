@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added extension assistant message display transforms for TUI-only rendering changes that do not alter persisted messages or provider context.
+
 ## [0.80.2] - 2026-06-23
 
 ### Changed

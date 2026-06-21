@@ -2644,6 +2644,28 @@ pi.sendMessage({
 });
 ```
 
+To change how normal assistant messages display without changing the raw
+session/provider message, register an assistant display transform:
+
+```typescript
+pi.registerAssistantMessageDisplayTransform("my-extension", (message) => {
+  return message.content.map((block) => {
+    if (block.type !== "text") return block;
+    return { ...block, text: block.text.replace("<submit_work/>", "Plan submitted") };
+  });
+});
+```
+
+Assistant display transforms:
+- run only in interactive TUI rendering (`streaming`, `final`, and `restore` phases)
+- receive a frozen clone of the raw assistant message
+- return display-only text changes; JSONL, provider context, events, and session state are unchanged
+- run in extension load order, then registration order within each extension
+- may return `undefined` for no change, a string to replace aggregate text, a content array, or an assistant message
+- can only affect text blocks; thinking blocks, tool calls, and message metadata are preserved by pi
+
+See [assistant-display-transform.ts](../examples/extensions/assistant-display-transform.ts) for a boundary-marker example.
+
 ### Theme Colors
 
 All render functions receive a `theme` object. See [themes.md](themes.md) for creating custom themes and the full color palette.
@@ -2770,6 +2792,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |
 | **Messages & Communication** |||
 | `message-renderer.ts` | Custom message rendering | `registerMessageRenderer`, `sendMessage` |
+| `assistant-display-transform.ts` | Display-only assistant text transforms | `registerAssistantMessageDisplayTransform` |
 | `event-bus.ts` | Inter-extension events | `pi.events` |
 | **Session Metadata** |||
 | `session-name.ts` | Name sessions for selector | `setSessionName`, `getSessionName` |

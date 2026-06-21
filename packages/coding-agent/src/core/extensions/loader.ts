@@ -269,6 +269,11 @@ function createExtensionAPI(
 			extension.messageRenderers.set(customType, renderer as MessageRenderer);
 		},
 
+		registerAssistantMessageDisplayTransform(id, transform): void {
+			runtime.assertActive();
+			extension.assistantMessageDisplayTransforms.set(id, transform);
+		},
+
 		// Flag access - checks extension registered it, reads from runtime
 		getFlag(name: string): boolean | string | undefined {
 			runtime.assertActive();
@@ -420,6 +425,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		handlers: new Map(),
 		tools: new Map(),
 		messageRenderers: new Map(),
+		assistantMessageDisplayTransforms: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),

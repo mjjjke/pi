@@ -3,7 +3,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, Model } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -11,7 +11,13 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import {
+	cloneAssistantMessage,
+	deepFreeze,
+	sanitizeAssistantMessageDisplayTransformResult,
+} from "./assistant-message-display-transform.ts";
 import type {
+	AssistantMessageDisplayPhase,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
@@ -556,6 +562,45 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	applyAssistantMessageDisplayTransforms(
+		message: AssistantMessage,
+		options: { phase: AssistantMessageDisplayPhase },
+	): AssistantMessage {
+		if (this.mode !== "tui") {
+			return message;
+		}
+
+		let displayMessage: AssistantMessage | undefined;
+		let rawMessage: Readonly<AssistantMessage> | undefined;
+		for (const ext of this.extensions) {
+			for (const [transformId, transform] of ext.assistantMessageDisplayTransforms) {
+				try {
+					rawMessage ??= deepFreeze(cloneAssistantMessage(message));
+					displayMessage ??= cloneAssistantMessage(message);
+					const currentDisplayMessage = deepFreeze(cloneAssistantMessage(displayMessage));
+					const result = transform(rawMessage, {
+						phase: options.phase,
+						rawMessage,
+						displayMessage: currentDisplayMessage,
+						transformId,
+						extensionPath: ext.path,
+						mode: "tui",
+					});
+					displayMessage = sanitizeAssistantMessageDisplayTransformResult(displayMessage, result);
+				} catch (error) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: "assistant_message_display_transform",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			}
+		}
+
+		return displayMessage ?? message;
 	}
 
 	private resolveRegisteredCommands(): ResolvedCommand[] {

@@ -63,6 +63,7 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type {
+	AssistantMessageDisplayPhase,
 	AutocompleteProviderFactory,
 	EditorFactory,
 	ExtensionCommandContext,
@@ -2787,7 +2788,9 @@ export class InteractiveMode {
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
-					this.streamingComponent.updateContent(this.streamingMessage);
+					this.streamingComponent.updateContent(
+						this.getAssistantDisplayMessage(this.streamingMessage, "streaming"),
+					);
 					this.ui.requestRender();
 				}
 				break;
@@ -2795,7 +2798,9 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.streamingComponent.updateContent(this.streamingMessage);
+					this.streamingComponent.updateContent(
+						this.getAssistantDisplayMessage(this.streamingMessage, "streaming"),
+					);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -2840,7 +2845,7 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.streamingComponent.updateContent(this.streamingMessage);
+					this.streamingComponent.updateContent(this.getAssistantDisplayMessage(this.streamingMessage, "final"));
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -3093,6 +3098,13 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private getAssistantDisplayMessage(
+		message: AssistantMessage,
+		phase: AssistantMessageDisplayPhase,
+	): AssistantMessage {
+		return this.session.extensionRunner.applyAssistantMessageDisplayTransforms(message, { phase });
+	}
+
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
@@ -3168,7 +3180,7 @@ export class InteractiveMode {
 			}
 			case "assistant": {
 				const assistantComponent = new AssistantMessageComponent(
-					message,
+					this.getAssistantDisplayMessage(message, "restore"),
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,
@@ -3634,7 +3646,7 @@ export class InteractiveMode {
 		// If streaming, re-add the streaming component with updated visibility and re-render
 		if (this.streamingComponent && this.streamingMessage) {
 			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-			this.streamingComponent.updateContent(this.streamingMessage);
+			this.streamingComponent.updateContent(this.getAssistantDisplayMessage(this.streamingMessage, "streaming"));
 			this.chatContainer.addChild(this.streamingComponent);
 		}
 
