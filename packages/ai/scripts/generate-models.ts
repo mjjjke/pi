@@ -9,6 +9,7 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/api/cloudflare.ts";
+import { getAnthropicFastModeCapability, getCodexFastModeCapability } from "../src/providers/pi-fast-mode.ts";
 import {
 	anthropicSupportsMidConversationInstructions,
 	openAiSupportsMidConversationInstructions,
@@ -256,6 +257,10 @@ function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities | undefi
 			) {
 				capabilities.midConversationInstructionMessages = true;
 			}
+			if (capabilities.fastMode === undefined && model.provider === "anthropic" && nativeModelId.startsWith("claude-")) {
+				const fastMode = getAnthropicFastModeCapability(nativeModelId);
+				if (fastMode) capabilities.fastMode = fastMode;
+			}
 			break;
 		}
 		case "openai-completions":
@@ -268,6 +273,10 @@ function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities | undefi
 				openAiSupportsMidConversationInstructions(model.id)
 			) {
 				capabilities.midConversationInstructionMessages = true;
+			}
+			if (capabilities.fastMode === undefined) {
+				const fastMode = getCodexFastModeCapability(model.provider, model.api);
+				if (fastMode) capabilities.fastMode = fastMode;
 			}
 			break;
 		default:

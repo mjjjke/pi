@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added model metadata for Anthropic and OpenAI Codex fast/priority response capabilities, including the `@earendil-works/pi-ai/providers/pi-fast-mode` helpers.
+
 ## [0.80.2] - 2026-06-23
 
 ### Changed

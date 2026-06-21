@@ -581,9 +581,27 @@ export interface AnthropicMessagesCompat {
 	allowEmptySignature?: boolean;
 }
 
+/** Providers whose request body can be mutated to enable fast/priority responses. */
+export type FastModeProvider = "anthropic" | "openai-codex";
+
+/**
+ * Wire mutation that enables a faster/priority response tier for a model.
+ * Shaped as the provider-specific request body fields to shallow-merge when
+ * fast mode is enabled (e.g. `{ speed: "fast" }` for Anthropic,
+ * `{ service_tier: "priority" }` for the OpenAI Codex backend).
+ */
+export interface FastModeCapability {
+	/** Provider whose request body the merge applies to; must match the active model's provider. */
+	provider: FastModeProvider;
+	/** Request body fields to shallow-merge into the provider payload when fast mode is on. */
+	body: Record<string, unknown>;
+}
+
 export interface ModelCapabilities {
 	/** Whether this model supports first-class mid-conversation system/developer messages. */
 	midConversationInstructionMessages?: boolean;
+	/** Wire mutation that enables a faster/priority response tier for this model. */
+	fastMode?: FastModeCapability;
 }
 
 /**

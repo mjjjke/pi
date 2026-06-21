@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { MessageCreateParamsStreaming as BetaMessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import type {
 	CacheControlEphemeral,
 	ContentBlockParam,
@@ -8,6 +9,7 @@ import type {
 	RefusalStopDetails,
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { calculateCost } from "../models.ts";
+import { instructionContentToText, isInstructionMessage } from "../providers/instruction-messages.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -34,9 +36,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
-import { instructionContentToText, isInstructionMessage } from "../providers/instruction-messages.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -72,6 +72,8 @@ function getCacheControl(
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
 const claudeCodeVersion = "2.1.75";
+const CLAUDE_CODE_BETA = "claude-code-20250219";
+const OAUTH_BETA = "oauth-2025-04-20";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -167,6 +169,77 @@ export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
 const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
+const FAST_MODE_BETA = "fast-mode-2026-02-01";
+
+type AnthropicBetaMessagesParams = MessageCreateParamsStreaming & {
+	speed: BetaMessageCreateParamsStreaming["speed"];
+};
+
+function usesAnthropicBetaMessages(params: MessageCreateParamsStreaming): params is AnthropicBetaMessagesParams {
+	const speed = (params as { speed?: unknown }).speed;
+	return speed === "fast" || speed === "standard" || speed === null;
+}
+
+function getAnthropicBetaFeatures(
+	model: Model<"anthropic-messages">,
+	interleavedThinking: boolean,
+	useFineGrainedToolStreamingBeta: boolean,
+): string[] {
+	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
+	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
+	const betaFeatures: string[] = [];
+	if (useFineGrainedToolStreamingBeta) {
+		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
+	}
+	if (needsInterleavedBeta) {
+		betaFeatures.push(INTERLEAVED_THINKING_BETA);
+	}
+	return betaFeatures;
+}
+
+function getHeaderValue(headers: ProviderHeaders | undefined, name: string): string | undefined {
+	const headerName = name.toLowerCase();
+	const entry = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === headerName);
+	return entry?.[1] ?? undefined;
+}
+
+function mergeAnthropicBetaHeaders(...sources: (string | string[] | undefined)[]): string {
+	const betas: string[] = [];
+	for (const source of sources) {
+		const values = Array.isArray(source) ? source : (source?.split(",") ?? []);
+		for (const value of values) {
+			const beta = value.trim();
+			if (beta && !betas.includes(beta)) {
+				betas.push(beta);
+			}
+		}
+	}
+	return betas.join(",");
+}
+
+function withAnthropicBetaMessagesHeaders<T extends object>(
+	requestOptions: T,
+	model: Model<"anthropic-messages">,
+	optionsHeaders: ProviderHeaders | undefined,
+	betaFeatures: string[],
+	isOAuth: boolean,
+): T & { headers: Record<string, string> } {
+	const existingHeaders = (requestOptions as { headers?: Record<string, string> }).headers;
+	return {
+		...requestOptions,
+		headers: {
+			...existingHeaders,
+			"anthropic-beta": mergeAnthropicBetaHeaders(
+				isOAuth ? CLAUDE_CODE_BETA : undefined,
+				isOAuth ? OAUTH_BETA : undefined,
+				FAST_MODE_BETA,
+				betaFeatures,
+				getHeaderValue(model.headers, "anthropic-beta"),
+				getHeaderValue(optionsHeaders, "anthropic-beta"),
+			),
+		},
+	};
+}
 
 function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
@@ -537,7 +610,24 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: options?.maxRetries ?? 0,
 			};
-			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
+			const response = usesAnthropicBetaMessages(params)
+				? await client.beta.messages
+						.create(
+							{ ...params, stream: true } as BetaMessageCreateParamsStreaming,
+							withAnthropicBetaMessagesHeaders(
+								requestOptions,
+								model,
+								options?.headers,
+								getAnthropicBetaFeatures(
+									model,
+									options?.interleavedThinking ?? true,
+									shouldUseFineGrainedToolStreamingBeta(model, context),
+								),
+								isOAuth,
+							),
+						)
+						.asResponse()
+				: await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -810,15 +900,7 @@ function createClient(
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
 ): { client: Anthropic; isOAuthToken: boolean } {
-	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
-	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
-	const betaFeatures: string[] = [];
-	if (useFineGrainedToolStreamingBeta) {
-		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
-	}
-	if (needsInterleavedBeta) {
-		betaFeatures.push(INTERLEAVED_THINKING_BETA);
-	}
+	const betaFeatures = getAnthropicBetaFeatures(model, interleavedThinking, useFineGrainedToolStreamingBeta);
 
 	// Copilot: Bearer auth, selective betas.
 	if (model.provider === "github-copilot") {
@@ -853,7 +935,7 @@ function createClient(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
-					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
+					"anthropic-beta": [CLAUDE_CODE_BETA, OAUTH_BETA, ...betaFeatures].join(","),
 					"user-agent": `claude-cli/${claudeCodeVersion}`,
 					"x-app": "cli",
 				},
