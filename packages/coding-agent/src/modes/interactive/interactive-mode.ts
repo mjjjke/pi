@@ -263,9 +263,32 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 }
 
+export class BottomPinnedLayout extends Container {
+	readonly topContainer: Container;
+	readonly bottomContainer: Container;
+	private readonly getRows: () => number;
+
+	constructor(getRows: () => number) {
+		super();
+		this.getRows = getRows;
+		this.topContainer = new Container();
+		this.bottomContainer = new Container();
+		this.addChild(this.topContainer);
+		this.addChild(this.bottomContainer);
+	}
+
+	override render(width: number): string[] {
+		const topLines = this.topContainer.render(width);
+		const bottomLines = this.bottomContainer.render(width);
+		const spacerRows = Math.max(0, this.getRows() - topLines.length - bottomLines.length);
+		return [...topLines, ...Array.from({ length: spacerRows }, () => ""), ...bottomLines];
+	}
+}
+
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private ui: TUI;
+	private layout: BottomPinnedLayout;
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
@@ -276,6 +299,7 @@ export class InteractiveMode {
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
+	private footerContainer: Container;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
@@ -401,6 +425,7 @@ export class InteractiveMode {
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
+		this.layout = new BottomPinnedLayout(() => this.ui.terminal.rows);
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
@@ -418,9 +443,11 @@ export class InteractiveMode {
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
+		this.footerContainer = new Container();
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.footerContainer.addChild(this.footer);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -637,17 +664,17 @@ export class InteractiveMode {
 			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
 		}
 
-		// Add header container as first child. Populate it after detectThemeIfUnset.
-		this.ui.addChild(this.headerContainer);
-
-		this.ui.addChild(this.chatContainer);
-		this.ui.addChild(this.pendingMessagesContainer);
-		this.ui.addChild(this.statusContainer);
+		// Add header container as first top-flow child. Populate it after detectThemeIfUnset.
+		this.ui.addChild(this.layout);
+		this.layout.topContainer.addChild(this.headerContainer);
+		this.layout.topContainer.addChild(this.chatContainer);
+		this.layout.topContainer.addChild(this.pendingMessagesContainer);
+		this.layout.topContainer.addChild(this.statusContainer);
 		this.renderWidgets(); // Initialize with default spacer
-		this.ui.addChild(this.widgetContainerAbove);
-		this.ui.addChild(this.editorContainer);
-		this.ui.addChild(this.widgetContainerBelow);
-		this.ui.addChild(this.footer);
+		this.layout.bottomContainer.addChild(this.widgetContainerAbove);
+		this.layout.bottomContainer.addChild(this.editorContainer);
+		this.layout.bottomContainer.addChild(this.widgetContainerBelow);
+		this.layout.bottomContainer.addChild(this.footerContainer);
 		this.ui.setFocus(this.editor);
 
 		this.setupKeyHandlers();
@@ -1929,21 +1956,16 @@ export class InteractiveMode {
 			this.customFooter.dispose();
 		}
 
-		// Remove current footer from UI
-		if (this.customFooter) {
-			this.ui.removeChild(this.customFooter);
-		} else {
-			this.ui.removeChild(this.footer);
-		}
+		this.footerContainer.clear();
 
 		if (factory) {
 			// Create and add custom footer, passing the data provider
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
-			this.ui.addChild(this.customFooter);
+			this.footerContainer.addChild(this.customFooter);
 		} else {
 			// Restore built-in footer
 			this.customFooter = undefined;
-			this.ui.addChild(this.footer);
+			this.footerContainer.addChild(this.footer);
 		}
 
 		this.ui.requestRender();

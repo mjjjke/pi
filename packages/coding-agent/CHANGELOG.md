@@ -6,6 +6,10 @@
 
 - Added extension assistant message display transforms for TUI-only rendering changes that do not alter persisted messages or provider context.
 
+### Fixed
+
+- Fixed the interactive editor and footer/status bar to stay pinned to the bottom of short terminal viewports.
+
 ## [0.80.2] - 2026-06-23
 
 ### Changed
