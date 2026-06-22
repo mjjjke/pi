@@ -6,10 +6,6 @@
 
 - Added extension assistant message display transforms for TUI-only rendering changes that do not alter persisted messages or provider context.
 
-### Fixed
-
-- Fixed the interactive editor and footer/status bar to stay pinned to the bottom of short terminal viewports.
-
 ## [0.80.2] - 2026-06-23
 
 ### Changed
@@ -23,7 +19,6 @@
 - Fixed inherited request-scoped `apiKey` and `env` values to participate in provider auth resolution, so providers such as Cloudflare can derive request-specific base URLs from explicit call options ([#6021](https://github.com/earendil-works/pi/issues/6021)).
 - Restored inherited temporary legacy per-API stream aliases such as `streamSimpleOpenAICompletions` on the pi-ai compat entrypoint ([#6016](https://github.com/earendil-works/pi/issues/6016), [#6017](https://github.com/earendil-works/pi/issues/6017)).
 - Restored inherited runtime `detectCompat` fallback in `openai-completions` for models without explicit compat metadata ([#6020](https://github.com/earendil-works/pi/issues/6020)).
-
 ## [0.80.1] - 2026-06-23
 
 ### Fixed
@@ -57,7 +52,6 @@
 ### Removed
 
 - Removed inherited selective-provider `@earendil-works/pi-ai/base` and `@earendil-works/pi-agent-core/base` entrypoints; use the root packages with explicit `Models` provider factories instead.
-
 ## [0.79.10] - 2026-06-22
 
 ### New Features
