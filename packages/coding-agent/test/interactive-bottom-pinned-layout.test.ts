@@ -66,6 +66,31 @@ describe("BottomPinnedLayout", () => {
 		}
 	});
 
+	test("keeps bottom content pinned after overflowing top content shrinks", async () => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const layout = new BottomPinnedLayout(() => terminal.rows);
+		const topContent = new LinesComponent(...Array.from({ length: 10 }, (_, i) => `TOP-${i}`));
+		layout.topContainer.addChild(topContent);
+		layout.bottomContainer.addChild(new LinesComponent("EDITOR", "FOOTER"));
+		tui.addChild(layout);
+		tui.start();
+
+		try {
+			expect(await render(tui, terminal)).toEqual(["TOP-7", "TOP-8", "TOP-9", "EDITOR", "FOOTER"]);
+			const redrawsBeforeShrink = tui.fullRedraws;
+
+			topContent.setLines(...Array.from({ length: 8 }, (_, i) => `TOP-${i}`));
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			expect(tui.fullRedraws).toBe(redrawsBeforeShrink);
+			expect(terminal.getViewport()).toEqual(["TOP-5", "TOP-6", "TOP-7", "EDITOR", "FOOTER"]);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	test("keeps custom footer replacements pinned", async () => {
 		const terminal = new VirtualTerminal(40, 6);
 		const tui = new TUI(terminal);

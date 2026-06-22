@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed TUI viewport re-anchoring after overflowing content shrinks so bottom-pinned editor/status content stays attached to the terminal bottom.
+
 ## [0.80.2] - 2026-06-23
 
 ## [0.80.1] - 2026-06-23

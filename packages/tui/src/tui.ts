@@ -1332,6 +1332,71 @@ export class TUI extends Container {
 			fs.appendFileSync(logPath, msg);
 		};
 
+		const assertLineFits = (line: string, lineIndex: number): void => {
+			if (isImageLine(line) || visibleWidth(line) <= width) return;
+
+			// Log all lines to crash file for debugging
+			const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
+			const crashData = [
+				`Crash at ${new Date().toISOString()}`,
+				`Terminal width: ${width}`,
+				`Line ${lineIndex} visible width: ${visibleWidth(line)}`,
+				"",
+				"=== All rendered lines ===",
+				...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+				"",
+			].join("\n");
+			fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
+			fs.writeFileSync(crashLogPath, crashData);
+
+			// Clean up terminal state before throwing
+			this.stop();
+
+			const errorMsg = [
+				`Rendered line ${lineIndex} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
+				"",
+				"This is likely caused by a custom TUI component not truncating its output.",
+				"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
+				"",
+				`Debug log written to: ${crashLogPath}`,
+			].join("\n");
+			throw new Error(errorMsg);
+		};
+
+		const viewportContainsKittyImage = (lines: string[], viewportStart: number): boolean => {
+			const viewportEnd = viewportStart + height - 1;
+			for (let i = 0; i < lines.length; i++) {
+				if (extractKittyImageIds(lines[i]).length === 0) continue;
+				const imageEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
+				if (i <= viewportEnd && imageEnd >= viewportStart) return true;
+			}
+			return false;
+		};
+
+		const redrawViewport = (viewportStart: number, imageDeletes = ""): void => {
+			let buffer = "\x1b[?2026h";
+			buffer += imageDeletes;
+			for (let screenRow = 0; screenRow < height; screenRow++) {
+				buffer += screenRow === 0 ? "\x1b[H" : `\x1b[${screenRow + 1};1H`;
+				buffer += "\x1b[2K";
+				const lineIndex = viewportStart + screenRow;
+				const line = newLines[lineIndex] ?? TUI.SEGMENT_RESET;
+				assertLineFits(line, lineIndex);
+				buffer += line;
+			}
+			buffer += "\x1b[?2026l";
+			this.terminal.write(buffer);
+			this.cursorRow = Math.max(0, newLines.length - 1);
+			this.hardwareCursorRow = viewportStart + Math.max(0, height - 1);
+			this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+			this.previousViewportTop = viewportStart;
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.previousLines = newLines;
+			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.previousWidth = width;
+			this.previousHeight = height;
+		};
+
 		// First render - just output everything without clearing (assumes clean screen)
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
 			logRedraw("first render");
@@ -1392,6 +1457,22 @@ export class TUI extends Container {
 			lastChanged = expandedRange.lastChanged;
 		}
 		const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;
+
+		if (newLines.length < this.previousLines.length && this.overlayStack.length === 0) {
+			const desiredViewportTop = Math.max(0, Math.max(height, newLines.length) - height);
+			if (desiredViewportTop < prevViewportTop) {
+				if (
+					viewportContainsKittyImage(this.previousLines, prevViewportTop) ||
+					viewportContainsKittyImage(newLines, desiredViewportTop)
+				) {
+					logRedraw(`shrink moved viewport with Kitty image (${desiredViewportTop} < ${prevViewportTop})`);
+					fullRender(true);
+					return;
+				}
+				redrawViewport(desiredViewportTop, this.deleteChangedKittyImages(firstChanged, lastChanged));
+				return;
+			}
+		}
 
 		// No changes - but still need to update hardware cursor position if it moved
 		if (firstChanged === -1) {
@@ -1517,34 +1598,7 @@ export class TUI extends Container {
 			}
 
 			buffer += "\x1b[2K"; // Clear current line
-			if (!isImage && visibleWidth(line) > width) {
-				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(os.homedir(), ".pi", "agent", "pi-crash.log");
-				const crashData = [
-					`Crash at ${new Date().toISOString()}`,
-					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(line)}`,
-					"",
-					"=== All rendered lines ===",
-					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
-					"",
-				].join("\n");
-				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
-				fs.writeFileSync(crashLogPath, crashData);
-
-				// Clean up terminal state before throwing
-				this.stop();
-
-				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
-					"",
-					"This is likely caused by a custom TUI component not truncating its output.",
-					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
-					"",
-					`Debug log written to: ${crashLogPath}`,
-				].join("\n");
-				throw new Error(errorMsg);
-			}
+			assertLineFits(line, i);
 			buffer += line;
 		}
 

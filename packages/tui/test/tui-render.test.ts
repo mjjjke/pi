@@ -657,7 +657,85 @@ describe("TUI differential rendering", () => {
 		tui.stop();
 	});
 
-	it("full re-renders when deleted lines move the viewport upward", async () => {
+	it("redraws only the viewport when shrinking overflow content moves the viewport upward", async () => {
+		const terminal = new VirtualTerminal(20, 5);
+		const tui = new TUI(terminal);
+		tui.setClearOnShrink(false);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const initialRedraws = tui.fullRedraws;
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Shrink should not trigger a full redraw");
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 5", "Line 6", "Line 7", "Line 8", "Line 9"]);
+
+		tui.stop();
+	});
+
+	it("deletes offscreen Kitty images on viewport-only shrink redraws", async () => {
+		const terminal = new LoggingVirtualTerminal(20, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		const image = encodeKitty("AAAA", { columns: 2, rows: 1, imageId: 123, moveCursor: false });
+		component.lines = [
+			...Array.from({ length: 8 }, (_, i) => `Line ${i}`),
+			image,
+			...Array.from({ length: 5 }, (_, i) => `Line ${i + 9}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+
+		const initialRedraws = tui.fullRedraws;
+		component.lines = Array.from({ length: 8 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Shrink should not trigger a full redraw");
+		assert.ok(terminal.getWrites().includes(deleteKittyImage(123)), "Deleted offscreen image should be cleaned up");
+		assert.deepStrictEqual(terminal.getViewport(), ["Line 3", "Line 4", "Line 5", "Line 6", "Line 7"]);
+
+		tui.stop();
+	});
+
+	it("keeps repeated shrinking overflow content bottom-anchored without full redraws", async () => {
+		const terminal = new VirtualTerminal(20, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		const initialRedraws = tui.fullRedraws;
+		for (const length of [11, 10, 9]) {
+			component.lines = Array.from({ length }, (_, i) => `Line ${i}`);
+			tui.requestRender();
+			await terminal.waitForRender();
+			const expectedTop = length - terminal.rows;
+			assert.deepStrictEqual(
+				terminal.getViewport(),
+				Array.from({ length: terminal.rows }, (_, i) => `Line ${expectedTop + i}`),
+			);
+		}
+
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Repeated shrink should not trigger full redraws");
+
+		tui.stop();
+	});
+
+	it("redraws only the viewport when deleted lines move the viewport upward", async () => {
 		const terminal = new VirtualTerminal(20, 5);
 		const tui = new TUI(terminal);
 		const component = new TestComponent();
@@ -673,7 +751,7 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > initialRedraws, "Shrink should trigger a full redraw");
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Shrink should not trigger a full redraw");
 		assert.deepStrictEqual(terminal.getViewport(), ["Line 2", "Line 3", "Line 4", "Line 5", "Line 6"]);
 
 		tui.stop();
@@ -695,7 +773,7 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > initialRedraws, "Shrink should reset the viewport with a full redraw");
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "Shrink should reset the viewport without a full redraw");
 		const redrawsAfterShrink = tui.fullRedraws;
 
 		component.lines = ["Line 0", "Line 1", "Line 2"];
@@ -739,7 +817,7 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > redrawsBeforeSwitch, "Branch switch should trigger a full redraw");
+		assert.strictEqual(tui.fullRedraws, redrawsBeforeSwitch, "Branch switch should not trigger a full redraw");
 
 		const viewport = terminal.getViewport();
 		for (let i = 0; i < 10; i++) {
