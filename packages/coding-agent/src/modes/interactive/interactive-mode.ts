@@ -3779,6 +3779,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "system":
+			case "developer":
 				break;
 			case "user": {
 				const textContent = this.getUserMessageText(message);

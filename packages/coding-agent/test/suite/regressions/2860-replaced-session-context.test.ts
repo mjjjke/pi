@@ -183,6 +183,7 @@ describe("regression #2860: replaced session callbacks", () => {
 								} catch {
 									stalePiThrows = true;
 								}
+								replacedCtx.appendDeveloperMessage("Replacement session mask.");
 								await replacedCtx.sendUserMessage("Hello from the new session!");
 							},
 						});
@@ -205,7 +206,7 @@ describe("regression #2860: replaced session callbacks", () => {
 			runtime.session.messages
 				.filter((message) => message.role !== "system")
 				.map((message) => `${message.role}:${getText(message)}`),
-		).toEqual(["user:Hello from the new session!", "assistant:hello reply"]);
+		).toEqual(["developer:Replacement session mask.", "user:Hello from the new session!", "assistant:hello reply"]);
 	});
 
 	it("supports withSession for fork", async () => {

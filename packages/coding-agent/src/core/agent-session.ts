@@ -29,6 +29,7 @@ import { contentText, getCurrentSystemMessage, retryDelayMs } from "@earendil-wo
 import type {
 	AssistantMessage,
 	AuthResult,
+	DeveloperMessage,
 	ImageContent,
 	Model,
 	ProviderHeaders,
@@ -377,6 +378,7 @@ export class AgentSession {
 	private _abortDuringBeforeSettle = false;
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
+	private _isEmittingAgentEndExtensionEvent = false;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -795,9 +797,10 @@ export class AgentSession {
 		const projection = this._createBoundaryPreviewManager(drafts).buildSessionProjection();
 		const pendingMessages = this._getPendingBoundaryMessages();
 		const llmMessages = convertToLlm(projection.messages);
-		const finalRole = llmMessages[llmMessages.length - 1]?.role;
-		const hasNonSystemContext = llmMessages.some((message) => message.role !== "system");
-		const contextCanContinue = hasNonSystemContext && finalRole !== "assistant";
+		const finalRole = llmMessages
+			.filter((message) => message.role !== "system" && message.role !== "developer")
+			.at(-1)?.role;
+		const contextCanContinue = finalRole !== undefined && finalRole !== "assistant";
 		const pendingCustomContext = this._pendingCustomMessages.length > 0;
 		return {
 			contextEntries: projection.entries,
@@ -1064,7 +1067,12 @@ export class AgentSession {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
-			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			this._isEmittingAgentEndExtensionEvent = true;
+			try {
+				await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			} finally {
+				this._isEmittingAgentEndExtensionEvent = false;
+			}
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -1916,6 +1924,28 @@ export class AgentSession {
 				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
 			);
 		}
+	}
+
+	appendDeveloperMessage(content: string | TextContent[]): void {
+		const isBlank =
+			typeof content === "string"
+				? content.trim().length === 0
+				: content.every((part) => part.text.trim().length === 0);
+		if (isBlank) return;
+
+		if (this.isStreaming && !this._isEmittingAgentEndExtensionEvent) {
+			throw new Error(
+				"appendDeveloperMessage() can only be called while idle or from an agent_end extension handler.",
+			);
+		}
+
+		const message: DeveloperMessage = {
+			role: "developer",
+			content,
+			timestamp: Date.now(),
+		};
+		this.sessionManager.appendMessage(message);
+		this._refreshFinalizedContext();
 	}
 
 	/**
@@ -3063,6 +3093,9 @@ export class AgentSession {
 						});
 					});
 				},
+				appendDeveloperMessage: (content) => {
+					this.appendDeveloperMessage(content);
+				},
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);
@@ -4002,6 +4035,7 @@ export class AgentSession {
 			{},
 			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
 		) as ReplacedSessionContext;
+		context.appendDeveloperMessage = (content) => this.appendDeveloperMessage(content);
 		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);
 		return context;

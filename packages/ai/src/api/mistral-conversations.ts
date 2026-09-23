@@ -789,6 +789,9 @@ function toChatMessages(messages: Message[], supportsImages: boolean): MistralCh
 			if (text.length > 0) result.push({ role: "system", content: sanitizeSurrogates(text) });
 			continue;
 		}
+		if (msg.role === "developer") {
+			throw new Error("Mistral Conversations does not support mid-conversation developer messages.");
+		}
 
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {

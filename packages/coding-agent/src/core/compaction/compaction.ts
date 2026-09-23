@@ -332,6 +332,7 @@ export function estimateTokens(message: AgentMessage): number {
 			if (system.toolsAdded) chars += JSON.stringify(system.toolsAdded).length;
 			return Math.ceil(chars / 4);
 		}
+		case "developer":
 		case "user": {
 			chars = estimateTextAndImageContentChars(
 				(message as { content: string | Array<{ type: string; text?: string }> }).content,

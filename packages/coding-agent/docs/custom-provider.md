@@ -56,6 +56,8 @@ Every model needs an ID, display name, input capabilities, context window, outpu
 
 Set `promptCache.short` or `promptCache.long` to the provider's best-effort cache lifetime in seconds when Pi should keep an idle prompt cache warm. Leave them unset to disable cache warming for that retention tier.
 
+Model features belong in `capabilities`, not `compat`. In this fork, set `capabilities: { midConversationInstructionMessages: true }` only when the model supports first-class mid-conversation `system`/`developer` instructions. Extensions can preflight this with `supportsMidConversationInstructionMessages()` from `@earendil-works/pi-ai`. Unsupported developer messages are dropped during provider serialization; system messages retain upstream prompt/tool replay semantics.
+
 Compatibility flags describe verified differences in an otherwise supported API. Do not enable them based only on an endpoint claiming compatibility.
 
 Confirm the request fields and response behavior against the actual server.

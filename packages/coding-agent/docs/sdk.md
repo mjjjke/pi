@@ -111,6 +111,35 @@ Use `DefaultResourceLoader` when you want standard discovery with selected overr
 
 Inline extension factories can be supplied through `DefaultResourceLoader`. Give one an `InlineExtension` name only when it needs a stable name in diagnostics and startup output.
 
+This fork lets inline extensions inject first-class developer instructions through `context`. Preflight optional injections with `supportsMidConversationInstructionMessages()`; unsupported developer messages are dropped during provider serialization. Custom models opt in with `capabilities.midConversationInstructionMessages`.
+
+```typescript
+import { supportsMidConversationInstructionMessages } from "@earendil-works/pi-ai";
+import { createAgentSession, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+
+const loader = new DefaultResourceLoader({
+  extensionFactories: [
+    (pi) => {
+      pi.on("context", (event, ctx) => {
+        if (!ctx.model || !supportsMidConversationInstructionMessages(ctx.model)) return;
+        return {
+          messages: [
+            ...event.messages,
+            { role: "developer", content: "Prefer minimal, reversible changes.", timestamp: Date.now() },
+          ],
+        };
+      });
+    },
+  ],
+});
+await loader.reload();
+
+const { session } = await createAgentSession({ resourceLoader: loader });
+// Use session.prompt() as needed, then call session.dispose().
+```
+
+See [Extensions](extensions.md) for passive persisted instructions, deferred session replacement, and display-only assistant transforms.
+
 See the focused examples for [models](../examples/sdk/02-custom-model.ts), [tools](../examples/sdk/05-tools.ts), [extensions](../examples/sdk/06-extensions.ts), and [full control](../examples/sdk/12-full-control.ts).
 
 ## Examples

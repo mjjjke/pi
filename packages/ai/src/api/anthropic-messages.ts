@@ -11,6 +11,7 @@ import type {
 	BetaRefusalStopDetails as RefusalStopDetails,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import { calculateCost } from "../models.ts";
+import { instructionContentToText } from "../providers/instruction-messages.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -1223,7 +1224,7 @@ interface ConvertedAnthropicMessages {
 	assistantLevels: Map<number, AnthropicEffort>;
 }
 
-function convertMessages(
+export function convertMessages(
 	transformedMessages: Message[],
 	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
@@ -1233,15 +1234,29 @@ function convertMessages(
 ): ConvertedAnthropicMessages {
 	const params: MessageParam[] = [];
 	const assistantLevels = new Map<number, AnthropicEffort>();
-	// Later system messages are held back and emitted directly before the next assistant
+	// Later system and developer messages are held back and emitted directly before the next assistant
 	// message (or at the end of the transcript). Anthropic requires `tool_result` blocks to
-	// immediately follow their `tool_use`, so a system message between them is rejected; this
-	// also mirrors where the managed-effort system messages are inserted. As a result an
-	// update placed before a user message in the transcript lands after it on the wire.
+	// immediately follow their `tool_use`, so an instruction between them is rejected.
 	const pendingSystemMessages: MessageParam[] = [];
+	const developerOutputMessages = new Set<MessageParam>();
 	const flushPendingSystemMessages = (): void => {
 		params.push(...pendingSystemMessages);
 		pendingSystemMessages.length = 0;
+	};
+
+	const pendingInstructions: string[] = [];
+	let canPlacePendingInstruction = false;
+	const flushPendingInstructions = () => {
+		if (pendingInstructions.length === 0) return;
+		if (canPlacePendingInstruction) {
+			const message: MessageParam = {
+				role: "system",
+				content: [{ type: "text", text: pendingInstructions.join("\n\n") }],
+			};
+			pendingSystemMessages.push(message);
+			developerOutputMessages.add(message);
+		}
+		pendingInstructions.length = 0;
 	};
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -1268,7 +1283,11 @@ function convertMessages(
 				}
 			}
 			if (blocks.length > 0) pendingSystemMessages.push({ role: "system", content: blocks });
+		} else if (msg.role === "developer") {
+			const text = sanitizeSurrogates(instructionContentToText(msg.content));
+			if (text.trim().length > 0) pendingInstructions.push(text);
 		} else if (msg.role === "user") {
+			const previousParamCount = params.length;
 			if (typeof msg.content === "string") {
 				if (msg.content.trim().length > 0) {
 					params.push({
@@ -1300,13 +1319,18 @@ function convertMessages(
 					}
 					return true;
 				});
-				if (filteredBlocks.length === 0) continue;
-				params.push({
-					role: "user",
-					content: filteredBlocks,
-				});
+				if (filteredBlocks.length > 0) {
+					params.push({
+						role: "user",
+						content: filteredBlocks,
+					});
+				}
+			}
+			if (params.length > previousParamCount) {
+				canPlacePendingInstruction = true;
 			}
 		} else if (msg.role === "assistant") {
+			flushPendingInstructions();
 			flushPendingSystemMessages();
 			const blocks: ContentBlockParam[] = [];
 
@@ -1361,7 +1385,10 @@ function convertMessages(
 					});
 				}
 			}
-			if (blocks.length === 0) continue;
+			if (blocks.length === 0) {
+				canPlacePendingInstruction = false;
+				continue;
+			}
 			const messageIndex = params.length;
 			params.push({
 				role: "assistant",
@@ -1375,6 +1402,7 @@ function convertMessages(
 			) {
 				assistantLevels.set(messageIndex, msg.providerThinkingLevel);
 			}
+			canPlacePendingInstruction = false;
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint.
 			const toolResults: ContentBlockParam[] = [];
@@ -1391,15 +1419,21 @@ function convertMessages(
 				role: "user",
 				content: toolResults,
 			});
+			canPlacePendingInstruction = true;
 		}
 	}
-
+	if (canPlacePendingInstruction) {
+		flushPendingInstructions();
+	}
 	flushPendingSystemMessages();
 
-	// Add cache_control to the last user or system message to cache conversation history
+	// Add cache_control to the last user or system message. Developer instructions are
+	// kept outside the cached conversation prefix, so walk past them to the real anchor.
 	if (cacheControl && params.length > 0) {
-		const lastMessage = params[params.length - 1];
-		if (lastMessage.role === "user" || lastMessage.role === "system") {
+		let cacheIndex = params.length - 1;
+		while (cacheIndex >= 0 && developerOutputMessages.has(params[cacheIndex])) cacheIndex--;
+		const lastMessage = params[cacheIndex];
+		if (lastMessage && (lastMessage.role === "user" || lastMessage.role === "system")) {
 			if (Array.isArray(lastMessage.content)) {
 				const lastBlock = lastMessage.content[lastMessage.content.length - 1];
 				if (
@@ -1410,7 +1444,8 @@ function convertMessages(
 						lastBlock.type === "tool_addition" ||
 						lastBlock.type === "tool_removal")
 				) {
-					(lastBlock as any).cache_control = cacheControl;
+					(lastBlock as ContentBlockParam & { cache_control?: CacheControlEphemeral }).cache_control =
+						cacheControl;
 				}
 			} else if (typeof lastMessage.content === "string") {
 				lastMessage.content = [
@@ -1419,7 +1454,7 @@ function convertMessages(
 						text: lastMessage.content,
 						cache_control: cacheControl,
 					},
-				] as any;
+				];
 			}
 		}
 	}

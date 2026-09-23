@@ -3,6 +3,22 @@ import { describe, expect, it } from "vitest";
 import { serializeConversation } from "../src/core/compaction/utils.ts";
 
 describe("serializeConversation", () => {
+	it("should serialize instruction messages", () => {
+		const messages: Message[] = [
+			{ role: "system", content: "system instruction", timestamp: Date.now() },
+			{
+				role: "developer",
+				content: [{ type: "text", text: "developer instruction" }],
+				timestamp: Date.now(),
+			},
+		];
+
+		const result = serializeConversation(messages);
+
+		expect(result).toContain("[System]: system instruction");
+		expect(result).toContain("[Developer]: developer instruction");
+	});
+
 	it("should truncate long tool results", () => {
 		const longContent = "x".repeat(5000);
 		const messages: Message[] = [

@@ -52,6 +52,41 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.session.isRetrying).toBe(false);
 	});
 
+	it("retries through passive developer messages appended from agent_end", async () => {
+		const retryContexts: string[][] = [];
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+			extensionFactories: [
+				(pi) => {
+					let appended = false;
+					pi.on("agent_end", () => {
+						if (appended) return;
+						appended = true;
+						pi.appendDeveloperMessage("Retry mask.");
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			(context) => {
+				retryContexts.push(context.messages.map((message) => message.role));
+				return fauxAssistantMessage("recovered");
+			},
+		]);
+
+		await harness.session.prompt("test");
+
+		expect(retryContexts[0]).toEqual(["system", "user", "developer"]);
+		expect(
+			harness.session.messages.filter((message) => message.role !== "system").map((message) => message.role),
+		).toEqual(["user", "developer", "assistant"]);
+		const assistant = [...harness.session.messages].reverse().find((message) => message.role === "assistant");
+		expect(assistant?.role === "assistant" && assistant.stopReason).toBe("stop");
+	});
+
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 		harnesses.push(harness);

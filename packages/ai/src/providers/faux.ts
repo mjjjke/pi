@@ -205,6 +205,9 @@ function messageToText(message: Message): string {
 			.filter((part) => part.length > 0)
 			.join("\n");
 	}
+	if (message.role === "developer") {
+		return contentToText(message.content);
+	}
 	if (message.role === "user") {
 		return contentToText(message.content);
 	}

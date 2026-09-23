@@ -14,11 +14,16 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/api/cloudflare.ts";
+import {
+	anthropicSupportsMidConversationInstructions,
+	openAiSupportsMidConversationInstructions,
+} from "../src/providers/instruction-messages.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
 	KnownProvider,
 	Model,
+	ModelCapabilities,
 	ModelCost,
 	ModelPromptCache,
 	OpenAICompletionsCompat,
@@ -547,6 +552,45 @@ function applyModelsDevReasoningOptionMetadata(model: Model<Api>): void {
 	if (!reasoningOptions || !supportsDirectReasoningEffort(model)) return;
 	const thinkingLevelMap = getEffortThinkingLevelMap(reasoningOptions);
 	if (thinkingLevelMap) mergeThinkingLevelMap(model, thinkingLevelMap);
+}
+
+const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
+
+function getNativeModelId(modelId: string): string {
+	return modelId.split("/").at(-1) ?? modelId;
+}
+
+function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities | undefined {
+	const capabilities: ModelCapabilities = { ...model.capabilities };
+	switch (model.api) {
+		case "anthropic-messages": {
+			const nativeModelId = getNativeModelId(model.id);
+			if (
+				capabilities.midConversationInstructionMessages === undefined &&
+				model.provider === "anthropic" &&
+				nativeModelId.startsWith("claude-") &&
+				anthropicSupportsMidConversationInstructions(nativeModelId)
+			) {
+				capabilities.midConversationInstructionMessages = true;
+			}
+			break;
+		}
+		case "openai-completions":
+		case "openai-responses":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			if (
+				capabilities.midConversationInstructionMessages === undefined &&
+				FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(model.provider) &&
+				openAiSupportsMidConversationInstructions(model.id)
+			) {
+				capabilities.midConversationInstructionMessages = true;
+			}
+			break;
+		default:
+			break;
+	}
+	return Object.values(capabilities).some((value) => value !== undefined) ? capabilities : undefined;
 }
 
 function getTogetherCompat(modelId: string, reasoning: boolean): OpenAICompletionsCompat {
@@ -3284,6 +3328,8 @@ async function generateModels() {
 		applyOpenAIExplicitPromptCacheMetadata(model);
 		applyPromptCacheMetadata(model);
 		applyImageInputMetadata(model);
+		const capabilities = getGeneratedCapabilities(model);
+		if (capabilities) model.capabilities = capabilities;
 	}
 	applyAnthropicAllowedFallbackModelMetadata(allModels.filter(isAnthropicFallbackMetadataModel));
 

@@ -1,3 +1,4 @@
+import { isInstructionMessage, supportsMidConversationInstructionMessages } from "../providers/instruction-messages.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -72,11 +73,14 @@ export function transformMessages<TApi extends Api>(
 	// histories, old session files) so downstream code can rely on the type contract.
 	const normalizedMessages = messages.map((msg) => (msg.content == null ? { ...msg, content: [] } : msg));
 	const imageAwareMessages = downgradeUnsupportedImages(normalizedMessages, model);
+	const instructionAwareMessages = supportsMidConversationInstructionMessages(model)
+		? imageAwareMessages
+		: imageAwareMessages.filter((message) => message.role !== "developer");
 
 	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
-	const transformed = imageAwareMessages.map((msg) => {
-		// System and user messages pass through unchanged
-		if (msg.role === "system" || msg.role === "user") {
+	const transformed = instructionAwareMessages.map((msg) => {
+		// User and instruction messages pass through unchanged
+		if (msg.role === "user" || isInstructionMessage(msg)) {
 			return msg;
 		}
 
@@ -213,7 +217,7 @@ export function transformMessages<TApi extends Api>(
 		} else if (msg.role === "toolResult") {
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
-		} else if (msg.role === "system") {
+		} else if (isInstructionMessage(msg)) {
 			if (pendingToolCalls.length > 0) {
 				heldSystemMessages.push(msg);
 			} else {

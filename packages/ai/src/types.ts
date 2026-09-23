@@ -506,6 +506,12 @@ export interface SystemMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
+export interface DeveloperMessage {
+	role: "developer";
+	content: string | TextContent[];
+	timestamp: number; // Unix timestamp in milliseconds
+}
+
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
@@ -550,7 +556,7 @@ export type ToolResultMessage<TDetails = JsonValue> = IsJsonCompatible<TDetails>
 		}
 	: never;
 
-export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
+export type Message = SystemMessage | DeveloperMessage | UserMessage | AssistantMessage | ToolResultMessage;
 
 export type ImagesInputContent = TextContent | ImageContent;
 export type ImagesOutputContent = TextContent | ImageContent;
@@ -845,6 +851,11 @@ export interface BedrockCompat {
 	supportsStrictMode?: boolean;
 }
 
+export interface ModelCapabilities {
+	/** Whether this model supports first-class mid-conversation developer messages. */
+	midConversationInstructionMessages?: boolean;
+}
+
 /** Compatibility settings for the Mistral chat API. */
 export interface MistralConversationsCompat {
 	/** Whether the exact model accepts system messages after the conversation has started. When false, later system messages are folded into the leading system message. Default: false. */
@@ -1002,6 +1013,8 @@ export interface Model<TApi extends Api> {
 	/** Default sampling parameters for this model. See {@link StreamOptions.samplingParams}; per-request keys override these. */
 	samplingParams?: Record<string, unknown>;
 	headers?: Record<string, string>;
+	/** Model-level feature support metadata. */
+	capabilities?: ModelCapabilities;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"
 		? OpenAICompletionsCompat

@@ -92,6 +92,14 @@ Sessions created before system messages existed have no leading system message; 
 {"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false,"timestamp":1733234403000}}
 ```
 
+This fork also persists text-only developer instructions as ordinary message entries:
+
+```json
+{"type":"message","id":"dev12345","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:00:04.000Z","message":{"role":"developer","content":"Prefer concise answers.","timestamp":1733234404000}}
+```
+
+Extensions can inject developer instructions ephemerally through `context`, or persist them without starting a turn through `pi.appendDeveloperMessage()`. Unsupported developer messages are dropped during provider serialization; system messages retain their prompt/tool replay semantics. See [DeveloperMessage](message-types.md#developermessage) for the shared type.
+
 ### ModelChangeEntry
 
 Emitted when the user switches models mid-session.

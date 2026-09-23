@@ -12,6 +12,7 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { instructionContentToText, isInstructionMessage } from "../providers/instruction-messages.ts";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -1230,7 +1231,11 @@ export function convertMessages(
 		const msg = transformedMessages[i];
 		// Some providers don't allow user messages directly after tool results
 		// Insert a synthetic assistant message to bridge the gap
-		if (compat.requiresAssistantAfterToolResult && lastRole === "toolResult" && msg.role === "user") {
+		if (
+			compat.requiresAssistantAfterToolResult &&
+			lastRole === "toolResult" &&
+			(msg.role === "user" || isInstructionMessage(msg))
+		) {
 			params.push({
 				role: "assistant",
 				content: "I have processed the tool results.",
@@ -1250,6 +1255,12 @@ export function convertMessages(
 			if (text.length > 0) {
 				params.push({ role: instructionRole, content: sanitizeSurrogates(text) });
 			}
+		} else if (msg.role === "developer") {
+			const role = compat.supportsDeveloperRole ? "developer" : "system";
+			const content = sanitizeSurrogates(instructionContentToText(msg.content));
+			if (content.trim().length === 0) continue;
+			params.push({ role, content } as ChatCompletionInstructionMessageParam);
+			lastRole = role;
 		} else if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				params.push({

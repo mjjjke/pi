@@ -107,6 +107,20 @@ interface SystemMessage {
 
 The leading system message declares the initial prompt and tools. Later system messages can append instructions, replace or remove named prompt sections, and add or remove tools. Replaying them in order yields the current state. A message with `replace: true` discards the earlier state and establishes a complete new baseline.
 
+### DeveloperMessage
+
+This fork adds text-only mid-conversation instructions:
+
+```typescript
+interface DeveloperMessage {
+  role: "developer";
+  content: string | TextContent[];
+  timestamp: number;
+}
+```
+
+`pi.appendDeveloperMessage()` persists these instructions without starting a turn; the extension `context` event can inject them for one request. The canonical role stays `developer` in history. Supported providers resolve its wire role at serialization; unsupported models drop developer messages. System messages retain the prompt/tool replay behavior described above.
+
 ### UserMessage
 
 ```typescript
@@ -249,6 +263,7 @@ In the coding agent, the union is equivalent to:
 ```typescript
 type AgentMessage =
   | SystemMessage
+  | DeveloperMessage
   | UserMessage
   | AssistantMessage
   | ToolResultMessage

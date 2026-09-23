@@ -11,8 +11,16 @@ function mergeModels(baseline: readonly Model<Api>[], dynamic: readonly Model<Ap
 	const merged = [...baseline];
 	for (const model of dynamic) {
 		const index = merged.findIndex((entry) => entry.id === model.id);
-		if (index >= 0) merged[index] = model;
-		else merged.push(model);
+		if (index >= 0) {
+			const capabilities = { ...merged[index]?.capabilities, ...model.capabilities };
+			merged[index] = {
+				...merged[index],
+				...model,
+				...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
+			};
+		} else {
+			merged.push(model);
+		}
 	}
 	return merged;
 }

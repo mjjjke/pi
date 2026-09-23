@@ -106,6 +106,29 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `context` transforms conversation messages without prompt and tool system messages; Pi restores that state afterward. Use `context_with_system` only when a request-local transformation must own the complete transcript, and keep a system message at index zero.
 
+This fork also supports text-only, first-class developer instructions from `context`:
+
+```typescript
+import { supportsMidConversationInstructionMessages } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+  pi.on("context", (event, ctx) => {
+    if (!ctx.model || !supportsMidConversationInstructionMessages(ctx.model)) return;
+    return {
+      messages: [
+        ...event.messages,
+        { role: "developer", content: "Prefer minimal, reversible changes.", timestamp: Date.now() },
+      ],
+    };
+  });
+}
+```
+
+Unsupported developer instructions are dropped during provider serialization rather than failing the request. System messages retain upstream prompt/tool replay semantics. Custom models opt in through `capabilities.midConversationInstructionMessages`; keep provider wire-format quirks in `compat`. Anthropic serializes supported developer instructions as `system` messages in a valid position; OpenAI uses `developer`, or `system` when developer-role support is absent.
+
+Prefer first-class instruction messages over rewriting provider payloads in `before_provider_request`. Reserve that hook for serialization debugging, cache behavior, or experiments not expressible in Pi's message model. Payload-level changes are not reflected by `ctx.getSystemPrompt()`.
+
 `turn_end` and `agent_before_settle` are actionable boundaries. Their handlers can chain proposed `custom`, `custom_message`, `context_edit`, or `compaction` entries and return `continue: true` for one next model request. Guard continuation conditions because an unconditional continuation can loop. Use the exported event declarations for the complete validation and ordering contract.
 
 <a id="cache_warming_decision"></a>
@@ -174,6 +197,17 @@ Choose storage based on how state participates in the conversation:
 Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
 Do not rebuild it from every file entry because abandoned branches represent alternative histories.
 Register an entry or message renderer when custom stored content should appear in the transcript.
+
+### pi.appendDeveloperMessage(content)
+
+Append a passive, persisted developer instruction without triggering a turn:
+
+```typescript
+pi.appendDeveloperMessage("Prefer concise, reversible changes.");
+pi.appendDeveloperMessage([{ type: "text", text: "Stay in plan mode until approved." }]);
+```
+
+Blank content is ignored. Calls are allowed while idle and from `agent_end` handlers. Other active-run events, including `before_provider_request`, reject these calls; wait for idle when an interactive action occurs mid-stream. The canonical persisted role is `developer`; the wire role is resolved per provider as described above.
 
 <a id="custom-ui"></a>
 <a id="mode-behavior"></a>
