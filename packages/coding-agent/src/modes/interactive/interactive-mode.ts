@@ -76,6 +76,7 @@ import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/ca
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
+	AssistantMessageDisplayPhase,
 	AutocompleteProviderFactory,
 	EditorFactory,
 	ExtensionCommandContext,
@@ -3396,7 +3397,10 @@ export class InteractiveMode {
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
-					this.streamingComponent.updateContent(this.streamingMessage, true);
+					this.streamingComponent.updateContent(
+						this.getAssistantDisplayMessage(this.streamingMessage, "streaming"),
+						true,
+					);
 					this.ui.requestRender();
 				}
 				break;
@@ -3404,7 +3408,10 @@ export class InteractiveMode {
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
-					this.streamingComponent.updateContent(this.streamingMessage, true);
+					this.streamingComponent.updateContent(
+						this.getAssistantDisplayMessage(this.streamingMessage, "streaming"),
+						true,
+					);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -3449,7 +3456,10 @@ export class InteractiveMode {
 								: "Operation aborted";
 						this.streamingMessage.errorMessage = errorMessage;
 					}
-					this.streamingComponent.updateContent(this.streamingMessage, false);
+					this.streamingComponent.updateContent(
+						this.getAssistantDisplayMessage(this.streamingMessage, "final"),
+						false,
+					);
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
@@ -3737,6 +3747,13 @@ export class InteractiveMode {
 		this.chatContainer.addChild(component);
 	}
 
+	private getAssistantDisplayMessage(
+		message: AssistantMessage,
+		phase: AssistantMessageDisplayPhase,
+	): AssistantMessage {
+		return this.session.extensionRunner.applyAssistantMessageDisplayTransforms(message, { phase });
+	}
+
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		switch (message.role) {
 			case "bashExecution": {
@@ -3827,7 +3844,7 @@ export class InteractiveMode {
 			}
 			case "assistant": {
 				const assistantComponent = new AssistantMessageComponent(
-					message,
+					this.getAssistantDisplayMessage(message, "restore"),
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,

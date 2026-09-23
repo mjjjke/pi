@@ -270,6 +270,23 @@ Guard terminal-only behavior with `ctx.mode === "tui"` and use `ctx.hasUI` for i
 
 Keep tool and event behavior independent from rendering so non-interactive modes remain functional.
 
+### Assistant display transforms
+
+This fork can change normal assistant text in the TUI without changing raw session or provider messages:
+
+```typescript
+pi.registerAssistantMessageDisplayTransform("my-extension", (message) => {
+  return message.content.map((block) => {
+    if (block.type !== "text") return block;
+    return { ...block, text: block.text.replace("<submit_work/>", "Plan submitted") };
+  });
+});
+```
+
+Transforms run only in interactive rendering (`streaming`, `final`, and `restore` phases). They receive a frozen clone and run in extension load order, then registration order. Return `undefined` for no change, a string to replace aggregate text, a content array, or an assistant message. Only text blocks may change: Pi preserves thinking, tool calls, and metadata. JSONL, provider context, events, and session state remain unchanged.
+
+See [assistant-display-transform.ts](../examples/extensions/assistant-display-transform.ts) for a boundary-marker example.
+
 <a id="error-handling"></a>
 <a id="handle-errors-and-shutdown"></a>
 

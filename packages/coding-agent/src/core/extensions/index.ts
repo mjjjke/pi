@@ -34,6 +34,10 @@ export type {
 	AppendEntryHandler,
 	// App keybindings (for custom editors)
 	AppKeybinding,
+	AssistantMessageDisplayPhase,
+	AssistantMessageDisplayTransform,
+	AssistantMessageDisplayTransformContext,
+	AssistantMessageDisplayTransformResult,
 	AutocompleteProviderFactory,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,

@@ -17,6 +17,7 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ConstrainedSamplingConfig,
@@ -1332,6 +1333,34 @@ export type EntryRenderer<T = unknown> = (
 	theme: Theme,
 ) => Component | undefined;
 
+export type AssistantMessageDisplayPhase = "streaming" | "final" | "restore";
+
+export interface AssistantMessageDisplayTransformContext {
+	/** Current display phase in the interactive TUI pipeline. */
+	phase: AssistantMessageDisplayPhase;
+	/** Frozen clone of the raw assistant message from session/provider state. */
+	rawMessage: Readonly<AssistantMessage>;
+	/** Frozen clone of the currently chained display-only assistant message. */
+	displayMessage: Readonly<AssistantMessage>;
+	/** Transform id supplied at registration time. */
+	transformId: string;
+	/** Extension path that registered this transform. */
+	extensionPath: string;
+	/** Display transforms currently run only in interactive TUI mode. */
+	mode: "tui";
+}
+
+export type AssistantMessageDisplayTransformResult =
+	| string
+	| AssistantMessage
+	| AssistantMessage["content"]
+	| undefined;
+
+export type AssistantMessageDisplayTransform = (
+	message: Readonly<AssistantMessage>,
+	ctx: AssistantMessageDisplayTransformContext,
+) => AssistantMessageDisplayTransformResult;
+
 // ============================================================================
 // Command Registration
 // ============================================================================
@@ -1487,6 +1516,9 @@ export interface ExtensionAPI {
 
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
+
+	/** Register a display-only transform for normal assistant messages in the interactive TUI. */
+	registerAssistantMessageDisplayTransform(id: string, transform: AssistantMessageDisplayTransform): void;
 
 	// =========================================================================
 	// Actions
@@ -1923,6 +1955,7 @@ export interface Extension {
 	messageRenderers: Map<string, MessageRenderer>;
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;
+	assistantMessageDisplayTransforms: Map<string, AssistantMessageDisplayTransform>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
