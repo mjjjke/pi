@@ -36,7 +36,11 @@ describe("regression #2860: replaced session callbacks", () => {
 		}
 	});
 
-	async function createRuntimeForTest(extensionFactory: ExtensionFactory, responses: string[]) {
+	async function createRuntimeForTest(
+		extensionFactory: ExtensionFactory,
+		responses: string[],
+		options?: { bindCommandContext?: boolean },
+	) {
 		const tempDir = join(tmpdir(), `pi-2860-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -103,29 +107,33 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		const rebindSession = async (): Promise<void> => {
 			const session = runtime.session;
-			await session.bindExtensions({
-				commandContextActions: {
-					waitForIdle: () => session.agent.waitForIdle(),
-					newSession: async (options) => runtime.newSession(options),
-					fork: async (entryId, options) => {
-						const result = await runtime.fork(entryId, options);
-						return { cancelled: result.cancelled };
-					},
-					navigateTree: async (targetId, options) => {
-						const result = await session.navigateTree(targetId, {
-							summarize: options?.summarize,
-							customInstructions: options?.customInstructions,
-							replaceInstructions: options?.replaceInstructions,
-							label: options?.label,
-						});
-						return { cancelled: result.cancelled };
-					},
-					switchSession: async (sessionPath, options) => runtime.switchSession(sessionPath, options),
-					reload: async () => {
-						await session.reload();
-					},
-				},
-			});
+			await session.bindExtensions(
+				options?.bindCommandContext === false
+					? {}
+					: {
+							commandContextActions: {
+								waitForIdle: () => session.agent.waitForIdle(),
+								newSession: async (options) => runtime.newSession(options),
+								fork: async (entryId, options) => {
+									const result = await runtime.fork(entryId, options);
+									return { cancelled: result.cancelled };
+								},
+								navigateTree: async (targetId, options) => {
+									const result = await session.navigateTree(targetId, {
+										summarize: options?.summarize,
+										customInstructions: options?.customInstructions,
+										replaceInstructions: options?.replaceInstructions,
+										label: options?.label,
+									});
+									return { cancelled: result.cancelled };
+								},
+								switchSession: async (sessionPath, options) => runtime.switchSession(sessionPath, options),
+								reload: async () => {
+									await session.reload();
+								},
+							},
+						},
+			);
 		};
 
 		runtime.setRebindSession(async () => {
@@ -207,6 +215,216 @@ describe("regression #2860: replaced session callbacks", () => {
 				.filter((message) => message.role !== "system")
 				.map((message) => `${message.role}:${getText(message)}`),
 		).toEqual(["developer:Replacement session mask.", "user:Hello from the new session!", "assistant:hello reply"]);
+	});
+
+	it("queues requestNewSession from agent_end and runs setup and withSession in the replacement session", async () => {
+		let requested = false;
+		let oldCtx: ExtensionCommandContext | undefined;
+		let oldPi: ExtensionAPI | undefined;
+		let oldSessionFile: string | undefined;
+		let completion: Promise<{ cancelled: boolean }> | undefined;
+		let completionResult: { cancelled: boolean } | undefined;
+		let duplicateQueued: boolean | undefined;
+		let replacementSessionFile: string | undefined;
+		let staleCtxThrows = false;
+		let stalePiThrows = false;
+		const artifactPath = "/tmp/plan.md";
+		const planText = "Plan text";
+		let enterReplacement!: () => void;
+		const enteredReplacement = new Promise<void>((resolve) => {
+			enterReplacement = resolve;
+		});
+		let releaseReplacement!: () => void;
+		const replacementReleased = new Promise<void>((resolve) => {
+			releaseReplacement = resolve;
+		});
+		const beforeSettleFiles: Array<string | undefined> = [];
+		const { runtime } = await createRuntimeForTest(
+			(pi) => {
+				pi.on("agent_end", async (_event, ctx) => {
+					if (requested) {
+						return;
+					}
+					requested = true;
+					oldCtx = ctx as ExtensionCommandContext;
+					oldPi = pi;
+					oldSessionFile = ctx.sessionManager.getSessionFile();
+
+					const request = await ctx.requestNewSession({
+						parentSession: oldSessionFile,
+						setup: async (sessionManager) => {
+							sessionManager.appendCustomEntry("pi-collaboration-mode", {
+								mode: "default",
+								artifactPath,
+								instructionPending: true,
+							});
+						},
+						withSession: async (freshCtx) => {
+							replacementSessionFile = freshCtx.sessionManager.getSessionFile();
+							enterReplacement();
+							await replacementReleased;
+							await freshCtx.sendMessage({
+								customType: "pi-collaboration-handoff",
+								content: planText,
+								display: true,
+							});
+							await freshCtx.sendUserMessage("Implement the plan.", { deliverAs: "followUp" });
+						},
+					});
+					if (request.queued) {
+						completion = request.completion.then((result) => {
+							completionResult = result;
+							return result;
+						});
+					}
+					const duplicate = await ctx.requestNewSession();
+					duplicateQueued = duplicate.queued;
+				});
+				pi.on("agent_before_settle", (_event, ctx) => {
+					beforeSettleFiles.push(ctx.sessionManager.getSessionFile());
+				});
+			},
+			["plan reply", "fresh reply"],
+		);
+
+		// #2860: replacement must finish without deadlocking or releasing outgoing idle waiters early.
+		const outgoing = runtime.session;
+		let idleResolved = false;
+		let idle: Promise<void> | undefined;
+		outgoing.subscribe((event) => {
+			if (event.type === "agent_start")
+				idle = outgoing.waitForIdle().then(() => {
+					idleResolved = true;
+				});
+		});
+		const prompt = outgoing.prompt("make a plan");
+		try {
+			await enteredReplacement;
+			expect(outgoing.isIdle).toBe(false);
+			expect(idleResolved).toBe(false);
+		} finally {
+			releaseReplacement();
+			await prompt;
+		}
+		await idle;
+		expect(idleResolved).toBe(true);
+		expect(outgoing.isIdle).toBe(true);
+		expect(beforeSettleFiles).toEqual([replacementSessionFile]);
+		expect(completion).toBeDefined();
+		await completion;
+
+		expect(completionResult).toEqual({ cancelled: false });
+		expect(duplicateQueued).toBe(false);
+		expect(replacementSessionFile).toBeDefined();
+		expect(replacementSessionFile).not.toBe(oldSessionFile);
+		expect(runtime.session.sessionFile).toBe(replacementSessionFile);
+		expect(runtime.session.sessionManager.getHeader()?.parentSession).toBe(oldSessionFile);
+		expect(runtime.session.sessionManager.getSessionName()).toBeUndefined();
+
+		const customStateEntry = runtime.session.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "custom" && entry.customType === "pi-collaboration-mode");
+		expect(customStateEntry).toMatchObject({
+			type: "custom",
+			customType: "pi-collaboration-mode",
+			data: { mode: "default", artifactPath, instructionPending: true },
+		});
+
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => `${message.role}:${getText(message)}`),
+		).toEqual(["custom:Plan text", "user:Implement the plan.", "assistant:fresh reply"]);
+
+		try {
+			oldCtx?.sessionManager.getSessionFile();
+		} catch {
+			staleCtxThrows = true;
+		}
+		try {
+			oldPi?.sendUserMessage("stale message");
+		} catch {
+			stalePiThrows = true;
+		}
+		expect(staleCtxThrows).toBe(true);
+		expect(stalePiThrows).toBe(true);
+	});
+
+	it("resolves requestNewSession completion as cancelled when session_before_switch cancels", async () => {
+		let requested = false;
+		let originalSessionFile: string | undefined;
+		let completion: Promise<{ cancelled: boolean }> | undefined;
+		const { runtime } = await createRuntimeForTest(
+			(pi) => {
+				pi.on("session_before_switch", () => ({ cancel: true }));
+				pi.on("agent_end", async (_event, ctx) => {
+					if (requested) {
+						return;
+					}
+					requested = true;
+					originalSessionFile = ctx.sessionManager.getSessionFile();
+					const request = await ctx.requestNewSession({ parentSession: originalSessionFile });
+					if (request.queued) {
+						completion = request.completion;
+					}
+				});
+			},
+			["stays put"],
+		);
+
+		await runtime.session.prompt("try replacement");
+
+		expect(completion).toBeDefined();
+		await expect(completion!).resolves.toEqual({ cancelled: true });
+		expect(runtime.session.sessionFile).toBe(originalSessionFile);
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => `${message.role}:${getText(message)}`),
+		).toEqual(["user:try replacement", "assistant:stays put"]);
+	});
+
+	it("continues queued messages when deferred request fails before replacement", async () => {
+		let requested = false;
+		let completion: Promise<void> | undefined;
+		let completionRejected = false;
+		const { runtime } = await createRuntimeForTest(
+			(pi) => {
+				pi.on("agent_end", async (_event, ctx) => {
+					if (requested) {
+						return;
+					}
+					requested = true;
+					const request = await ctx.requestNewSession();
+					if (request.queued) {
+						completion = request.completion.then(
+							() => {},
+							() => {
+								completionRejected = true;
+							},
+						);
+					}
+					pi.sendUserMessage("continue after failed replacement", { deliverAs: "followUp" });
+				});
+			},
+			["first reply", "second reply"],
+			{ bindCommandContext: false },
+		);
+
+		await runtime.session.prompt("start");
+		await completion;
+
+		expect(completionRejected).toBe(true);
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "system")
+				.map((message) => `${message.role}:${getText(message)}`),
+		).toEqual([
+			"user:start",
+			"assistant:first reply",
+			"user:continue after failed replacement",
+			"assistant:second reply",
+		]);
 	});
 
 	it("supports withSession for fork", async () => {

@@ -15,6 +15,7 @@ export type {
 	ForkHandler,
 	NavigateTreeHandler,
 	NewSessionHandler,
+	RequestNewSessionHandler,
 	ShutdownHandler,
 	SwitchSessionHandler,
 } from "./runner.ts";
@@ -136,6 +137,8 @@ export type {
 	RegisteredCommand,
 	RegisteredTool,
 	ReplacedSessionContext,
+	RequestNewSessionOptions,
+	RequestNewSessionResult,
 	ResolvedCommand,
 	// Events - Resources
 	ResourcesDiscoverEvent,

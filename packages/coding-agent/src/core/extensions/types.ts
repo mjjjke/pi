@@ -305,6 +305,16 @@ export interface CompactOptions {
 	onError?: (error: Error) => void;
 }
 
+export interface RequestNewSessionOptions {
+	parentSession?: string;
+	setup?: (sessionManager: SessionManager) => Promise<void>;
+	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+}
+
+export type RequestNewSessionResult =
+	| { queued: true; completion: Promise<{ cancelled: boolean }> }
+	| { queued: false; reason: "already_pending" };
+
 /**
  * Context passed to extension event handlers.
  */
@@ -350,6 +360,11 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/**
+	 * Request a deferred new-session replacement.
+	 * Currently supported only from agent_end event handlers.
+	 */
+	requestNewSession(options?: RequestNewSessionOptions): Promise<RequestNewSessionResult>;
 }
 
 /**
@@ -364,11 +379,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	waitForIdle(): Promise<void>;
 
 	/** Start a new session, optionally with initialization. */
-	newSession(options?: {
-		parentSession?: string;
-		setup?: (sessionManager: SessionManager) => Promise<void>;
-		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<{ cancelled: boolean }>;
+	newSession(options?: RequestNewSessionOptions): Promise<{ cancelled: boolean }>;
 
 	/** Fork from a specific entry, creating a new session file. */
 	fork(
@@ -1869,6 +1880,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
+	requestNewSession: (options?: RequestNewSessionOptions) => Promise<RequestNewSessionResult>;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
 }
 
@@ -1878,11 +1890,7 @@ export interface ExtensionContextActions {
  */
 export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
-	newSession: (options?: {
-		parentSession?: string;
-		setup?: (sessionManager: SessionManager) => Promise<void>;
-		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}) => Promise<{ cancelled: boolean }>;
+	newSession: (options?: RequestNewSessionOptions) => Promise<{ cancelled: boolean }>;
 	fork: (
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },

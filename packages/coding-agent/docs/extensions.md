@@ -178,7 +178,50 @@ Use `ctx.modelRegistry.streamSimple()` for provider-neutral nested model calls.
 Command handlers receive `ExtensionCommandContext`, which adds operations for waiting until idle, reloading, tree navigation, and session replacement.
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 
-Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work.
+Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work. The fresh `ReplacedSessionContext` includes `appendDeveloperMessage()` and async `sendMessage()` and `sendUserMessage()` helpers.
+
+### ctx.requestNewSession(options?)
+
+This fork supports deferred session replacement from `agent_end` handlers only. Calls from other events, tools, commands, or shortcuts throw. Pi queues one replacement and runs it after the current `agent_end` emission finishes; another request for that emission returns `{ queued: false, reason: "already_pending" }`.
+
+```typescript
+pi.on("agent_end", async (_event, ctx) => {
+  const request = await ctx.requestNewSession({
+    parentSession: ctx.sessionManager.getSessionFile(),
+    setup: async (sm) => {
+      sm.appendCustomEntry("my-extension-state", { ready: true });
+    },
+    withSession: async (freshCtx) => {
+      await freshCtx.sendMessage({
+        customType: "my-handoff",
+        content: "Handoff context",
+        display: true,
+      });
+      await freshCtx.sendUserMessage("Continue from the handoff.", { deliverAs: "followUp" });
+    },
+  });
+
+  if (!request.queued) {
+    ctx.ui.notify("Another extension already requested a fresh session", "warning");
+    return;
+  }
+
+  request.completion.then(
+    (result) => {
+      if (result.cancelled) {
+        // Cancelled by session_before_switch.
+      }
+    },
+    (error) => {
+      // Replacement failed; handle or log the error.
+    },
+  );
+});
+```
+
+Options match `ctx.newSession()`: `parentSession` records the parent file, `setup` mutates the new `SessionManager`, and `withSession` performs post-switch work against the fresh context. The old `pi` and `ctx` become stale after successful replacement.
+
+`completion` resolves with `{ cancelled }`, or rejects when replacement fails, including unsupported modes. Attach a rejection handler when observing it. Never await `completion` inside the handler that queued it: replacement cannot run until all `agent_end` handlers return.
 
 <a id="state-management"></a>
 <a id="persist-state"></a>

@@ -68,6 +68,8 @@ import type {
 	RegisteredCommand,
 	RegisteredTool,
 	ReplacedSessionContext,
+	RequestNewSessionOptions,
+	RequestNewSessionResult,
 	ResolvedCommand,
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
@@ -222,11 +224,9 @@ interface BoundaryDispatchResult {
 	valid: boolean;
 }
 
-export type NewSessionHandler = (options?: {
-	parentSession?: string;
-	setup?: (sessionManager: SessionManager) => Promise<void>;
-	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-}) => Promise<{ cancelled: boolean }>;
+export type NewSessionHandler = (options?: RequestNewSessionOptions) => Promise<{ cancelled: boolean }>;
+
+export type RequestNewSessionHandler = (options?: RequestNewSessionOptions) => Promise<RequestNewSessionResult>;
 
 export type ForkHandler = (
 	entryId: string,
@@ -372,6 +372,9 @@ export class ExtensionRunner {
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
+	private requestNewSessionHandler: RequestNewSessionHandler = async () => {
+		throw new Error("ctx.requestNewSession() is not available in this mode.");
+	};
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -437,6 +440,7 @@ export class ExtensionRunner {
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
+		this.requestNewSessionHandler = contextActions.requestNewSession;
 		this.getSystemPromptOptionsFn =
 			contextActions.getSystemPromptOptions ?? (() => normalizeBuildSystemPromptOptions({ cwd: this.cwd }));
 
@@ -807,7 +811,7 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 */
-	createContext(): ExtensionContext {
+	createContext(eventType?: string): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		const getScopedModels = this.getScopedModels;
@@ -883,6 +887,13 @@ export class ExtensionRunner {
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
+			},
+			requestNewSession: (options) => {
+				runner.assertActive();
+				if (eventType !== "agent_end") {
+					throw new Error("ctx.requestNewSession() can only be called from an agent_end extension handler.");
+				}
+				return runner.requestNewSessionHandler(options);
 			},
 		};
 	}
@@ -987,7 +998,7 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-		const ctx = this.createContext();
+		const ctx = this.createContext(event.type);
 		let result: SessionBeforeEventResult | undefined;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
@@ -1042,7 +1053,7 @@ export class ExtensionRunner {
 	}
 
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("message_end");
 		let currentMessage = event.message;
 		let modified = false;
 
@@ -1081,7 +1092,7 @@ export class ExtensionRunner {
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("tool_result");
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -1133,7 +1144,7 @@ export class ExtensionRunner {
 	}
 
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("tool_call");
 		let result: ToolCallEventResult | undefined;
 
 		for (const { handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {
@@ -1153,7 +1164,7 @@ export class ExtensionRunner {
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("user_bash");
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "user_bash")) {
 			for (const handler of handlers) {
@@ -1189,7 +1200,7 @@ export class ExtensionRunner {
 	 * handlers then see the full transcript and their output is used as returned.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("context");
 		let currentMessages = structuredClone(messages);
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "context")) {
@@ -1252,7 +1263,7 @@ export class ExtensionRunner {
 	}
 
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("before_provider_request");
 		let currentPayload = payload;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_provider_request")) {
@@ -1319,7 +1330,7 @@ export class ExtensionRunner {
 		const renderCurrentSystemPrompt = (): string => buildSystemPrompt(currentOptions);
 		const ctx = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this.createContext()),
+			Object.getOwnPropertyDescriptors(this.createContext("before_agent_start")),
 		) as ExtensionContext;
 		ctx.getSystemPrompt = () => {
 			this.assertActive();
@@ -1372,7 +1383,7 @@ export class ExtensionRunner {
 		promptPaths: Array<{ path: string; extensionPath: string }>;
 		themePaths: Array<{ path: string; extensionPath: string }>;
 	}> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("resources_discover");
 		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
 		const themePaths: Array<{ path: string; extensionPath: string }> = [];
@@ -1416,7 +1427,7 @@ export class ExtensionRunner {
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
 	): Promise<InputEventResult> {
-		const ctx = this.createContext();
+		const ctx = this.createContext("input");
 		let currentText = text;
 		let currentImages = images;
 

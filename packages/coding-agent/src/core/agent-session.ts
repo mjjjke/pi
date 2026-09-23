@@ -89,6 +89,8 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
+	type RequestNewSessionOptions,
+	type RequestNewSessionResult,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionBoundaryDraft,
@@ -314,6 +316,12 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface PendingNewSessionRequest {
+	options?: RequestNewSessionOptions;
+	resolve: (result: { cancelled: boolean }) => void;
+	reject: (error: unknown) => void;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -368,6 +376,7 @@ export class AgentSession {
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
+	private _disposed = false;
 	private _turnIndex = 0;
 	private readonly _entryIdsByMessage = new WeakMap<object, string>();
 	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
@@ -379,6 +388,8 @@ export class AgentSession {
 	private _isEmittingAgentSettled = false;
 	private readonly _deferredSettledActions: Array<() => Promise<void>> = [];
 	private _isEmittingAgentEndExtensionEvent = false;
+	private _isDrainingNewSessionRequest = false;
+	private _pendingNewSessionRequest: PendingNewSessionRequest | undefined;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -976,6 +987,78 @@ export class AgentSession {
 		}
 	};
 
+	private async _requestNewSession(options?: RequestNewSessionOptions): Promise<RequestNewSessionResult> {
+		if (this._pendingNewSessionRequest) {
+			return { queued: false, reason: "already_pending" };
+		}
+
+		let resolveCompletion: (result: { cancelled: boolean }) => void = () => {};
+		let rejectCompletion: (error: unknown) => void = () => {};
+		const completion = new Promise<{ cancelled: boolean }>((resolve, reject) => {
+			resolveCompletion = resolve;
+			rejectCompletion = reject;
+		});
+		completion.catch(() => undefined);
+
+		this._pendingNewSessionRequest = {
+			options,
+			resolve: resolveCompletion,
+			reject: rejectCompletion,
+		};
+		return { queued: true, completion };
+	}
+
+	private async _drainPendingNewSessionRequest(): Promise<"none" | "cancelled" | "replaced" | "failed"> {
+		const request = this._pendingNewSessionRequest;
+		if (!request) {
+			return "none";
+		}
+		this._pendingNewSessionRequest = undefined;
+
+		const newSession = this._extensionCommandContextActions?.newSession;
+		if (!newSession) {
+			const error = new Error("ctx.requestNewSession() requires session replacement support in this mode.");
+			request.reject(error);
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "request_new_session",
+				error: error.message,
+			});
+			return "failed";
+		}
+
+		this._isDrainingNewSessionRequest = true;
+		try {
+			const result = await newSession(request.options);
+			request.resolve(result);
+			return result.cancelled ? "cancelled" : "replaced";
+		} catch (error) {
+			request.reject(error);
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "request_new_session",
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			return "failed";
+		} finally {
+			this._isDrainingNewSessionRequest = false;
+		}
+	}
+
+	/** @internal Settle the outgoing runtime without waiting on its own deferred replacement. */
+	async prepareForSessionReplacement(): Promise<void> {
+		if (!this._isDrainingNewSessionRequest) {
+			await this.abort();
+			return;
+		}
+		// The low-level run and its event handlers have finished. Public idle waiters
+		// must still wait for replacement (or cancellation and queued continuations).
+		await this.agent.waitForIdle();
+		this._flushPendingBashMessages();
+		this._flushPendingCustomMessages();
+	}
+
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
 		if (this._agentRunAbortRequested) return false;
 		const settings = this.settingsManager.getRetrySettings();
@@ -1176,6 +1259,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._disposed = true;
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -1478,7 +1562,8 @@ export class AgentSession {
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
-			while (!this._agentRunAbortRequested) {
+			while (!this._agentRunAbortRequested && !this._disposed) {
+				if ((await this._drainPendingNewSessionRequest()) === "replaced" || this._disposed) break;
 				if (await this._handlePostAgentRun()) {
 					if (this._agentRunAbortRequested) break;
 					await this.agent.continue();
@@ -1493,7 +1578,14 @@ export class AgentSession {
 			this._runSystemPromptOptions = undefined;
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
-			await this._emitAgentSettled();
+			this._pendingNewSessionRequest?.resolve({ cancelled: true });
+			this._pendingNewSessionRequest = undefined;
+			if (this._disposed) {
+				this._isAgentRunActive = false;
+				this._resolveIdleWaitIfIdle();
+			} else {
+				await this._emitAgentSettled();
+			}
 		}
 	}
 
@@ -3155,6 +3247,7 @@ export class AgentSession {
 					})();
 				},
 				getSystemPrompt: () => this.systemPrompt,
+				requestNewSession: (options) => this._requestNewSession(options),
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
 			},
 			{
