@@ -185,6 +185,58 @@ const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01";
 const MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01";
 const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 const MID_CONVERSATION_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
+const FAST_MODE_BETA = "fast-mode-2026-02-01";
+
+type AnthropicFastModeParams = MessageCreateParamsStreaming & {
+	speed: "fast" | "standard" | null;
+};
+
+function usesAnthropicFastMode(params: MessageCreateParamsStreaming): params is AnthropicFastModeParams {
+	const speed = (params as { speed?: unknown }).speed;
+	return speed === "fast" || speed === "standard" || speed === null;
+}
+
+function getHeaderValue(headers: ProviderHeaders | undefined, name: string): string | undefined {
+	const headerName = name.toLowerCase();
+	const entry = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === headerName);
+	return entry?.[1] ?? undefined;
+}
+
+function mergeAnthropicBetaHeaders(...sources: (string | readonly string[] | undefined)[]): string {
+	const betas: string[] = [];
+	for (const source of sources) {
+		const values = typeof source === "string" ? source.split(",") : (source ?? []);
+		for (const value of values) {
+			const beta = value.trim();
+			if (beta && !betas.includes(beta)) betas.push(beta);
+		}
+	}
+	return betas.join(",");
+}
+
+function withAnthropicFastModeHeaders<T extends object>(
+	requestOptions: T,
+	params: MessageCreateParamsStreaming,
+	model: Model<"anthropic-messages">,
+	optionsHeaders: ProviderHeaders | undefined,
+): T & { headers: Record<string, string> } {
+	const existingHeaders = (requestOptions as { headers?: Record<string, string> }).headers;
+	const oauthBetas = params.betas?.filter((beta) => beta === "claude-code-20250219" || beta === "oauth-2025-04-20");
+	const otherBetas = params.betas?.filter((beta) => !oauthBetas?.includes(beta));
+	return {
+		...requestOptions,
+		headers: {
+			...existingHeaders,
+			"anthropic-beta": mergeAnthropicBetaHeaders(
+				oauthBetas,
+				FAST_MODE_BETA,
+				otherBetas,
+				getHeaderValue(model.headers, "anthropic-beta"),
+				getHeaderValue(optionsHeaders, "anthropic-beta"),
+			),
+		},
+	};
+}
 
 /**
  * Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
@@ -586,7 +638,15 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				maxRetries: 0,
 			};
 			const response = await retryProviderRequest(
-				() => client.beta.messages.create(params, requestOptions).asResponse(),
+				() =>
+					client.beta.messages
+						.create(
+							params,
+							usesAnthropicFastMode(params)
+								? withAnthropicFastModeHeaders(requestOptions, params, model, options?.headers)
+								: requestOptions,
+						)
+						.asResponse(),
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,

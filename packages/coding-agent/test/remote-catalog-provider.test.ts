@@ -229,6 +229,55 @@ describe("remote catalog provider", () => {
 		expect((await store.read(provider.id))?.models.map((entry) => entry.id)).toEqual(["newer"]);
 	});
 
+	it.each([undefined, false])("preserves metadata and honors remote capability override %s", async (override) => {
+		const baseline: Model<"openai-completions"> = {
+			...model("shared"),
+			inputLimits: { images: { resize: { maxWidth: 2000 } } },
+			capabilities: {
+				midConversationInstructionMessages: true,
+				fastMode: { provider: "openai-codex", body: { service_tier: "priority" } },
+			},
+		};
+		const dynamic = {
+			...model("shared"),
+			contextWindow: 2000,
+			...(override === undefined ? {} : { capabilities: { midConversationInstructionMessages: override } }),
+		};
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify([dynamic]), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			}),
+		);
+		const provider = withRemoteCatalog(
+			createProvider({
+				id: "test-provider",
+				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+				models: [baseline],
+				api: {
+					stream: () => {
+						throw new Error("not used");
+					},
+					streamSimple: () => {
+						throw new Error("not used");
+					},
+				},
+			}),
+		);
+		const store = new InMemoryModelsStore();
+
+		await refreshProvider(provider, store);
+
+		expect(provider.getModels()).toEqual([
+			expect.objectContaining({
+				id: "shared",
+				contextWindow: 2000,
+				inputLimits: baseline.inputLimits,
+				capabilities: { ...baseline.capabilities, midConversationInstructionMessages: override ?? true },
+			}),
+		]);
+	});
+
 	it("treats unimplemented pi.dev catalog routes as an unavailable overlay", async () => {
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("not implemented", { status: 501 }));
 		const provider = testProvider();

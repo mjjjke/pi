@@ -1,6 +1,8 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import type Anthropic from "@anthropic-ai/sdk";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
@@ -79,6 +81,16 @@ function createFakeAnthropicClient(response: Response): Anthropic {
 			},
 		},
 	} as unknown as Anthropic;
+}
+
+function createRoutingFakeAnthropicClient(response: Response) {
+	const betaMessagesCreate = vi.fn((_params: unknown, _options?: { headers?: Record<string, string> }) => ({
+		asResponse: async () => response,
+	}));
+	return {
+		client: { beta: { messages: { create: betaMessagesCreate } } } as unknown as Anthropic,
+		betaMessagesCreate,
+	};
 }
 
 type ResponseContentBlock = { type: "thinking"; thinking: string; signature: string } | { type: "text"; text: string };
@@ -326,6 +338,102 @@ describe("Anthropic raw SSE parsing", () => {
 			},
 		]);
 	});
+
+	it("adds the fast mode beta header for speed payloads", async () => {
+		const model = getModel("anthropic", "claude-opus-4-8");
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		});
+		const { client, betaMessagesCreate } = createRoutingFakeAnthropicClient(
+			createSseResponse(minimalAnthropicEvents),
+		);
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), speed: "fast" }),
+		}).result();
+
+		expect(result.errorMessage).toBeUndefined();
+		expect(betaMessagesCreate).toHaveBeenCalledOnce();
+		expect(betaMessagesCreate.mock.calls[0]?.[0]).toMatchObject({ speed: "fast", stream: true });
+		expect(betaMessagesCreate.mock.calls[0]?.[1]?.headers?.["anthropic-beta"]).toBe("fast-mode-2026-02-01");
+	});
+
+	it("includes Claude Code OAuth and fast mode beta headers on OAuth speed payloads", async () => {
+		let capturedBetaHeader: string | string[] | undefined;
+		const server = createServer((request, response) => {
+			capturedBetaHeader = request.headers["anthropic-beta"];
+			response.writeHead(200, { "content-type": "text/event-stream" });
+			response.end(minimalAnthropicEvents.map(({ event, data }) => `event: ${event}\ndata: ${data}\n`).join("\n"));
+		});
+
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address() as AddressInfo;
+		try {
+			const baseModel = getModel("anthropic", "claude-opus-4-8");
+			const model = { ...baseModel, baseUrl: `http://127.0.0.1:${address.port}` };
+			const context = normalizeContext({
+				messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+			});
+			const result = await streamAnthropic(model, context, {
+				apiKey: "sk-ant-oat-test",
+				cacheRetention: "none",
+				onPayload: (payload) => ({ ...(payload as Record<string, unknown>), speed: "fast" }),
+			}).result();
+			expect(result.errorMessage).toBeUndefined();
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				server.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+
+		const betaHeader = Array.isArray(capturedBetaHeader) ? capturedBetaHeader.join(",") : capturedBetaHeader;
+		expect(betaHeader?.split(",")).toEqual(["claude-code-20250219", "oauth-2025-04-20", "fast-mode-2026-02-01"]);
+	});
+
+	it("preserves existing Anthropic beta headers on fast speed payloads", async () => {
+		const baseModel = getModel("anthropic", "claude-opus-4-8");
+		const model = {
+			...baseModel,
+			headers: { "anthropic-beta": "model-beta" },
+			compat: { ...baseModel.compat, supportsEagerToolInputStreaming: false },
+		};
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "Use the edit tool.", timestamp: Date.now() }],
+			tools: [{ name: "edit", description: "Edit a file.", parameters: Type.Object({ path: Type.String() }) }],
+		});
+		const { client, betaMessagesCreate } = createRoutingFakeAnthropicClient(
+			createSseResponse(minimalAnthropicEvents),
+		);
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			headers: { "anthropic-beta": "option-beta" },
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), speed: "fast" }),
+		}).result();
+
+		expect(result.errorMessage).toBeUndefined();
+		const betaHeader = betaMessagesCreate.mock.calls[0]?.[1]?.headers?.["anthropic-beta"];
+		expect(betaHeader?.split(",")).toEqual(["fast-mode-2026-02-01", "option-beta", "model-beta"]);
+	});
+
+	it("keeps normal payloads on beta messages without the fast mode header", async () => {
+		const model = getModel("anthropic", "claude-opus-4-8");
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		});
+		const { client, betaMessagesCreate } = createRoutingFakeAnthropicClient(
+			createSseResponse(minimalAnthropicEvents),
+		);
+
+		const result = await streamAnthropic(model, context, { client }).result();
+
+		expect(result.errorMessage).toBeUndefined();
+		expect(betaMessagesCreate).toHaveBeenCalledOnce();
+		expect(betaMessagesCreate.mock.calls[0]?.[0]).not.toHaveProperty("speed");
+		expect(betaMessagesCreate.mock.calls[0]?.[1]?.headers).toBeUndefined();
+	});
+
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const context = normalizeContext({
