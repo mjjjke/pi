@@ -234,6 +234,16 @@ Running `pi update` without a target updates Pi itself.
 
 Add `--force` to reinstall Pi when the selected update includes Pi.
 
+### Local fork updates
+
+In this fork, a local Git installation with an `upstream` remote prepares an isolated update candidate instead of installing a registry package. The installed checkout must be clean and on `main`. Pi verifies GitHub's latest published stable release, its tag and its commit before launching the update agent; it does not infer a release from a tag or use `upstream/main`.
+
+The candidate starts from the pinned local `main` commit and merges the verified release with `--no-ff --no-commit`. The agent reviews the fork inventory, resolves conflicts and validates the fork and isolated extension consumers against candidate sources. It leaves the merge uncommitted for review. No push, build, activation or relinking is authorized by preparation.
+
+Offline mode, release verification failures and inconsistent versions stop this path without falling back to npm. An already integrated release is a no-op. `--force` does not bypass these checks. `--all` still updates installed packages separately; that part is not isolated by the fork candidate. Set `PI_DISABLE_FORK_UPDATE_AGENT=1` only to explicitly opt out to the normal package-manager update path.
+
+The process completion message is not a validation or installation claim. Read the candidate report and follow the [fork inventory and promotion checklist](../../../FORK.md) before approving integration or activation.
+
 ### Aliases and command options
 
 - `pi uninstall <source>` is an alias for `pi remove <source>`.

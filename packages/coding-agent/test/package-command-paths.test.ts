@@ -22,6 +22,8 @@ import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { main } from "../src/main.ts";
 import { ConfigSelectorComponent } from "../src/modes/interactive/components/config-selector.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
+import * as forkUpdate from "../src/utils/fork-self-update.ts";
+import * as forkRelease from "../src/utils/fork-update-release.ts";
 import { allowNetwork } from "./test-network-env.ts";
 
 describe("package commands", () => {
@@ -118,6 +120,23 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 			throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
 		}
 		return result.stdout.trim();
+	}
+
+	function mockForkRelease(repoRoot: string) {
+		writeFileSync(join(repoRoot, "fixture.txt"), "fork fixture");
+		git(["add", "fixture.txt"], repoRoot);
+		git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "fixture"], repoRoot);
+		return vi.spyOn(forkRelease, "resolveForkUpdateRelease").mockResolvedValue({
+			repoRoot,
+			baseSha: git(["rev-parse", "HEAD"], repoRoot),
+			upstreamRepository: "example/pi",
+			release: {
+				version: "0.88.0",
+				tag: "v0.88.0",
+				commit: "b".repeat(40),
+				url: "https://github.com/example/pi/releases/tag/v0.88.0",
+			},
+		});
 	}
 
 	async function runPackageCommandDirectly(args: string[]): Promise<void> {
@@ -610,6 +629,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		mkdirSync(upstreamDir, { recursive: true });
 		git(["init", "--initial-branch=main"], repoRoot);
 		git(["remote", "add", "upstream", upstreamDir], repoRoot);
+		mockForkRelease(repoRoot);
 		writeFileSync(
 			fakeEntrypoint,
 			`const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify({argv:process.argv.slice(2),cwd:process.cwd(),env:{PI_FORK_UPDATE_AGENT:process.env.PI_FORK_UPDATE_AGENT,PI_SKIP_VERSION_CHECK:process.env.PI_SKIP_VERSION_CHECK}}));`,
@@ -671,6 +691,7 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 		mkdirSync(upstreamDir, { recursive: true });
 		git(["init", "--initial-branch=main"], repoRoot);
 		git(["remote", "add", "upstream", upstreamDir], repoRoot);
+		mockForkRelease(repoRoot);
 		writeFileSync(fakeEntrypoint, "process.exit(23);");
 		const originalArgv1 = process.argv[1];
 		process.argv[1] = fakeEntrypoint;
@@ -690,6 +711,48 @@ if (process.platform !== "win32") fs.chmodSync(piPath, 0o755);
 			errorSpy.mockRestore();
 		}
 	});
+
+	it.each(["error", "current"])(
+		"does not spawn or fall back to npm when fork verification returns %s",
+		async (outcome) => {
+			vi.stubEnv("PI_DISABLE_FORK_UPDATE_AGENT", "");
+			const repoRoot = join(tempDir, "verification-fork");
+			const forkPackageDir = join(repoRoot, "packages", "coding-agent");
+			mkdirSync(forkPackageDir, { recursive: true });
+			git(["init", "--initial-branch=main"], repoRoot);
+			git(["remote", "add", "upstream", "https://github.com/example/pi.git"], repoRoot);
+			const resolve = mockForkRelease(repoRoot);
+			if (outcome === "error") resolve.mockRejectedValue(new Error("Release verification failed"));
+			else resolve.mockResolvedValue(undefined);
+			process.env.PI_PACKAGE_DIR = forkPackageDir;
+			const spawn = vi.spyOn(forkUpdate, "runForkSelfUpdateAgent");
+			const fetchMock = vi.fn();
+			vi.stubGlobal("fetch", fetchMock);
+			vi.spyOn(console, "log").mockImplementation(() => {});
+			const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+			await runPackageCommandDirectly(["update", "--force"]);
+			expect(resolve).toHaveBeenCalledExactlyOnceWith(repoRoot);
+			expect(spawn).not.toHaveBeenCalled();
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(process.exitCode).toBe(outcome === "error" ? 1 : undefined);
+			if (outcome === "error")
+				expect(errors).toHaveBeenCalledWith(expect.stringContaining("Release verification failed"));
+		},
+	);
+
+	it.each([["update", "--help"], ["list"], ["update", "--extensions"], ["update", "--models"]])(
+		"does not resolve fork releases for %j",
+		async (...args) => {
+			const resolve = vi.spyOn(forkRelease, "resolveForkUpdateRelease");
+			vi.stubEnv("PI_DISABLE_FORK_UPDATE_AGENT", "");
+			vi.spyOn(ModelRuntime, "create").mockResolvedValue({
+				refresh: async () => ({ aborted: false, errors: new Map() }),
+			} as unknown as ModelRuntime);
+			vi.spyOn(console, "log").mockImplementation(() => {});
+			await runPackageCommandDirectly(args);
+			expect(resolve).not.toHaveBeenCalled();
+		},
+	);
 
 	it("does not invoke the fork update agent for extension-only updates", async () => {
 		vi.stubEnv("PI_DISABLE_FORK_UPDATE_AGENT", "");

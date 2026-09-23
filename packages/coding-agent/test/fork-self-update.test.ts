@@ -1,16 +1,40 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	buildForkSelfUpdatePrompt,
 	detectForkSelfUpdatePlan,
 	runForkSelfUpdateAgent,
 } from "../src/utils/fork-self-update.ts";
+import type { ForkGitRunner, VerifiedForkUpdate } from "../src/utils/fork-update-release.ts";
 
-function runGitFrom(responses: Map<string, { status: number | null; stdout: string }>) {
-	return (args: string[], cwd: string): { status: number | null; stdout: string } => {
-		return responses.get(`${cwd}\0${args.join("\0")}`) ?? { status: 1, stdout: "" };
-	};
+const update: VerifiedForkUpdate = {
+	repoRoot: "/repo",
+	baseSha: "a".repeat(40),
+	upstreamRepository: "earendil-works/pi",
+	release: {
+		version: "0.88.0",
+		tag: "v0.88.0",
+		commit: "b".repeat(40),
+		url: "https://github.com/earendil-works/pi/releases/tag/v0.88.0",
+	},
+};
+
+const cleanMain: ForkGitRunner = (args) => {
+	switch (args[0]) {
+		case "symbolic-ref":
+			return { status: 0, stdout: "main" };
+		case "status":
+			return { status: 0, stdout: "" };
+		case "rev-parse":
+			return args.includes("MERGE_HEAD") ? { status: 1, stdout: "" } : { status: 0, stdout: update.baseSha };
+		default:
+			throw new Error(`Unexpected git command: ${args.join(" ")}`);
+	}
+};
+
+function runGitFrom(responses: Map<string, { status: number | null; stdout: string }>): ForkGitRunner {
+	return (args, cwd) => responses.get(`${cwd}\0${args.join("\0")}`) ?? { status: 1, stdout: "" };
 }
 
 function fakeChildProcess(exitCode: number): ChildProcess {
@@ -20,122 +44,141 @@ function fakeChildProcess(exitCode: number): ChildProcess {
 }
 
 describe("fork self-update", () => {
-	it("detects a linked fork with an upstream remote", () => {
-		const responses = new Map<string, { status: number | null; stdout: string }>([
+	it("detects a linked fork without selecting a release or building an unverified prompt", () => {
+		const responses = new Map([
 			["/repo/packages/coding-agent\0rev-parse\0--show-toplevel", { status: 0, stdout: "/repo" }],
-			["/repo\0remote\0get-url\0upstream", { status: 0, stdout: "git@github.com:earendil-works/pi-mono.git" }],
+			["/repo\0remote\0get-url\0upstream", { status: 0, stdout: "git@github.com:earendil-works/pi.git" }],
 		]);
-
-		const plan = detectForkSelfUpdatePlan({
-			packageDir: "/repo/packages/coding-agent",
-			runGit: runGitFrom(responses),
-			env: {},
-		});
-
-		expect(plan?.repoRoot).toBe("/repo");
-		expect(plan?.prompt).toContain("Update this local pi fork from upstream.");
-		expect(plan?.prompt).toContain("Repository root: /repo");
-		expect(plan?.prompt).toContain("git fetch upstream --tags");
-		expect(plan?.prompt).toContain("Do not use `upstream/main` as the base");
-		expect(plan?.prompt).toContain("Create a new branch and worktree from the verified release tag");
-		expect(plan?.prompt).toContain("Preserve functionality; ask before removing or replacing intentional behavior");
-		expect(plan?.prompt).toContain("git diff HEAD --stat");
-		expect(plan?.prompt).toContain("classification of remaining changed files");
-		expect(plan?.prompt).toContain("upstream-adaptation");
-		expect(plan?.prompt).toContain("unexpected");
-		expect(plan?.prompt).toContain("candidate validated; activation pending");
-		expect(plan?.prompt).toContain("candidate incomplete");
-		expect(plan?.prompt).toContain("Do not commit unless the user separately requested it");
-		expect(plan?.prompt).toContain("Build, promotion, and relinking require the user's explicit request");
-		expect(plan?.prompt).toContain("Do not rebase the original branch");
-		expect(plan?.prompt).not.toContain("git rebase <latest_tag>");
+		expect(
+			detectForkSelfUpdatePlan({
+				packageDir: "/repo/packages/coding-agent",
+				runGit: runGitFrom(responses),
+				env: {},
+			}),
+		).toEqual({ repoRoot: "/repo" });
 	});
 
-	it("does not detect a fork outside a git worktree", () => {
-		const plan = detectForkSelfUpdatePlan({
-			packageDir: "/repo/packages/coding-agent",
-			runGit: () => ({ status: 1, stdout: "" }),
-			env: {},
-		});
-
-		expect(plan).toBeUndefined();
+	it("pins the published release and starts the candidate from our main, not upstream", () => {
+		const prompt = buildForkSelfUpdatePrompt(update);
+		expect(prompt).toContain(JSON.stringify(update, null, 2));
+		expect(prompt).toContain(`from the pinned local main commit ${update.baseSha}`);
+		expect(prompt).toContain(`git merge --no-ff --no-commit ${update.release.commit}`);
+		expect(prompt).toContain(`git diff ${update.release.commit} --stat`);
+		expect(prompt).toContain("Do not choose another release");
+		expect(prompt).toContain("Never start from the release tag or replay the fork patch series");
+		expect(prompt).toContain("Read FORK.md");
+		expect(prompt).toContain("Preserve functionality; ask before removing or replacing intentional behavior");
+		expect(prompt).toContain("candidate validated; activation pending");
+		expect(prompt).toContain("candidate incomplete");
+		expect(prompt).toContain("candidate sources, not stale dist files");
+		expect(prompt).toContain("staged and unstaged changes");
+		expect(prompt).toContain("Do not commit unless the user separately requested it");
+		expect(prompt).toContain("Do not rebase the original branch");
+		expect(prompt).toContain("Build, promotion, publication, and relinking require the user's explicit request");
+		expect(prompt).not.toContain("git fetch upstream --tags");
 	});
 
-	it("does not detect a fork without upstream", () => {
-		const responses = new Map<string, { status: number | null; stdout: string }>([
+	it("does not detect a fork outside a git worktree or without upstream", () => {
+		expect(
+			detectForkSelfUpdatePlan({
+				packageDir: "/repo/packages/coding-agent",
+				runGit: () => ({ status: 1, stdout: "" }),
+				env: {},
+			}),
+		).toBeUndefined();
+		const responses = new Map([
 			["/repo/packages/coding-agent\0rev-parse\0--show-toplevel", { status: 0, stdout: "/repo" }],
-			["/repo\0remote\0get-url\0upstream", { status: 1, stdout: "" }],
 		]);
-
-		const plan = detectForkSelfUpdatePlan({
-			packageDir: "/repo/packages/coding-agent",
-			runGit: runGitFrom(responses),
-			env: {},
-		});
-
-		expect(plan).toBeUndefined();
+		expect(
+			detectForkSelfUpdatePlan({
+				packageDir: "/repo/packages/coding-agent",
+				runGit: runGitFrom(responses),
+				env: {},
+			}),
+		).toBeUndefined();
 	});
 
 	it("respects recursion guard and opt-out environment flags", () => {
-		const runGit = () => ({ status: 0, stdout: "/repo" });
-
-		expect(
-			detectForkSelfUpdatePlan({
-				packageDir: "/repo/packages/coding-agent",
-				runGit,
-				env: { PI_FORK_UPDATE_AGENT: "1" },
-			}),
-		).toBeUndefined();
-		expect(
-			detectForkSelfUpdatePlan({
-				packageDir: "/repo/packages/coding-agent",
-				runGit,
-				env: { PI_DISABLE_FORK_UPDATE_AGENT: "1" },
-			}),
-		).toBeUndefined();
+		const runGit = vi.fn(() => ({ status: 0, stdout: "/repo" }));
+		for (const env of [{ PI_FORK_UPDATE_AGENT: "1" }, { PI_DISABLE_FORK_UPDATE_AGENT: "1" }]) {
+			expect(detectForkSelfUpdatePlan({ packageDir: "/repo/packages/coding-agent", runGit, env })).toBeUndefined();
+		}
+		expect(runGit).not.toHaveBeenCalled();
 	});
 
 	it("builds the nested print-mode command with inherited stdio and guard env", async () => {
-		const calls: Array<{
-			command: string;
-			args: string[];
-			options: { cwd: string; env: NodeJS.ProcessEnv; stdio: "inherit" };
-		}> = [];
-
+		const spawn = vi.fn(() => fakeChildProcess(7));
+		const prompt = buildForkSelfUpdatePrompt(update);
 		const exitCode = await runForkSelfUpdateAgent({
-			repoRoot: "/repo",
-			prompt: buildForkSelfUpdatePrompt("/repo"),
+			...update,
+			prompt,
+			runGit: cleanMain,
 			execPath: "/node",
 			entrypoint: "/repo/packages/coding-agent/dist/cli.js",
 			env: { EXISTING: "1", GIT_EDITOR: "code --wait" },
-			spawn: (command, args, options) => {
-				calls.push({ command, args, options });
-				return fakeChildProcess(7);
-			},
+			spawn,
 		});
-
 		expect(exitCode).toBe(7);
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.command).toBe("/node");
-		expect(calls[0]?.args[0]).toBe("/repo/packages/coding-agent/dist/cli.js");
-		expect(calls[0]?.args).toEqual([
-			"/repo/packages/coding-agent/dist/cli.js",
-			"--print",
-			"--model",
-			"openai-codex/gpt-5.5",
-			"--thinking",
-			"low",
-			"--no-extensions",
-			"--no-skills",
-			"--tools",
-			"read,bash,edit,write",
-			expect.stringContaining("Do not call `pi update`"),
-		]);
-		expect(calls[0]?.options.cwd).toBe("/repo");
-		expect(calls[0]?.options.stdio).toBe("inherit");
-		expect(calls[0]?.options.env.GIT_EDITOR).toBe("true");
-		expect(calls[0]?.options.env.PI_FORK_UPDATE_AGENT).toBe("1");
-		expect(calls[0]?.options.env.PI_SKIP_VERSION_CHECK).toBe("1");
-		expect(calls[0]?.options.env.EXISTING).toBe("1");
+		expect(spawn).toHaveBeenCalledExactlyOnceWith(
+			"/node",
+			[
+				"/repo/packages/coding-agent/dist/cli.js",
+				"--print",
+				"--model",
+				"openai-codex/gpt-5.5",
+				"--thinking",
+				"low",
+				"--no-extensions",
+				"--no-skills",
+				"--tools",
+				"read,bash,edit,write",
+				prompt,
+			],
+			{
+				cwd: "/repo",
+				stdio: "inherit",
+				env: expect.objectContaining({
+					GIT_EDITOR: "true",
+					PI_FORK_UPDATE_AGENT: "1",
+					PI_SKIP_VERSION_CHECK: "1",
+					EXISTING: "1",
+				}),
+			},
+		);
+	});
+
+	it.each(["advanced", "dirty", "branch"])("does not spawn if main became %s after verification", async (change) => {
+		const spawn = vi.fn(() => fakeChildProcess(0));
+		const runGit: ForkGitRunner = (args, cwd) => {
+			if (change === "advanced" && args.includes("refs/heads/main")) return { status: 0, stdout: "c".repeat(40) };
+			if (change === "dirty" && args[0] === "status") return { status: 0, stdout: " M changed.ts" };
+			if (change === "branch" && args[0] === "symbolic-ref") return { status: 0, stdout: "candidate" };
+			return cleanMain(args, cwd);
+		};
+		await expect(
+			runForkSelfUpdateAgent({ ...update, prompt: buildForkSelfUpdatePrompt(update), runGit, spawn }),
+		).rejects.toThrow();
+		expect(spawn).not.toHaveBeenCalled();
+	});
+
+	it("propagates process errors and termination signals", async () => {
+		for (const event of ["error", "close"] as const) {
+			await expect(
+				runForkSelfUpdateAgent({
+					...update,
+					prompt: buildForkSelfUpdatePrompt(update),
+					runGit: cleanMain,
+					spawn: () => {
+						const child = new EventEmitter() as ChildProcess;
+						queueMicrotask(() =>
+							event === "error"
+								? child.emit("error", new Error("spawn failed"))
+								: child.emit("close", null, "SIGTERM"),
+						);
+						return child;
+					},
+				}),
+			).rejects.toThrow(event === "error" ? "spawn failed" : "SIGTERM");
+		}
 	});
 });
