@@ -3,6 +3,13 @@ import { anthropicOAuth } from "../src/auth/oauth/anthropic.ts";
 import type { AuthEvent, AuthPrompt } from "../src/auth/types.ts";
 
 const neverAbortedSignal = new AbortController().signal;
+const SUBSCRIPTION_SCOPES = [
+	"user:profile",
+	"user:inference",
+	"user:sessions:claude_code",
+	"user:mcp_servers",
+	"user:file_upload",
+];
 
 function jsonResponse(body: unknown, status: number = 200): Response {
 	return new Response(JSON.stringify(body), {
@@ -38,7 +45,7 @@ describe.sequential("Anthropic OAuth", () => {
 		vi.unstubAllGlobals();
 	});
 
-	it("keeps the localhost redirect_uri for manual callback login", async () => {
+	it("emits the Claude subscription auth URL and keeps localhost redirect_uri", async () => {
 		let authUrl = "";
 		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
 			expect(getUrl(input)).toBe("https://platform.claude.com/v1/oauth/token");
@@ -69,6 +76,14 @@ describe.sequential("Anthropic OAuth", () => {
 				return `${redirectUri}?code=manual-code&state=${state}`;
 			},
 		});
+
+		const url = new URL(authUrl);
+		expect(`${url.origin}${url.pathname}`).toBe("https://claude.com/cai/oauth/authorize");
+		const scopes = url.searchParams.get("scope")?.split(" ");
+		expect(scopes).toEqual(SUBSCRIPTION_SCOPES);
+		expect(scopes).not.toContain("org:create_api_key");
+		expect(scopes).not.toContain("user:session");
+		expect(scopes).not.toContain("user:session:claude_code");
 
 		expect(credentials.access).toBe("access-token");
 		expect(credentials.refresh).toBe("refresh-token");
