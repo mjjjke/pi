@@ -19,17 +19,18 @@ import type { Theme } from "../theme/theme.ts";
  * parameter schemas, so a definition and a bare renderer pair are equally acceptable.
  *
  * The renderer parameters are `any` on purpose: a `ToolDefinition` types them from its schema, and
- * narrowing them here would make those definitions unassignable.
+ * narrowing them here would make those definitions unassignable. A renderer may return `undefined`
+ * (for example a decorated renderer whose layers all defer) to use the fallback rendering.
  */
 export interface ToolRenderers {
 	renderShell?: "default" | "self";
-	renderCall?: (args: any, theme: Theme, context: ToolRenderContext<any, any>) => Component;
+	renderCall?: (args: any, theme: Theme, context: ToolRenderContext<any, any>) => Component | undefined;
 	renderResult?: (
 		result: AgentToolResult<any>,
 		options: ToolRenderResultOptions,
 		theme: Theme,
 		context: ToolRenderContext<any, any>,
-	) => Component;
+	) => Component | undefined;
 }
 
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
@@ -116,11 +117,11 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
-	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
+	private getCallRenderer(): ToolRenderers["renderCall"] {
 		return this.toolDefinition?.renderCall;
 	}
 
-	private getResultRenderer(): ToolDefinition<any, any>["renderResult"] | undefined {
+	private getResultRenderer(): ToolRenderers["renderResult"] {
 		return this.toolDefinition?.renderResult;
 	}
 
@@ -328,7 +329,7 @@ export class ToolExecutionComponent extends Container {
 				try {
 					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
 					this.callRendererComponent = component;
-					renderContainer.addChild(this.createResultRegion(component));
+					renderContainer.addChild(this.createResultRegion(component ?? this.createCallFallback()));
 					hasContent = true;
 				} catch {
 					this.callRendererComponent = undefined;
@@ -354,8 +355,11 @@ export class ToolExecutionComponent extends Container {
 							this.getRenderContext(this.resultRendererComponent),
 						);
 						this.resultRendererComponent = component;
-						renderContainer.addChild(this.createResultRegion(component));
-						hasContent = true;
+						const displayed = component ?? this.createResultFallback();
+						if (displayed) {
+							renderContainer.addChild(this.createResultRegion(displayed));
+							hasContent = true;
+						}
 					} catch {
 						this.resultRendererComponent = undefined;
 						const component = this.createResultFallback();

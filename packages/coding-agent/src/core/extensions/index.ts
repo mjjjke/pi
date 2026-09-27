@@ -140,6 +140,7 @@ export type {
 	// Commands
 	RegisteredCommand,
 	RegisteredTool,
+	RegisteredToolRendererDecorator,
 	ReplacedSessionContext,
 	RequestNewSessionOptions,
 	RequestNewSessionResult,
@@ -184,6 +185,9 @@ export type {
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 	ToolInfo,
+	ToolRenderContext,
+	ToolRendererDecorator,
+	ToolRendererSlot,
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,

@@ -113,7 +113,7 @@ import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
-import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
+import { decorateToolRenderers, withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
@@ -2128,11 +2128,13 @@ export class InteractiveMode {
 	 * Get a registered tool definition by name (for custom rendering).
 	 */
 	/**
-	 * Extension-registered definition, falling back to the built-in one. The renderer components take
-	 * whatever this returns, so they never reach into the tool registry themselves.
+	 * Extension-registered definition, falling back to the built-in one, wrapped with extension tool
+	 * renderer decorators. The renderer components take whatever this returns, so they never reach into
+	 * the tool registry themselves. Call once per tool row: the result holds that row's decorator state.
 	 */
 	private getRegisteredToolDefinition(toolName: string) {
-		return withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName));
+		const definition = withBuiltInRenderers(toolName, this.session.getToolDefinition(toolName));
+		return decorateToolRenderers(toolName, definition, this.session.extensionRunner);
 	}
 
 	private getMarkdownTransformers(): MarkdownTransformer[] {

@@ -30,6 +30,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	ToolRendererDecorator,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -346,6 +347,17 @@ function createExtensionAPI(
 			extension.assistantMessageDisplayTransforms.set(id, transform);
 		},
 
+		registerToolRenderer<TArgs, TDetails, TState>(
+			toolName: string,
+			renderer: ToolRendererDecorator<TArgs, TDetails, TState>,
+		): void {
+			assertActive();
+			extension.toolRenderers ??= new Map();
+			const renderers = extension.toolRenderers.get(toolName) ?? [];
+			renderers.push(renderer as ToolRendererDecorator);
+			extension.toolRenderers.set(toolName, renderers);
+		},
+
 		// Flag access - checks extension registered it, reads from runtime
 		getFlag(name: string): boolean | string | undefined {
 			assertActive();
@@ -539,6 +551,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		messageRenderers: new Map(),
 		entryRenderers: new Map(),
 		assistantMessageDisplayTransforms: new Map(),
+		toolRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),

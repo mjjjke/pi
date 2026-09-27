@@ -74,6 +74,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	RegisteredTool,
+	RegisteredToolRendererDecorator,
 	ReplacedSessionContext,
 	RequestNewSessionOptions,
 	RequestNewSessionResult,
@@ -88,6 +89,7 @@ import type {
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolRendererSlot,
 	ToolResultEvent,
 	ToolResultEventResult,
 	TurnEndEvent,
@@ -366,6 +368,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private reportedToolRendererErrors = new Set<string>();
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -746,6 +749,35 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/**
+	 * Report a tool renderer decorator failure as a `tool_renderer` extension error, once per extension,
+	 * tool, and slot for this runner. Startup and /reload rebuild every historical row, and one broken
+	 * decorator would otherwise report once per row.
+	 */
+	emitToolRendererError(extensionPath: string, toolName: string, slot: ToolRendererSlot, error: unknown): void {
+		const key = JSON.stringify([extensionPath, toolName, slot]);
+		if (this.reportedToolRendererErrors.has(key)) return;
+		this.reportedToolRendererErrors.add(key);
+		const message = error instanceof Error ? error.message : String(error);
+		this.emitError({
+			extensionPath,
+			event: "tool_renderer",
+			error: `Tool renderer for "${toolName}" failed in ${slot}: ${message}`,
+			stack: error instanceof Error ? error.stack : undefined,
+		});
+	}
+
+	/** Tool renderer decorators for a tool, innermost first: extension load order, then registration order. */
+	getToolRendererDecorators(toolName: string): RegisteredToolRendererDecorator[] {
+		const decorators: RegisteredToolRendererDecorator[] = [];
+		for (const ext of this.extensions) {
+			for (const decorator of ext.toolRenderers?.get(toolName) ?? []) {
+				decorators.push({ extensionPath: ext.path, decorator });
+			}
+		}
+		return decorators;
 	}
 
 	applyAssistantMessageDisplayTransforms(

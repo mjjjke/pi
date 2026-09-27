@@ -25,6 +25,7 @@ describe("fork API factory lifecycle", () => {
 		expect(() => retained!.registerAssistantMessageDisplayTransform("late", () => undefined)).toThrow(
 			"failed to load",
 		);
+		expect(() => retained!.registerToolRenderer("bash", {})).toThrow("failed to load");
 		expect(append).not.toHaveBeenCalled();
 	});
 
@@ -47,5 +48,26 @@ describe("fork API factory lifecycle", () => {
 		expect(extension.assistantMessageDisplayTransforms.has("active")).toBe(true);
 		runtime.invalidate();
 		expect(() => retained!.appendDeveloperMessage("late")).toThrow();
+	});
+
+	it("records tool renderer decorators in registration order and rejects them after runtime invalidation", async () => {
+		const runtime = createExtensionRuntime();
+		let retained: ExtensionAPI | undefined;
+		const first = { renderCall: () => undefined };
+		const second = { renderResult: () => undefined };
+		const extension = await loadExtensionFromFactory(
+			(pi) => {
+				retained = pi;
+				pi.registerToolRenderer("bash", first);
+			},
+			process.cwd(),
+			createEventBus(),
+			runtime,
+		);
+		retained!.registerToolRenderer("bash", second);
+		expect(extension.toolRenderers?.get("bash")).toEqual([first, second]);
+		runtime.invalidate();
+		expect(() => retained!.registerToolRenderer("bash", {})).toThrow();
+		expect(extension.toolRenderers?.get("bash")).toHaveLength(2);
 	});
 });

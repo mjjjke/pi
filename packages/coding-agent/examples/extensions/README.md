@@ -34,11 +34,11 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `hello.ts` | Minimal custom tool example |
 | `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions with custom UI |
 | `questionnaire.ts` | Multi-question input with tab bar navigation between questions |
-| `tool-override.ts` | Override built-in tools (e.g., add logging/access control to `read`) |
+| `tool-override.ts` | Override built-in tool behavior (e.g., add logging/access control to `read`); for rendering-only changes see `built-in-tool-renderer.ts` |
 | `dynamic-tools.ts` | Register tools after startup (`session_start`) and at runtime via command, with prompt snippets and tool-specific prompt guidelines |
 | `structured-output.ts` | Final structured-output tool that returns `terminate: true` so the agent can end on the tool call |
-| `built-in-tool-renderer.ts` | Custom compact rendering for built-in tools (read, bash, edit, write) while keeping original behavior |
-| `minimal-mode.ts` | Override built-in tool rendering for minimal display (only tool calls, no output in collapsed mode) |
+| `built-in-tool-renderer.ts` | Compact rendering for built-in tools (read, bash, edit, write) via `pi.registerToolRenderer()`, without re-registering them |
+| `minimal-mode.ts` | Minimal display for built-in tools (only tool calls, no output in collapsed mode) by re-registering them; prefer `pi.registerToolRenderer()` (see `built-in-tool-renderer.ts`) for rendering-only changes |
 | `truncated-tool.ts` | Wraps ripgrep with proper output truncation (50KB/2000 lines) |
 | `ssh.ts` | Delegate all tools to a remote machine via SSH using pluggable operations |
 | `subagent/` | Delegate tasks to specialized subagents with isolated context windows |

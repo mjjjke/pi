@@ -80,7 +80,7 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 | Persist non-context session data | `pi.appendEntry()` |
 | Change active tools, model, or thinking level | Session control methods on `pi` |
 | Add a model provider | `pi.registerProvider()` |
-| Add terminal rendering | Renderer registration and `ctx.ui` |
+| Add terminal rendering | Renderer registration, `pi.registerToolRenderer()`, and `ctx.ui` |
 | Communicate with another extension | `pi.events` |
 
 Use the exported declarations in [`extensions/types.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts) for exact event, context, tool, and result types.
@@ -159,6 +159,8 @@ File-mutating tools should wrap the complete read-modify-write operation with `w
 Truncate large model-facing results and tell the model where to read the complete output.
 
 See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/extensions/todo.ts), [`dynamic-tools.ts`](../examples/extensions/dynamic-tools.ts), and [`truncated-tool.ts`](../examples/extensions/truncated-tool.ts).
+
+Registering a tool with an existing name replaces that tool's behavior; see [`tool-override.ts`](../examples/extensions/tool-override.ts). To change only how an existing tool is displayed, use [`pi.registerToolRenderer()`](#tool-renderer-decorators) instead. Re-registering a tool for rendering conflicts with extensions that own its behavior, because the first registration in load order wins.
 
 ### Activate tools dynamically
 
@@ -286,6 +288,40 @@ pi.registerAssistantMessageDisplayTransform("my-extension", (message) => {
 Transforms run only in interactive rendering (`streaming`, `final`, and `restore` phases). They receive a frozen clone and run in extension load order, then registration order. Return `undefined` for no change, a string to replace aggregate text, a content array, or an assistant message. Only text blocks may change: Pi preserves thinking, tool calls, and metadata. JSONL, provider context, events, and session state remain unchanged.
 
 See [assistant-display-transform.ts](../examples/extensions/assistant-display-transform.ts) for a boundary-marker example.
+
+<a id="tool-renderer-decorators"></a>
+
+### Tool renderer decorators
+
+This fork can change how an existing tool (built-in or registered by any extension) renders in the TUI without re-registering it:
+
+```typescript
+import { Container, Text } from "@earendil-works/pi-tui";
+
+pi.registerToolRenderer("bash", {
+  renderCall(args, theme, context, base) {
+    const container = new Container();
+    container.addChild(new Text(theme.fg("muted", "shell"), 0, 0));
+    const inner = base();
+    if (inner) container.addChild(inner);
+    return container;
+  },
+});
+```
+
+Decorators affect rendering only. The tool registry, `execute()`, tool declarations, and provider context are unchanged, so they do not affect the prompt cache and compose with extensions that override the tool's behavior.
+
+- `renderCall` and `renderResult` receive the usual renderer arguments plus `base(theme?)`, which renders the next inner layer: another decorator or the tool's own renderer. Pass a theme to override it for inner layers. The inner layer renders at most once per invocation: repeat `base()` calls return the first result, or rethrow its error, and ignore their theme argument.
+- Return a component to replace the output, or `undefined` to use the inner layer's component. When no layer and no tool renderer draws anything, Pi uses its default fallback rendering.
+- Layers stack in extension load order, then registration order; the last registered decorator is the outermost. `renderShell` from the outermost decorator that defines it wins; otherwise the tool's value applies.
+- `context.state` is private to each decorator for each tool row and shared by its `renderCall` and `renderResult`. It starts as an empty object; type it with the third type parameter, for example `pi.registerToolRenderer<BashToolInput, BashToolDetails, { renders: number }>("bash", ...)`. `context.lastComponent` is the component that decorator itself last returned. The tool's own renderer keeps its own state and component, so wrapping it is safe.
+- Skipping `base()` means the inner renderer does not run for that render. Most built-in renderers are stateless, so deciding per render is fine (for example, calling `base()` only when expanded). Renderers that keep timers across renders need care: built-in `bash` starts an elapsed-time timer in `renderResult` while output is partial and stops it in the final `renderResult`. If a `bash` result decorator calls `base()` for partial results, it must also call it for the final result.
+- If a decorator throws, Pi bypasses it for the rest of that tool row and slot. It reports a `tool_renderer` extension error once per extension, tool, and slot until the next reload, so rebuilding history does not repeat the same error for every row. Errors from the tool's own renderer behave as without decorators.
+- The `theme` argument is the live theme: it follows theme switches and exposes `sourcePath` and `getColorMode()`. Derive colors from it on each render and do not cache by theme identity.
+
+Decorators apply only to tools with a definition (built-in or registered); unknown tools keep the generic rendering. They are not applied to HTML session exports. Each tool row captures the decorators present when the row is created. Register decorators in the extension factory so rows rebuilt from history after `/reload` include them; registrations from `session_start` can miss that rebuilt history.
+
+See [built-in-tool-renderer.ts](../examples/extensions/built-in-tool-renderer.ts) for compact rendering of `read`, `bash`, `edit`, and `write`.
 
 <a id="error-handling"></a>
 <a id="handle-errors-and-shutdown"></a>

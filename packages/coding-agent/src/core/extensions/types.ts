@@ -517,6 +517,45 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	) => Component;
 }
 
+/**
+ * Display-only decorator for an existing tool's renderers, registered with `pi.registerToolRenderer()`.
+ *
+ * Each renderer receives `base`, which renders the next inner layer: another decorator or the tool's
+ * own renderer. Pass a theme to override it for inner layers. The inner layer renders at most once per
+ * invocation: repeat calls return the first result (or rethrow its error) and ignore their theme.
+ * Return `undefined` to use the inner layer's component. `context.state` and `context.lastComponent`
+ * belong to this decorator alone; the inner layers keep their own. `context.state` starts as an empty
+ * object for each tool row; pass `TState` to type it.
+ */
+export interface ToolRendererDecorator<TArgs = unknown, TDetails = unknown, TState = unknown> {
+	/** Shell override. The outermost decorator that defines it wins; otherwise the tool's value applies. */
+	renderShell?: "default" | "self";
+	/** Decorate tool call rendering. */
+	renderCall?: (
+		args: TArgs,
+		theme: Theme,
+		context: ToolRenderContext<TState, TArgs>,
+		base: (theme?: Theme) => Component | undefined,
+	) => Component | undefined;
+	/** Decorate tool result rendering. */
+	renderResult?: (
+		result: AgentToolResult<TDetails>,
+		options: ToolRenderResultOptions,
+		theme: Theme,
+		context: ToolRenderContext<TState, TArgs>,
+		base: (theme?: Theme) => Component | undefined,
+	) => Component | undefined;
+}
+
+/** Renderer slot of a tool renderer decorator. */
+export type ToolRendererSlot = "renderCall" | "renderResult";
+
+/** A tool renderer decorator together with the extension that registered it. */
+export interface RegisteredToolRendererDecorator {
+	extensionPath: string;
+	decorator: ToolRendererDecorator;
+}
+
 type AnyToolDefinition = ToolDefinition<any, any, any>;
 
 /**
@@ -1520,6 +1559,16 @@ export interface ExtensionAPI {
 	/** Register a display-only transform for normal assistant messages in the interactive TUI. */
 	registerAssistantMessageDisplayTransform(id: string, transform: AssistantMessageDisplayTransform): void;
 
+	/**
+	 * Decorate how an existing tool renders in the interactive TUI without re-registering the tool.
+	 * Does not change the tool registry, execution, or anything the model sees. The last registered
+	 * decorator (by extension load order, then registration order) is the outermost layer.
+	 */
+	registerToolRenderer<TArgs = unknown, TDetails = unknown, TState = unknown>(
+		toolName: string,
+		renderer: ToolRendererDecorator<TArgs, TDetails, TState>,
+	): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -1956,6 +2005,7 @@ export interface Extension {
 	markdownTransformer?: MarkdownTransformer;
 	entryRenderers?: Map<string, EntryRenderer>;
 	assistantMessageDisplayTransforms: Map<string, AssistantMessageDisplayTransform>;
+	toolRenderers?: Map<string, ToolRendererDecorator[]>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

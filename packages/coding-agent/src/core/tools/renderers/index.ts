@@ -9,6 +9,7 @@
 import type { ToolDefinition } from "../../extensions/types.ts";
 import type { ToolName } from "../index.ts";
 import { createShellRenderers } from "./bash.ts";
+import { composeToolRenderers, decorateToolRenderers } from "./compose.ts";
 import { editRenderers } from "./edit.ts";
 import { findRenderers } from "./find.ts";
 import { grepRenderers } from "./grep.ts";
@@ -18,8 +19,11 @@ import { writeRenderers } from "./write.ts";
 
 export type ToolRenderers = Pick<ToolDefinition<any, any>, "renderCall" | "renderResult">;
 
+export type { ToolRendererErrorHandler } from "./compose.ts";
 export {
+	composeToolRenderers,
 	createShellRenderers,
+	decorateToolRenderers,
 	editRenderers,
 	findRenderers,
 	grepRenderers,
