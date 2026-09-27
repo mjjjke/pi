@@ -8,6 +8,7 @@
  * - Interact with the user via UI primitives
  */
 
+import type { ChildProcess } from "node:child_process";
 import type {
 	AgentMessage,
 	AgentToolResult,
@@ -89,6 +90,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
+import type { TruncationResult } from "../tools/truncate.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -994,6 +996,72 @@ export interface UserBashEvent {
 }
 
 // ============================================================================
+// Bash Timeout Events
+// ============================================================================
+
+/** Output captured by the bash tool up to the handover. */
+export interface BashHandoverOutput {
+	/** Captured output tail, truncated like a normal bash result */
+	text: string;
+	truncation: TruncationResult;
+	/** Temp file with the complete output captured before the handover, when truncated */
+	fullOutputPath?: string;
+	/** Resolves once `fullOutputPath` is completely written */
+	flushed: Promise<void>;
+}
+
+/** Result used to complete a bash tool call after a handover. */
+export interface BashHandoverResult {
+	content: (TextContent | ImageContent)[];
+	details?: BashToolDetails;
+}
+
+/** Ownership of a timed-out bash process transferred to an extension. */
+export interface BashHandover {
+	/**
+	 * Still-running child. stdout/stderr are paused: attach listeners, then call resume() (or pipe()).
+	 * Core keeps a no-op `error` listener attached; add your own to observe errors.
+	 */
+	child: ChildProcess;
+	output: BashHandoverOutput;
+	/**
+	 * Complete the tool call with a normal (non-error) result. Must be called before the handler
+	 * returns or its promise resolves; otherwise core kills the process and reports the stock
+	 * timeout error. Single-shot: a second call throws, as does a call after the tool call finished.
+	 * If the tool call is aborted before the handler settles, it fails with the stock abort error
+	 * and the process stays with the extension.
+	 */
+	complete(result: BashHandoverResult): void;
+}
+
+/**
+ * Fired when a model-invoked bash command reaches its timeout, before core kills it.
+ * Handlers run in load order; the first one to call `takeOver()` owns the process.
+ * If no handler takes it over, core kills the process and reports the stock timeout error.
+ */
+export interface BashTimeoutEvent {
+	type: "bash_timeout";
+	toolCallId: string;
+	toolName: "bash";
+	/** Command as the model wrote it, without the configured command prefix */
+	command: string;
+	cwd: string;
+	pid: number;
+	/** Timeout in seconds, as passed to the tool */
+	timeout: number;
+	/** Epoch milliseconds when execution started */
+	startedAt: number;
+	/** True once a handler has taken the process over */
+	readonly taken: boolean;
+	/**
+	 * Take ownership synchronously. Core stops reading output, no longer kills the process on
+	 * abort, timeout, or Pi exit, and stops tracking its pid. Throws if already taken, if the
+	 * process already exited, or if it is being killed after an abort.
+	 */
+	takeOver(): BashHandover;
+}
+
+// ============================================================================
 // Input Events
 // ============================================================================
 
@@ -1248,6 +1316,7 @@ export type ExtensionEvent =
 	| ModelSelectEvent
 	| ThinkingLevelSelectEvent
 	| UserBashEvent
+	| BashTimeoutEvent
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent;
@@ -1497,6 +1566,7 @@ export interface ExtensionAPI {
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): () => void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): () => void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): () => void;
+	on(event: "bash_timeout", handler: ExtensionHandler<BashTimeoutEvent>): () => void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): () => void;
 
 	// =========================================================================

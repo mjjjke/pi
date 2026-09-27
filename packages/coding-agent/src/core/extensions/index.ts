@@ -39,6 +39,10 @@ export type {
 	AssistantMessageDisplayTransformContext,
 	AssistantMessageDisplayTransformResult,
 	AutocompleteProviderFactory,
+	BashHandover,
+	BashHandoverOutput,
+	BashHandoverResult,
+	BashTimeoutEvent,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,

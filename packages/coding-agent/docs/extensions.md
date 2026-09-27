@@ -141,6 +141,30 @@ Use `ctx.signal` for nested work owned by an active turn; commands and idle sess
 
 A `user_bash` handler that returns `undefined` passes the command to the next handler and then to local execution if no handler handles it. Returning `operations` or `result` stops propagation. A handler failure blocks the command rather than falling through to local execution.
 
+<a id="bash_timeout"></a>
+
+This fork adds `bash_timeout`. It fires when a model-invoked `bash` command reaches its `timeout`, before Pi kills it. It covers only the built-in `bash` tool: `powershell`, `!` user commands, and custom `BashOperations` that ignore `onTimeout` keep the plain timeout. The event carries `toolCallId`, `command` (as the model wrote it, without the configured command prefix), `cwd`, `pid`, `timeout` (seconds), `startedAt` (epoch ms), and `taken`. Handlers run in load order and return nothing. If no handler takes the process over, Pi kills the process tree, including background descendants, and reports the usual `Command timed out after N seconds` error. When no extension registers `bash_timeout`, the kill happens in the same tick as before, so timeouts behave exactly as without this event.
+
+`event.takeOver()` claims the still-running process synchronously and returns a handover. The first claim wins: later calls throw, and so does a claim after the process has exited. After a takeover, Pi stops reading output, no longer kills the process on abort, timeout, or Pi exit, and stops tracking its pid. A claim fails with "being killed" if the turn was aborted while your handler ran. The handover contains:
+
+- `child`: the `ChildProcess`. `stdout` and `stderr` are paused, so no output is lost; attach listeners, then call `resume()` or `pipe()`.
+- `output`: the output captured so far, as `text` (tail, truncated like a normal result), `truncation`, and `fullOutputPath` when truncated. Await `flushed` before reading that file.
+- `complete({ content, details? })`: finishes the tool call with a normal, non-error result. Call it once, before your handler returns or its promise resolves. If you take the process over without calling `complete()`, or your handler throws first, Pi kills it and reports the usual timeout error. Calling `complete()` after that throws.
+
+The tool call waits for the handler to settle. If the tool call is aborted after `takeOver()` while the handler is still running, it ends at once with the usual `Command aborted` error and any later `complete()` throws, but the process is not killed: it stays with your extension. Use `ctx.signal` to notice the abort.
+
+After a takeover, the extension owns the process. It must stop the process (for example with `process.kill(-pid, "SIGKILL")` on Unix) from `session_shutdown`. Pi attaches a no-op `error` listener so a late error cannot crash it; add your own listener to observe errors. Pi contains no timeout policy: there is no default timeout and no special handling for `sleep`. To apply a timeout the model did not request, set `event.input.timeout` in a `tool_call` handler for `bash`. The mutation reaches execution, while the recorded tool call arguments stay unchanged.
+
+```typescript
+pi.on("bash_timeout", (event) => {
+  const { child, output, complete } = event.takeOver();
+  child.stdout?.on("data", (chunk) => log.write(chunk));
+  child.stdout?.resume();
+  child.stderr?.resume();
+  complete({ content: [{ type: "text", text: `${output.text}\n\nStill running in background (pid ${event.pid}).` }] });
+});
+```
+
 <a id="custom-tools"></a>
 <a id="register-tools"></a>
 

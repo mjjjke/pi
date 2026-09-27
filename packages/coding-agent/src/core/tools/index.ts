@@ -2,6 +2,7 @@ export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
+	type BashTimeoutProcess,
 	type BashToolDetails,
 	type BashToolInput,
 	type BashToolOptions,

@@ -45,8 +45,11 @@ export function spawnProcessSync(
  * the grace timer is re-armed on every chunk, so an actively writing descendant keeps
  * us reading, while a quiet inherited handle (e.g. a Windows daemonized descendant
  * that never lets `close` fire) still releases us after the grace elapses.
+ *
+ * Aborting `detachSignal` stops waiting: listeners are removed and the promise resolves
+ * with null, leaving the child and its streams untouched for a new owner.
  */
-export function waitForChildProcess(child: ChildProcess): Promise<number | null> {
+export function waitForChildProcess(child: ChildProcess, detachSignal?: AbortSignal): Promise<number | null> {
 	return new Promise((resolve, reject) => {
 		let settled = false;
 		let exited = false;
@@ -67,6 +70,14 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 			child.stderr?.removeListener("end", onStderrEnd);
 			child.stdout?.removeListener("data", onData);
 			child.stderr?.removeListener("data", onData);
+			detachSignal?.removeEventListener("abort", onDetach);
+		};
+
+		const onDetach = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(null);
 		};
 
 		const finalize = (code: number | null) => {
@@ -133,5 +144,9 @@ export function waitForChildProcess(child: ChildProcess): Promise<number | null>
 		child.once("error", onError);
 		child.once("exit", onExit);
 		child.once("close", onClose);
+		if (detachSignal) {
+			if (detachSignal.aborted) onDetach();
+			else detachSignal.addEventListener("abort", onDetach, { once: true });
+		}
 	});
 }

@@ -3377,7 +3377,16 @@ export class AgentSession {
 				)
 			: createAllToolDefinitions(this._cwd, {
 					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					bash: {
+						commandPrefix: shellCommandPrefix,
+						shellPath,
+						// Reads the runner at call time so extension reloads apply without rebuilding tools.
+						onTimeout: (event) => {
+							const runner = this._extensionRunner;
+							if (!runner?.hasHandlers("bash_timeout")) return;
+							return runner.emit(event);
+						},
+					},
 				});
 
 		this._baseToolDefinitions = new Map(
