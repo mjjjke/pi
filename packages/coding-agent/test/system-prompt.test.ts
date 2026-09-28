@@ -108,6 +108,32 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain(expected);
 		});
 
+		const PARALLEL_CALLS_RULE =
+			"- Tool calls in one message start concurrently, in no guaranteed order. A call that needs the effect of another call in the same message (git add/commit, tests or builds after an edit/write; reading a file just written) must wait for it to finish: make it in a later message, even if its arguments are already known. Independent reads and searches can still share a message.";
+
+		test.each([
+			[["read", "bash", "edit", "write"], true],
+			[["bash", "edit"], true],
+			[["bash", "write"], true],
+			[["powershell", "edit"], true],
+			[["read", "bash"], false],
+			[["read", "edit", "write"], false],
+			[[], false],
+		] as const)(
+			"states that calls run concurrently only for a shell plus edit/write (%j)",
+			(selectedTools, expected) => {
+				const prompt = buildSystemPrompt({
+					selectedTools: [...selectedTools],
+					contextFiles: [],
+					skills: [],
+					cwd: process.cwd(),
+				});
+
+				if (expected) expect(prompt).toContain(PARALLEL_CALLS_RULE);
+				else expect(prompt).not.toContain("start concurrently");
+			},
+		);
+
 		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
