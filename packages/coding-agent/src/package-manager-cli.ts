@@ -35,12 +35,6 @@ import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./utils/child-process.ts";
-import {
-	buildForkSelfUpdatePrompt,
-	detectForkSelfUpdatePlan,
-	runForkSelfUpdateAgent,
-} from "./utils/fork-self-update.ts";
-import { resolveForkUpdateRelease } from "./utils/fork-update-release.ts";
 import { canonicalizePath, getCwdRelativePath } from "./utils/paths.ts";
 import { getPiUserAgent } from "./utils/pi-user-agent.ts";
 import { formatVersionCheckError, getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.ts";
@@ -354,15 +348,6 @@ Options:
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
   --force                 Reinstall pi even if the current version is latest
-
-Linked fork self-updates:
-  When ${APP_NAME} is running from a local git checkout with an upstream remote, self-updates delegate to
-  a nested ${APP_NAME} agent after verifying GitHub's latest published stable release and its tag/commit.
-  A clean main is required. The candidate starts from main and keeps its merge uncommitted for review.
-  --force does not bypass verification or authorize activation. No commits or push run automatically.
-  --all still updates installed packages separately; only fork preparation is isolated.
-  The running installation stays unchanged until activation is explicitly requested. Set
-  PI_DISABLE_FORK_UPDATE_AGENT=1 to force the package-manager self-update path.
 
 Short forms:
   ${APP_NAME} update                Update pi only
@@ -1045,40 +1030,6 @@ export async function handlePackageCommand(
 						process.exitCode = 1;
 						return true;
 					}
-
-					const forkUpdatePlan = detectForkSelfUpdatePlan({ packageDir: getPackageDir() });
-					if (forkUpdatePlan) {
-						const verified = await resolveForkUpdateRelease(forkUpdatePlan.repoRoot);
-						if (!verified) {
-							console.log(
-								chalk.green(
-									"The latest published upstream release is already integrated; no fork update needed.",
-								),
-							);
-							return true;
-						}
-						console.log(
-							chalk.dim(
-								`Detected linked ${APP_NAME} fork at ${forkUpdatePlan.repoRoot}; delegating update to ${APP_NAME} agent.`,
-							),
-						);
-						const forkUpdateExitCode = await runForkSelfUpdateAgent({
-							...verified,
-							prompt: buildForkSelfUpdatePrompt(verified),
-						});
-						if (forkUpdateExitCode !== 0) {
-							console.error(chalk.red(`${APP_NAME} fork update agent exited with code ${forkUpdateExitCode}`));
-							process.exitCode = forkUpdateExitCode;
-							return true;
-						}
-						console.log(
-							chalk.dim(
-								`Fork update preparation finished; see the agent report. The running ${APP_NAME} installation is unchanged.`,
-							),
-						);
-						return true;
-					}
-
 					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
 					if (!selfUpdatePlan.shouldRun) {
 						return true;
