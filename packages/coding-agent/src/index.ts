@@ -147,6 +147,7 @@ export type {
 	RegisteredCommand,
 	RegisteredTool,
 	RegisteredToolRendererDecorator,
+	RequestBashHandoverOptions,
 	RequestNewSessionOptions,
 	RequestNewSessionResult,
 	ResolvedCommand,
@@ -333,6 +334,7 @@ export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from ".
 // Tools
 export {
 	type BashOperations,
+	type BashProcessControl,
 	type BashSpawnContext,
 	type BashSpawnHook,
 	type BashTimeoutProcess,

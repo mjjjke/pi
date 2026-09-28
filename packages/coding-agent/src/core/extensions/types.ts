@@ -368,6 +368,14 @@ export interface ExtensionContext {
 	 * Currently supported only from agent_end event handlers.
 	 */
 	requestNewSession(options?: RequestNewSessionOptions): Promise<RequestNewSessionResult>;
+	/**
+	 * Offer running built-in bash calls (or only `options.toolCallId`) to `bash_timeout` handlers
+	 * with `reason: "steer"`, e.g. so a steering message is not blocked by a long command. A call
+	 * that has started but not spawned its process yet is offered as soon as it spawns. Resolves
+	 * after the handlers settle with the number of calls taken over and completed; 0 when no bash
+	 * call is running or all were declined.
+	 */
+	requestBashHandover(options?: RequestBashHandoverOptions): Promise<number>;
 }
 
 /**
@@ -1016,7 +1024,7 @@ export interface BashHandoverResult {
 	details?: BashToolDetails;
 }
 
-/** Ownership of a timed-out bash process transferred to an extension. */
+/** Ownership of a running bash process transferred to an extension. */
 export interface BashHandover {
 	/**
 	 * Still-running child. stdout/stderr are paused: attach listeners, then call resume() (or pipe()).
@@ -1027,19 +1035,14 @@ export interface BashHandover {
 	/**
 	 * Complete the tool call with a normal (non-error) result. Must be called before the handler
 	 * returns or its promise resolves; otherwise core kills the process and reports the stock
-	 * timeout error. Single-shot: a second call throws, as does a call after the tool call finished.
+	 * timeout error (reason "timeout") or "Command stopped: background handover failed" (reason "steer"). Single-shot: a second call throws, as does a call after the tool call finished.
 	 * If the tool call is aborted before the handler settles, it fails with the stock abort error
 	 * and the process stays with the extension.
 	 */
 	complete(result: BashHandoverResult): void;
 }
 
-/**
- * Fired when a model-invoked bash command reaches its timeout, before core kills it.
- * Handlers run in load order; the first one to call `takeOver()` owns the process.
- * If no handler takes it over, core kills the process and reports the stock timeout error.
- */
-export interface BashTimeoutEvent {
+interface BashTimeoutEventBase {
 	type: "bash_timeout";
 	toolCallId: string;
 	toolName: "bash";
@@ -1047,8 +1050,6 @@ export interface BashTimeoutEvent {
 	command: string;
 	cwd: string;
 	pid: number;
-	/** Timeout in seconds, as passed to the tool */
-	timeout: number;
 	/** Epoch milliseconds when execution started */
 	startedAt: number;
 	/** True once a handler has taken the process over */
@@ -1059,6 +1060,38 @@ export interface BashTimeoutEvent {
 	 * process already exited, or if it is being killed after an abort.
 	 */
 	takeOver(): BashHandover;
+}
+
+/**
+ * Offers a still-running model-invoked bash process to extensions. Handlers run in load order;
+ * the first one to call `takeOver()` owns the process.
+ *
+ * - `reason: "timeout"`: the command reached its timeout, before core kills it. If no handler
+ *   takes it over, core kills the process and reports the stock timeout error.
+ * - `reason: "steer"`: an extension called `ctx.requestBashHandover()` (e.g. because the user sent
+ *   a steering message). If no handler takes it over, nothing happens: the command keeps running
+ *   in the foreground and its own timeout stays armed. Taken over without `complete()`, the
+ *   process is killed and the call fails with "Command stopped: background handover failed".
+ *
+ * Only one handover happens per call: a request while another handling is in flight waits for it,
+ * and is skipped once the process was taken over, exited, or is being killed.
+ */
+export type BashTimeoutEvent =
+	| (BashTimeoutEventBase & {
+			reason: "timeout";
+			/** Timeout in seconds, as passed to the tool */
+			timeout: number;
+	  })
+	| (BashTimeoutEventBase & {
+			reason: "steer";
+			/** Timeout in seconds, as passed to the tool, if the call has one */
+			timeout: number | undefined;
+	  });
+
+/** Options for `ctx.requestBashHandover()`. */
+export interface RequestBashHandoverOptions {
+	/** Only this tool call. Default: every running built-in bash call. */
+	toolCallId?: string;
 }
 
 // ============================================================================
@@ -2033,6 +2066,8 @@ export interface ExtensionContextActions {
 	getSystemPrompt: () => string;
 	requestNewSession: (options?: RequestNewSessionOptions) => Promise<RequestNewSessionResult>;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
+	/** Default: resolves 0 (no bash handover support). */
+	requestBashHandover?: (options?: RequestBashHandoverOptions) => Promise<number>;
 }
 
 /**

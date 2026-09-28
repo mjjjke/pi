@@ -146,6 +146,7 @@ export type {
 	RegisteredTool,
 	RegisteredToolRendererDecorator,
 	ReplacedSessionContext,
+	RequestBashHandoverOptions,
 	RequestNewSessionOptions,
 	RequestNewSessionResult,
 	ResolvedCommand,

@@ -2185,6 +2185,7 @@ export class InteractiveMode {
 			requestNewSession: () => {
 				throw new Error("ctx.requestNewSession() can only be called from an agent_end extension handler.");
 			},
+			requestBashHandover: (options) => this.session.requestBashHandover(options),
 		});
 
 		// Set up the extension shortcut handler on the default editor

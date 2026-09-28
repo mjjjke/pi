@@ -76,6 +76,7 @@ import type {
 	RegisteredTool,
 	RegisteredToolRendererDecorator,
 	ReplacedSessionContext,
+	RequestBashHandoverOptions,
 	RequestNewSessionOptions,
 	RequestNewSessionResult,
 	ResolvedCommand,
@@ -382,6 +383,7 @@ export class ExtensionRunner {
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
+	private requestBashHandoverFn: (options?: RequestBashHandoverOptions) => Promise<number> = async () => 0;
 	private requestNewSessionHandler: RequestNewSessionHandler = async () => {
 		throw new Error("ctx.requestNewSession() is not available in this mode.");
 	};
@@ -451,6 +453,7 @@ export class ExtensionRunner {
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.requestNewSessionHandler = contextActions.requestNewSession;
+		this.requestBashHandoverFn = contextActions.requestBashHandover ?? (async () => 0);
 		this.getSystemPromptOptionsFn =
 			contextActions.getSystemPromptOptions ?? (() => normalizeBuildSystemPromptOptions({ cwd: this.cwd }));
 
@@ -972,6 +975,10 @@ export class ExtensionRunner {
 					throw new Error("ctx.requestNewSession() can only be called from an agent_end extension handler.");
 				}
 				return runner.requestNewSessionHandler(options);
+			},
+			requestBashHandover: (options) => {
+				runner.assertActive();
+				return runner.requestBashHandoverFn(options);
 			},
 		};
 	}

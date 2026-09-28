@@ -70,6 +70,18 @@ export interface BashTimeoutProcess {
 	detach(): ChildProcess;
 }
 
+/** Handle to a spawned process, offered to `onStart` so a handover can be requested on demand. */
+export interface BashProcessControl {
+	pid: number;
+	/**
+	 * Run `callback` like `onTimeout`, but without killing the process when it declines. Handlings
+	 * are serialized with the timeout handling: a request made while another handling is in flight
+	 * runs after it, and is skipped once the process was detached, exited, or is being killed.
+	 * Resolves after the callback settles: true if the callback detached the process.
+	 */
+	requestHandover(callback: (process: BashTimeoutProcess) => Promise<void> | void): Promise<boolean>;
+}
+
 /**
  * Pluggable operations for the bash tool.
  * Override these to delegate command execution to remote systems (for example SSH).
@@ -98,6 +110,11 @@ export interface BashOperations {
 			 * Implementations without detach support may ignore it and keep killing on timeout.
 			 */
 			onTimeout?: (process: BashTimeoutProcess) => Promise<void> | void;
+			/**
+			 * Called once the process is spawned and its output is wired, with a control that can hand
+			 * it over on demand. Implementations without detach support may ignore it.
+			 */
+			onStart?: (control: BashProcessControl) => void;
 		},
 	) => Promise<{ exitCode: number | null; detached?: true }>;
 }
@@ -105,7 +122,7 @@ export interface BashOperations {
 /** Shared process execution used by the built-in shell tools. */
 export function createLocalShellOperations(shellName: string, resolveShellConfig: () => ShellConfig): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env, onTimeout }) => {
+		exec: async (command, cwd, { onData, signal, timeout, env, onTimeout, onStart }) => {
 			const timeoutMs = resolveTimeoutMs(timeout);
 			if (signal?.aborted) {
 				throw new Error("aborted");
@@ -135,8 +152,14 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			let killRequested = false;
 			let finished = false;
 			let detached = false;
-			let timeoutHandling: Promise<void> | undefined;
-			const detachController = onTimeout ? new AbortController() : undefined;
+			// Tail of the serialized handover handlings (timeout and on-demand requests).
+			let handling: Promise<void> | undefined;
+			let handlingsInFlight = 0;
+			let resolveFinished: () => void = () => {};
+			const finishedPromise = new Promise<void>((resolve) => {
+				resolveFinished = resolve;
+			});
+			const detachController = onTimeout || onStart ? new AbortController() : undefined;
 			const onAbort = () => {
 				killRequested = true;
 				if (child.pid) killProcessTree(child.pid);
@@ -180,9 +203,12 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 						resolve();
 					});
 				});
+			const isSettled = () => detached || finished || killRequested || hasExited();
 			// A failing callback must not keep a timed-out process alive. A synchronous callback
 			// (e.g. no extension handlers) kills in the same tick, exactly like the stock path.
 			const handleTimeout = (callback: NonNullable<typeof onTimeout>, pid: number): Promise<void> | undefined => {
+				// A handover requested on demand may already own the process.
+				if (detached) return undefined;
 				let pending: Promise<void> | void;
 				try {
 					pending = callback({ pid, detach });
@@ -195,13 +221,61 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				return pending.then(killUnlessHandled, killUnlessHandled);
 			};
+			// On-demand handover: a declining callback leaves the process running in the foreground.
+			const runRequestedHandover = async (
+				callback: (process: BashTimeoutProcess) => Promise<void> | void,
+				pid: number,
+			): Promise<boolean> => {
+				if (isSettled() || signal?.aborted) return false;
+				try {
+					await callback({ pid, detach });
+				} catch {
+					// The tool layer decides what a detach without a result means.
+				}
+				return detached;
+			};
+			const enqueueHandling = <T>(run: () => Promise<T> | T): Promise<T> => {
+				handlingsInFlight++;
+				const next = (handling ?? Promise.resolve()).then(run);
+				const settled = next.then(
+					() => {},
+					() => {},
+				);
+				handling = settled;
+				void settled.then(() => {
+					handlingsInFlight--;
+				});
+				return next;
+			};
+			const requestHandover: BashProcessControl["requestHandover"] = (callback) => {
+				const pid = child.pid;
+				if (pid === undefined || isSettled()) return Promise.resolve(false);
+				const requested = enqueueHandling(() => runRequestedHandover(callback, pid)).catch(() => false);
+				// Never outlive the execution, e.g. behind a timeout handler that never settles after an abort.
+				return Promise.race([requested, finishedPromise.then(() => false)]);
+			};
 
 			try {
 				// Set timeout if provided.
 				if (timeoutMs !== undefined) {
 					timeoutHandle = setTimeout(() => {
-						if (onTimeout && child.pid !== undefined) timeoutHandling = handleTimeout(onTimeout, child.pid);
-						else killOnTimeout();
+						const pid = child.pid;
+						if (!onTimeout || pid === undefined) {
+							killOnTimeout();
+						} else if (handlingsInFlight === 0) {
+							// Nothing in flight: keep the stock same-tick kill for synchronous callbacks.
+							const pending = handleTimeout(onTimeout, pid);
+							if (pending) {
+								handlingsInFlight++;
+								handling = pending;
+								void pending.then(() => {
+									handlingsInFlight--;
+								});
+							}
+						} else {
+							// An on-demand handling is in flight: the timeout handling runs after it settles.
+							void enqueueHandling(() => handleTimeout(onTimeout, pid));
+						}
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
@@ -214,11 +288,13 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child, detachController?.signal);
+				const waiting = waitForChildProcess(child, detachController?.signal);
+				if (onStart && child.pid !== undefined) onStart({ pid: child.pid, requestHandover });
+				const exitCode = await waiting;
 				if (detached) {
 					// The new owner decides the tool result while its callback runs. An abort ends the
 					// wait; the caller reports it, and the process stays with its new owner.
-					if (timeoutHandling) await waitForTimeoutHandling(timeoutHandling);
+					if (handling) await waitForTimeoutHandling(handling);
 					return { exitCode: null, detached: true };
 				}
 				if (signal?.aborted) {
@@ -233,6 +309,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				return { exitCode: exitCode ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : 1) };
 			} finally {
 				finished = true;
+				resolveFinished();
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -299,12 +376,20 @@ export interface BashToolOptions {
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
 	/**
-	 * Called when a command reaches its timeout, before it is killed. The handler can take the
-	 * still-running process over with `event.takeOver()` and complete the tool call; otherwise the
-	 * process is killed and the stock timeout error is reported. Ignored by custom operations
-	 * that do not support `onTimeout`.
+	 * Called when a command reaches its timeout (`reason: "timeout"`), before it is killed, or when a
+	 * handover is requested through `registerHandover` (`reason: "steer"`). The handler can take the
+	 * still-running process over with `event.takeOver()` and complete the tool call. Otherwise, on
+	 * timeout the process is killed and the stock timeout error is reported; on request it keeps
+	 * running. Ignored by custom operations that do not support `onTimeout`.
 	 */
 	onTimeout?: (event: BashTimeoutEvent) => Promise<void> | void;
+	/**
+	 * Called with a handover request for each running call once its process spawned (only when
+	 * `onTimeout` is set and the operations support `onStart`). `request()` emits a `steer` event and
+	 * resolves true if a handler took the process over and completed the call. Return a function
+	 * that unregisters the call; it is called when the execution ends.
+	 */
+	registerHandover?: (toolCallId: string, request: () => Promise<boolean>) => () => void;
 }
 
 export type BashRenderState = {
@@ -333,6 +418,7 @@ export function createShellToolDefinition(
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
 	const spawnHook = options?.spawnHook;
 	const onTimeout = options?.onTimeout;
+	const registerHandover = options?.registerHandover;
 	return {
 		name: config.name,
 		label: config.label,
@@ -440,18 +526,20 @@ export function createShellToolDefinition(
 
 			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
 
-			// Timeout handover state. Only used when onTimeout is configured.
+			// Handover state. Only used when onTimeout is configured.
 			let takenPid: number | undefined;
+			let takenReason: BashTimeoutEvent["reason"] | undefined;
 			let takenChild: ChildProcess | undefined;
 			let handoverFlushed: Promise<void> | undefined;
 			let handoverResult: BashHandoverResult | undefined;
 			let handoverClosed = false;
 			const startedAt = Date.now();
 
-			const takeOver = (timedOutProcess: BashTimeoutProcess): BashHandover => {
+			const takeOver = (timedOutProcess: BashTimeoutProcess, reason: BashTimeoutEvent["reason"]): BashHandover => {
 				if (takenPid !== undefined) throw new Error("bash_timeout: process already taken");
 				const child = timedOutProcess.detach();
 				takenPid = timedOutProcess.pid;
+				takenReason = reason;
 				takenChild = child;
 				acceptingOutput = false;
 				output.finish();
@@ -480,24 +568,43 @@ export function createShellToolDefinition(
 				};
 			};
 
+			// Only called with reason "timeout" when the call has a timeout, as the union requires.
+			const createEvent = (runningProcess: BashTimeoutProcess, reason: BashTimeoutEvent["reason"]) =>
+				({
+					type: "bash_timeout",
+					reason,
+					toolCallId,
+					toolName: "bash",
+					command,
+					cwd: spawnContext.cwd,
+					pid: runningProcess.pid,
+					timeout,
+					startedAt,
+					get taken() {
+						return takenPid !== undefined;
+					},
+					takeOver: () => takeOver(runningProcess, reason),
+				}) as BashTimeoutEvent;
 			const handleTimeout =
 				onTimeout && timeout !== undefined
-					? (timedOutProcess: BashTimeoutProcess) => {
-							const event: BashTimeoutEvent = {
-								type: "bash_timeout",
-								toolCallId,
-								toolName: "bash",
-								command,
-								cwd: spawnContext.cwd,
-								pid: timedOutProcess.pid,
-								timeout,
-								startedAt,
-								get taken() {
-									return takenPid !== undefined;
-								},
-								takeOver: () => takeOver(timedOutProcess),
-							};
-							return onTimeout(event);
+					? (timedOutProcess: BashTimeoutProcess) => onTimeout(createEvent(timedOutProcess, "timeout"))
+					: undefined;
+			const handleSteer = (runningProcess: BashTimeoutProcess) => onTimeout?.(createEvent(runningProcess, "steer"));
+			let unregisterHandover: (() => void) | undefined;
+			const onStart =
+				onTimeout && registerHandover
+					? (control: BashProcessControl) => {
+							let requested = false;
+							unregisterHandover = registerHandover(toolCallId, async () => {
+								if (requested || handoverClosed || takenPid !== undefined) return false;
+								requested = true;
+								try {
+									const detachedNow = await control.requestHandover(handleSteer);
+									return detachedNow && takenReason === "steer" && handoverResult !== undefined;
+								} finally {
+									requested = false;
+								}
+							});
 						}
 					: undefined;
 
@@ -510,6 +617,7 @@ export function createShellToolDefinition(
 						timeout,
 						env: spawnContext.env,
 						...(handleTimeout ? { onTimeout: handleTimeout } : {}),
+						...(onStart ? { onStart } : {}),
 					});
 					handoverClosed = true;
 					if (result.detached) {
@@ -519,12 +627,13 @@ export function createShellToolDefinition(
 							throw new Error("aborted");
 						}
 						if (handoverResult) return { content: handoverResult.content, details: handoverResult.details };
-						// Taken over without a result: fall back to the stock timeout.
+						// Taken over without a result: nobody owns the process. Kill it and fall back to the
+						// stock timeout, or report the failed on-demand handover.
 						if (takenPid !== undefined) killProcessTree(takenPid);
 						takenChild?.stdout?.destroy();
 						takenChild?.stderr?.destroy();
 						await handoverFlushed;
-						throw new Error(`timeout:${timeout}`);
+						throw new Error(takenReason === "steer" ? "handover-failed" : `timeout:${timeout}`);
 					}
 					exitCode = result.exitCode;
 				} catch (err) {
@@ -532,6 +641,9 @@ export function createShellToolDefinition(
 					const { text } = formatOutput(snapshot, "");
 					if (err instanceof Error && err.message === "aborted") {
 						throw new Error(appendStatus(text, "Command aborted"));
+					}
+					if (err instanceof Error && err.message === "handover-failed") {
+						throw new Error(appendStatus(text, "Command stopped: background handover failed"));
 					}
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
 						const timeoutSecs = err.message.split(":")[1];
@@ -551,6 +663,7 @@ export function createShellToolDefinition(
 				return { content: [{ type: "text", text: outputText }], details };
 			} finally {
 				handoverClosed = true;
+				unregisterHandover?.();
 				clearUpdateTimer();
 			}
 		},

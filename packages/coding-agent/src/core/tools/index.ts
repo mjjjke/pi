@@ -1,5 +1,6 @@
 export {
 	type BashOperations,
+	type BashProcessControl,
 	type BashSpawnContext,
 	type BashSpawnHook,
 	type BashTimeoutProcess,

@@ -136,6 +136,7 @@ describe("bash_timeout handover", () => {
 		await expect(bash.execute("meta-call", { command: "sleep 30", timeout: TIMEOUT })).rejects.toThrow(/timed out/);
 		expect(received).toMatchObject({
 			type: "bash_timeout",
+			reason: "timeout",
 			toolCallId: "meta-call",
 			toolName: "bash",
 			command: "sleep 30",
@@ -439,6 +440,285 @@ describe("bash_timeout handover", () => {
 			/remote output\s+Command timed out after 0\.3 seconds$/,
 		);
 		expect(called).toBe(false);
+	});
+});
+
+type HandoverRequest = () => Promise<boolean>;
+
+function createHandoverRegistry() {
+	const requests = new Map<string, HandoverRequest>();
+	const registered: string[] = [];
+	const everRegistered = new Map<string, HandoverRequest>();
+	return {
+		requests,
+		registered,
+		everRegistered,
+		registerHandover: (toolCallId: string, request: HandoverRequest) => {
+			requests.set(toolCallId, request);
+			everRegistered.set(toolCallId, request);
+			registered.push(toolCallId);
+			return () => {
+				if (requests.get(toolCallId) === request) requests.delete(toolCallId);
+			};
+		},
+		async request(toolCallId: string): Promise<boolean> {
+			await waitFor(() => requests.has(toolCallId));
+			return requests.get(toolCallId)!();
+		},
+	};
+}
+
+describe("bash handover on request (steer)", () => {
+	let testDir: string;
+	const pids = new Set<number>();
+
+	beforeEach(() => {
+		testDir = mkdtempSync(join(tmpdir(), "pi-bash-steer-"));
+	});
+
+	afterEach(() => {
+		for (const pid of pids) killProcessTree(pid);
+		pids.clear();
+		rmSync(testDir, { recursive: true, force: true });
+	});
+
+	it("does not register calls without a handover handler", async () => {
+		const registry = createHandoverRegistry();
+		const bash = createBashTool(testDir, { registerHandover: registry.registerHandover });
+		const result = await bash.execute("no-handler", { command: "echo ok" });
+		expect(textOf(result)).toBe("ok\n");
+		expect(registry.registered).toEqual([]);
+	});
+
+	it("hands a call without a timeout over and returns the handler result", async () => {
+		const registry = createHandoverRegistry();
+		const events: BashTimeoutEvent[] = [];
+		let handover: BashHandover | undefined;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: (event) => {
+				events.push(event);
+				pids.add(event.pid);
+				handover = event.takeOver();
+				handover.complete({ content: [{ type: "text", text: `moved on ${event.reason}` }] });
+			},
+		});
+
+		const running = bash.execute("steer-call", { command: "echo before; sleep 30" });
+		await delay(150);
+		const handedOver = await registry.request("steer-call");
+		const result = await running;
+
+		expect(handedOver).toBe(true);
+		expect(textOf(result)).toBe("moved on steer");
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			type: "bash_timeout",
+			reason: "steer",
+			toolCallId: "steer-call",
+			command: "echo before; sleep 30",
+			timeout: undefined,
+			taken: true,
+		});
+		expect(handover!.output.text).toBe("before\n");
+		expect(hasExited(handover!.child)).toBe(false);
+		expect(isAlive(handover!.child.pid!)).toBe(true);
+		expect(registry.requests.has("steer-call")).toBe(false);
+	});
+
+	it("passes the configured timeout on a steer event", async () => {
+		const registry = createHandoverRegistry();
+		const events: BashTimeoutEvent[] = [];
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: (event) => {
+				events.push(event);
+				pids.add(event.pid);
+				event.takeOver().complete({ content: [{ type: "text", text: "moved" }] });
+			},
+		});
+		const running = bash.execute("steer-timeout", { command: "sleep 30", timeout: 60 });
+		await registry.request("steer-timeout");
+		await running;
+		expect(events.map((event) => [event.reason, event.timeout])).toEqual([["steer", 60]]);
+	});
+
+	it("keeps a declined call running in the foreground with its real output", async () => {
+		const registry = createHandoverRegistry();
+		const reasons: string[] = [];
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: async (event) => {
+				reasons.push(event.reason);
+				await delay(20);
+			},
+		});
+
+		const running = bash.execute("declined", { command: "echo a; sleep 0.4; echo b" });
+		await delay(100);
+		const handedOver = await registry.request("declined");
+		const result = await running;
+
+		expect(handedOver).toBe(false);
+		expect(reasons).toEqual(["steer"]);
+		expect(textOf(result)).toBe("a\nb\n");
+	});
+
+	it("keeps the timeout armed after a declined steer", async () => {
+		const registry = createHandoverRegistry();
+		const reasons: string[] = [];
+		let pid: number | undefined;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: (event) => {
+				reasons.push(event.reason);
+				pid = event.pid;
+				pids.add(event.pid);
+			},
+		});
+
+		const running = bash.execute("declined-then-timeout", { command: "echo x; sleep 30", timeout: 0.5 });
+		expect(await registry.request("declined-then-timeout")).toBe(false);
+		await expect(running).rejects.toThrow(/x\s+Command timed out after 0\.5 seconds$/);
+		expect(reasons).toEqual(["steer", "timeout"]);
+		await waitFor(() => !isAlive(pid!));
+	});
+
+	it("lets a steer in flight own the process when the timeout fires meanwhile", async () => {
+		const registry = createHandoverRegistry();
+		const reasons: string[] = [];
+		let child: ChildProcess | undefined;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: async (event) => {
+				reasons.push(event.reason);
+				pids.add(event.pid);
+				if (event.reason === "timeout") {
+					event.takeOver().complete({ content: [{ type: "text", text: "timeout owner" }] });
+					return;
+				}
+				await delay(500);
+				const handover = event.takeOver();
+				child = handover.child;
+				handover.complete({ content: [{ type: "text", text: "steer owner" }] });
+			},
+		});
+
+		const running = bash.execute("steer-race", { command: "sleep 30", timeout: 0.2 });
+		const handedOver = await registry.request("steer-race");
+		const result = await running;
+
+		expect(handedOver).toBe(true);
+		expect(textOf(result)).toBe("steer owner");
+		expect(reasons).toEqual(["steer"]);
+		await delay(100);
+		expect(hasExited(child!)).toBe(false);
+		expect(isAlive(child!.pid!)).toBe(true);
+	});
+
+	it("does not emit a steer event while a timeout handling owns the process", async () => {
+		const registry = createHandoverRegistry();
+		const reasons: string[] = [];
+		let timeoutStarted = false;
+		let child: ChildProcess | undefined;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: async (event) => {
+				reasons.push(event.reason);
+				pids.add(event.pid);
+				if (event.reason === "steer") {
+					event.takeOver().complete({ content: [{ type: "text", text: "steer owner" }] });
+					return;
+				}
+				timeoutStarted = true;
+				await delay(300);
+				const handover = event.takeOver();
+				child = handover.child;
+				handover.complete({ content: [{ type: "text", text: "timeout owner" }] });
+			},
+		});
+
+		const running = bash.execute("timeout-race", { command: "sleep 30", timeout: 0.2 });
+		await waitFor(() => timeoutStarted);
+		const handedOver = await registry.requests.get("timeout-race")!();
+		const result = await running;
+
+		expect(handedOver).toBe(false);
+		expect(textOf(result)).toBe("timeout owner");
+		expect(reasons).toEqual(["timeout"]);
+		expect(hasExited(child!)).toBe(false);
+	});
+
+	it("kills with a non-timeout error when a steer handler takes over without complete", async () => {
+		const registry = createHandoverRegistry();
+		let child: ChildProcess | undefined;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: async (event) => {
+				pids.add(event.pid);
+				child = event.takeOver().child;
+				await delay(20);
+			},
+		});
+
+		const running = bash.execute("steer-no-complete", { command: "echo early; sleep 30" });
+		await delay(100);
+		const handedOver = await registry.request("steer-no-complete");
+		let error: unknown;
+		try {
+			await running;
+		} catch (err) {
+			error = err;
+		}
+
+		expect(handedOver).toBe(false);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(/early\s+Command stopped: background handover failed$/);
+		expect((error as Error).message).not.toMatch(/timed out/);
+		expect(await waitForExit(child!)).toBe(true);
+	});
+
+	it("treats a request after the command exited as a no-op", async () => {
+		const registry = createHandoverRegistry();
+		const reasons: string[] = [];
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: (event) => {
+				reasons.push(event.reason);
+			},
+		});
+		const result = await bash.execute("exits", { command: "echo done" });
+		const request = registry.everRegistered.get("exits")!;
+		expect(textOf(result)).toBe("done\n");
+		expect(registry.requests.has("exits")).toBe(false);
+		expect(await request()).toBe(false);
+		expect(reasons).toEqual([]);
+	});
+
+	it("keeps the stock abort behavior when aborted during a steer handling", async () => {
+		const registry = createHandoverRegistry();
+		const controller = new AbortController();
+		let takeOverError: unknown;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: async (event) => {
+				pids.add(event.pid);
+				controller.abort();
+				await delay(50);
+				try {
+					event.takeOver();
+				} catch (err) {
+					takeOverError = err;
+				}
+			},
+		});
+		const running = bash.execute("abort-steer", { command: "echo early; sleep 30" }, controller.signal);
+		await delay(100);
+		const request = registry.request("abort-steer");
+		await expect(running).rejects.toThrow(/early\s+Command aborted$/);
+		expect(await request).toBe(false);
+		await waitFor(() => takeOverError !== undefined);
+		expect((takeOverError as Error).message).toMatch(/being killed|exited/);
 	});
 });
 

@@ -143,13 +143,20 @@ A `user_bash` handler that returns `undefined` passes the command to the next ha
 
 <a id="bash_timeout"></a>
 
-This fork adds `bash_timeout`. It fires when a model-invoked `bash` command reaches its `timeout`, before Pi kills it. It covers only the built-in `bash` tool: `powershell`, `!` user commands, and custom `BashOperations` that ignore `onTimeout` keep the plain timeout. The event carries `toolCallId`, `command` (as the model wrote it, without the configured command prefix), `cwd`, `pid`, `timeout` (seconds), `startedAt` (epoch ms), and `taken`. Handlers run in load order and return nothing. If no handler takes the process over, Pi kills the process tree, including background descendants, and reports the usual `Command timed out after N seconds` error. When no extension registers `bash_timeout`, the kill happens in the same tick as before, so timeouts behave exactly as without this event.
+This fork adds `bash_timeout`. Despite its name it has two triggers, told apart by `event.reason`:
+
+- `"timeout"`: a model-invoked `bash` command reached its `timeout`, before Pi kills it.
+- `"steer"`: an extension called `ctx.requestBashHandover()` while the command was running (see [below](#ctxrequestbashhandoveroptions)), typically because the user sent a steering message that would otherwise wait for the whole tool batch.
+
+It covers only the built-in `bash` tool: `powershell`, `!` user commands, and custom `BashOperations` that ignore `onTimeout` keep the plain timeout and are never offered on request. The event carries `reason`, `toolCallId`, `command` (as the model wrote it, without the configured command prefix), `cwd`, `pid`, `timeout` (seconds; always set for `"timeout"`, `undefined` on `"steer"` when the call has none), `startedAt` (epoch ms), and `taken`. Handlers run in load order and return nothing. If no handler takes the process over, Pi kills the process tree, including background descendants, and reports the usual `Command timed out after N seconds` error. When no extension registers `bash_timeout`, the kill happens in the same tick as before, so timeouts behave exactly as without this event.
+
+A `"steer"` event that no handler takes over changes nothing: the command keeps running in the foreground, streams its output and keeps its own timeout armed. Only one handover happens per call: a request that arrives while a timeout handling is in flight waits for it and is skipped if the process was taken over or killed; a timeout that fires while a steer handling is in flight runs after it, and only if the process is still in the foreground.
 
 `event.takeOver()` claims the still-running process synchronously and returns a handover. The first claim wins: later calls throw, and so does a claim after the process has exited. After a takeover, Pi stops reading output, no longer kills the process on abort, timeout, or Pi exit, and stops tracking its pid. A claim fails with "being killed" if the turn was aborted while your handler ran. The handover contains:
 
 - `child`: the `ChildProcess`. `stdout` and `stderr` are paused, so no output is lost; attach listeners, then call `resume()` or `pipe()`.
 - `output`: the output captured so far, as `text` (tail, truncated like a normal result), `truncation`, and `fullOutputPath` when truncated. Await `flushed` before reading that file.
-- `complete({ content, details? })`: finishes the tool call with a normal, non-error result. Call it once, before your handler returns or its promise resolves. If you take the process over without calling `complete()`, or your handler throws first, Pi kills it and reports the usual timeout error. Calling `complete()` after that throws.
+- `complete({ content, details? })`: finishes the tool call with a normal, non-error result. Call it once, before your handler returns or its promise resolves. If you take the process over without calling `complete()`, or your handler throws first, Pi kills it and reports the usual timeout error (`"timeout"`) or `Command stopped: background handover failed` (`"steer"`). Calling `complete()` after that throws.
 
 The tool call waits for the handler to settle. If the tool call is aborted after `takeOver()` while the handler is still running, it ends at once with the usual `Command aborted` error and any later `complete()` throws, but the process is not killed: it stays with your extension. Use `ctx.signal` to notice the abort.
 
@@ -205,6 +212,16 @@ Command handlers receive `ExtensionCommandContext`, which adds operations for wa
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 
 Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work. The fresh `ReplacedSessionContext` includes `appendDeveloperMessage()` and async `sendMessage()` and `sendUserMessage()` helpers.
+
+### ctx.requestBashHandover(options?)
+
+This fork lets an extension offer running model-invoked `bash` calls to [`bash_timeout`](#bash_timeout) handlers on demand, with `reason: "steer"`. The agent loop delivers steering messages only after every tool call of the current batch has finished, so a long command otherwise blocks the message. Without options, every running built-in `bash` call is offered; `{ toolCallId }` offers only that call. A call that has emitted `tool_execution_start` but not spawned its process yet is offered as soon as it spawns, so a `tool_execution_start` handler can request its handover without awaiting it (awaiting there deadlocks, since the tool waits for that handler). The promise resolves after the handlers settle with the number of calls taken over and completed, and with 0 when no call is running, every call was declined, or the call ended first. Core holds no policy: which calls move to the background is up to the handlers.
+
+```typescript
+pi.on("input", (event, ctx) => {
+  if (event.source !== "extension" && !ctx.isIdle()) void ctx.requestBashHandover();
+});
+```
 
 ### ctx.requestNewSession(options?)
 

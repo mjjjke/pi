@@ -89,6 +89,7 @@ import {
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
+	type RequestBashHandoverOptions,
 	type RequestNewSessionOptions,
 	type RequestNewSessionResult,
 	type SessionBeforeCompactResult,
@@ -373,6 +374,11 @@ export class AgentSession {
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
+	// Model-invoked bash calls between tool_execution_start and tool_execution_end, with handover
+	// requests waiting for the process to spawn.
+	private readonly _runningBashCalls = new Map<string, Array<(handedOver: boolean) => void>>();
+	// Handover requests of bash calls whose process is running (see requestBashHandover()).
+	private readonly _bashHandoverRequests = new Map<string, () => Promise<boolean>>();
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
@@ -906,6 +912,10 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		// Track bash calls before extensions see the event, so a handler can request a handover for it.
+		if (event.type === "tool_execution_start" && event.toolName === "bash") {
+			this._runningBashCalls.set(event.toolCallId, []);
+		}
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -931,6 +941,12 @@ export class AgentSession {
 		// Emit to extensions first, then notify public listeners.
 		await this._emitExtensionEvent(event);
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+
+		if (event.type === "tool_execution_end") {
+			this._settleBashHandoverWaiters(event.toolCallId);
+		} else if (event.type === "agent_end") {
+			for (const toolCallId of [...this._runningBashCalls.keys()]) this._settleBashHandoverWaiters(toolCallId);
+		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -2194,6 +2210,46 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
+	/**
+	 * Offer running model-invoked bash calls (or only `options.toolCallId`) to `bash_timeout`
+	 * handlers with reason "steer". A call that started but has not spawned its process yet is
+	 * offered once it spawns. Resolves with the number of calls taken over and completed.
+	 */
+	async requestBashHandover(options?: RequestBashHandoverOptions): Promise<number> {
+		const toolCallIds =
+			options?.toolCallId !== undefined
+				? [options.toolCallId]
+				: [...new Set([...this._runningBashCalls.keys(), ...this._bashHandoverRequests.keys()])];
+		const results = await Promise.all(toolCallIds.map((toolCallId) => this._requestBashHandoverFor(toolCallId)));
+		return results.filter(Boolean).length;
+	}
+
+	private _requestBashHandoverFor(toolCallId: string): Promise<boolean> {
+		const request = this._bashHandoverRequests.get(toolCallId);
+		if (request) return request().catch(() => false);
+		const waiters = this._runningBashCalls.get(toolCallId);
+		if (!waiters) return Promise.resolve(false);
+		return new Promise((resolve) => waiters.push(resolve));
+	}
+
+	private _registerBashHandover(toolCallId: string, request: () => Promise<boolean>): () => void {
+		this._bashHandoverRequests.set(toolCallId, request);
+		const waiters = this._runningBashCalls.get(toolCallId)?.splice(0) ?? [];
+		if (waiters.length > 0) {
+			const result = request().catch(() => false);
+			for (const resolve of waiters) void result.then(resolve);
+		}
+		return () => {
+			if (this._bashHandoverRequests.get(toolCallId) === request) this._bashHandoverRequests.delete(toolCallId);
+		};
+	}
+
+	private _settleBashHandoverWaiters(toolCallId: string): void {
+		const waiters = this._runningBashCalls.get(toolCallId);
+		this._runningBashCalls.delete(toolCallId);
+		for (const resolve of waiters ?? []) resolve(false);
+	}
+
 	async abort(): Promise<void> {
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
@@ -3249,6 +3305,7 @@ export class AgentSession {
 				getSystemPrompt: () => this.systemPrompt,
 				requestNewSession: (options) => this._requestNewSession(options),
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
+				requestBashHandover: (options) => this.requestBashHandover(options),
 			},
 			{
 				registerProvider: (name, config) => {
@@ -3386,6 +3443,7 @@ export class AgentSession {
 							if (!runner?.hasHandlers("bash_timeout")) return;
 							return runner.emit(event);
 						},
+						registerHandover: (toolCallId, request) => this._registerBashHandover(toolCallId, request),
 					},
 				});
 

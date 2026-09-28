@@ -22,6 +22,7 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		compact,
 		getSystemPrompt: () => "",
 		requestNewSession: async () => ({ queued: false, reason: "already_pending" }),
+		requestBashHandover: async () => 0,
 	};
 }
 
