@@ -10,15 +10,24 @@ const ANTHROPIC_FAST_MODE: FastModeCapability = { provider: "anthropic", body: {
 const CODEX_FAST_MODE: FastModeCapability = { provider: "openai-codex", body: { service_tier: "priority" } };
 
 /**
- * Claude Code gates fast mode to Opus 4.6/4.7/4.8. Native model id (no
- * provider prefix); ignores `claude-opus-4` with no minor and other families.
+ * Opus versions that accept `speed: "fast"`, per
+ * https://platform.claude.com/docs/en/build-with-claude/fast-mode#supported-models
+ * (checked 2026-09-28). Opus 4.7 rejects fast requests with an error and Opus
+ * 4.6 silently runs them at standard speed, so neither is listed. The API has
+ * no per-model fast-support flag; update this list when the docs change.
+ */
+const ANTHROPIC_FAST_MODE_VERSIONS = new Set(["4.8", "5", "5.5"]);
+
+/**
+ * Native Anthropic model id (no provider prefix), e.g. `claude-opus-5-5`,
+ * `claude-opus-4.8` or a dated `claude-opus-5-20260101`.
  */
 export function anthropicSupportsFastMode(id: string | undefined): boolean {
 	if (!id) return false;
-	const m = id.toLowerCase().match(/^claude-opus-4[.-](\d{1,2})(?![0-9])/);
+	const m = id.toLowerCase().match(/^claude-opus-(\d+)(?:[.-](\d{1,2})(?!\d))?/);
 	if (!m) return false;
-	const minor = Number(m[1]);
-	return minor >= 6 && minor <= 8;
+	const version = m[2] === undefined ? m[1] : `${m[1]}.${m[2]}`;
+	return ANTHROPIC_FAST_MODE_VERSIONS.has(version);
 }
 
 /** The first-party OpenAI Codex backend advertises the `priority` service tier. */
