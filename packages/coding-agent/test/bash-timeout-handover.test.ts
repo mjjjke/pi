@@ -678,6 +678,50 @@ describe("bash handover on request (steer)", () => {
 		expect(await waitForExit(child!)).toBe(true);
 	});
 
+	it("concurrent requests for one call resolve with the same result", async () => {
+		const registry = createHandoverRegistry();
+		let events = 0;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: async (event) => {
+				events++;
+				pids.add(event.pid);
+				await delay(50);
+				event.takeOver().complete({ content: [{ type: "text", text: "moved" }] });
+			},
+		});
+		const running = bash.execute("dup", { command: "sleep 30" });
+		await waitFor(() => registry.requests.has("dup"));
+		const request = registry.requests.get("dup")!;
+		const results = await Promise.all([request(), request()]);
+		await running;
+		expect(results).toEqual([true, true]);
+		expect(events).toBe(1);
+	});
+
+	it("keeps a completed steer handover alive with the extension after Esc", async () => {
+		const registry = createHandoverRegistry();
+		const controller = new AbortController();
+		let child: ChildProcess | undefined;
+		const bash = createBashTool(testDir, {
+			registerHandover: registry.registerHandover,
+			onTimeout: (event) => {
+				pids.add(event.pid);
+				const handover = event.takeOver();
+				child = handover.child;
+				handover.complete({ content: [{ type: "text", text: "owned" }] });
+			},
+		});
+		const running = bash.execute("esc-after", { command: "sleep 30" }, controller.signal);
+		expect(await registry.request("esc-after")).toBe(true);
+		expect(textOf(await running)).toBe("owned");
+		controller.abort();
+		killTrackedDetachedChildren();
+		await delay(150);
+		expect(hasExited(child!)).toBe(false);
+		expect(isAlive(child!.pid!)).toBe(true);
+	});
+
 	it("treats a request after the command exited as a no-op", async () => {
 		const registry = createHandoverRegistry();
 		const reasons: string[] = [];

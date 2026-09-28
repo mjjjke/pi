@@ -912,6 +912,8 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		// No bash call survives a run: drop stale entries so a request without options cannot hang.
+		if (event.type === "agent_start") this._settleAllBashHandoverWaiters();
 		// Track bash calls before extensions see the event, so a handler can request a handover for it.
 		if (event.type === "tool_execution_start" && event.toolName === "bash") {
 			this._runningBashCalls.set(event.toolCallId, []);
@@ -945,7 +947,7 @@ export class AgentSession {
 		if (event.type === "tool_execution_end") {
 			this._settleBashHandoverWaiters(event.toolCallId);
 		} else if (event.type === "agent_end") {
-			for (const toolCallId of [...this._runningBashCalls.keys()]) this._settleBashHandoverWaiters(toolCallId);
+			this._settleAllBashHandoverWaiters();
 		}
 
 		// Handle session persistence
@@ -1276,6 +1278,8 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		this._disposed = true;
+		this._settleAllBashHandoverWaiters();
+		this._bashHandoverRequests.clear();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -2248,6 +2252,10 @@ export class AgentSession {
 		const waiters = this._runningBashCalls.get(toolCallId);
 		this._runningBashCalls.delete(toolCallId);
 		for (const resolve of waiters ?? []) resolve(false);
+	}
+
+	private _settleAllBashHandoverWaiters(): void {
+		for (const toolCallId of [...this._runningBashCalls.keys()]) this._settleBashHandoverWaiters(toolCallId);
 	}
 
 	async abort(): Promise<void> {

@@ -373,9 +373,11 @@ export interface ExtensionContext {
 	 * with `reason: "steer"`, e.g. so a steering message is not blocked by a long command. A call
 	 * that has started but not spawned its process yet is offered as soon as it spawns. Resolves
 	 * after the handlers settle with the number of calls taken over and completed; 0 when no bash
-	 * call is running or all were declined.
+	 * call is running or all were declined. A started call that never spawns a local process
+	 * (custom operations, an extension tool named `bash`) is held until it ends and counts 0, so do
+	 * not await this on a hot path. Optional: absent on cores and hand-built contexts without it.
 	 */
-	requestBashHandover(options?: RequestBashHandoverOptions): Promise<number>;
+	requestBashHandover?(options?: RequestBashHandoverOptions): Promise<number>;
 }
 
 /**

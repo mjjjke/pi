@@ -196,7 +196,7 @@ describe("AgentSession bash_timeout", () => {
 
 		const prompt = harness.session.prompt("run them");
 		await waitFor(() => started.size === 2);
-		const count = await ctx!.requestBashHandover();
+		const count = await ctx!.requestBashHandover!();
 		await prompt;
 
 		expect(count).toBe(2);
@@ -238,7 +238,7 @@ describe("AgentSession bash_timeout", () => {
 
 		const prompt = harness.session.prompt("run them");
 		await waitFor(() => started.size === 2);
-		const count = await ctx!.requestBashHandover({ toolCallId: "target" });
+		const count = await ctx!.requestBashHandover!({ toolCallId: "target" });
 		await prompt;
 
 		expect(count).toBe(1);
@@ -254,7 +254,7 @@ describe("AgentSession bash_timeout", () => {
 				(pi) => {
 					pi.on("tool_execution_start", (event, ctx) => {
 						if (event.toolName !== "bash") return;
-						void ctx.requestBashHandover({ toolCallId: event.toolCallId }).then((count) => counts.push(count));
+						void ctx.requestBashHandover!({ toolCallId: event.toolCallId }).then((count) => counts.push(count));
 					});
 					pi.on("bash_timeout", (event) => {
 						pids.add(event.pid);
@@ -284,7 +284,7 @@ describe("AgentSession bash_timeout", () => {
 			extensionFactories: [
 				(pi) => {
 					pi.on("tool_execution_start", (event, ctx) => {
-						void ctx.requestBashHandover({ toolCallId: event.toolCallId }).then((count) => counts.push(count));
+						void ctx.requestBashHandover!({ toolCallId: event.toolCallId }).then((count) => counts.push(count));
 					});
 					pi.on("tool_call", () => ({ block: true, reason: "blocked" }));
 					pi.on("bash_timeout", (event) => {
@@ -331,11 +331,38 @@ describe("AgentSession bash_timeout", () => {
 
 		const prompt = harness.session.prompt("run it");
 		await waitFor(() => started);
-		const count = await ctx!.requestBashHandover();
+		const count = await ctx!.requestBashHandover!();
 		await prompt;
 
 		expect(count).toBe(0);
 		expect(resultText(harness, "kept")).toBe("a\nb\n");
+	});
+
+	it("settles a request held on a stale bash call when the next run starts", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		// A call whose tool_execution_end never arrived (e.g. an interrupted run).
+		(harness.session as unknown as { _runningBashCalls: Map<string, unknown[]> })._runningBashCalls.set("stale", []);
+		let count: number | undefined;
+		void harness.session.requestBashHandover().then((value) => {
+			count = value;
+		});
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.prompt("hi");
+		await waitFor(() => count !== undefined);
+		expect(count).toBe(0);
+	});
+
+	it("settles held requests when the session is disposed", async () => {
+		const harness = await createHarness();
+		(harness.session as unknown as { _runningBashCalls: Map<string, unknown[]> })._runningBashCalls.set("stale", []);
+		let count: number | undefined;
+		void harness.session.requestBashHandover({ toolCallId: "stale" }).then((value) => {
+			count = value;
+		});
+		harness.cleanup();
+		await waitFor(() => count !== undefined);
+		expect(count).toBe(0);
 	});
 
 	it("returns 0 when no bash call is running", async () => {
@@ -355,7 +382,7 @@ describe("AgentSession bash_timeout", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("done")]);
 		await harness.session.prompt("hi");
-		expect(await ctx!.requestBashHandover()).toBe(0);
-		expect(await ctx!.requestBashHandover({ toolCallId: "missing" })).toBe(0);
+		expect(await ctx!.requestBashHandover!()).toBe(0);
+		expect(await ctx!.requestBashHandover!({ toolCallId: "missing" })).toBe(0);
 	});
 });

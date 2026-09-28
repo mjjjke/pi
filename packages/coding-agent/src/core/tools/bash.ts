@@ -154,6 +154,9 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			let detached = false;
 			// Tail of the serialized handover handlings (timeout and on-demand requests).
 			let handling: Promise<void> | undefined;
+			// Token of the on-demand request whose callback is running, and of the one that detached.
+			let activeRequest: object | undefined;
+			let detachedByRequest: object | undefined;
 			let handlingsInFlight = 0;
 			let resolveFinished: () => void = () => {};
 			const finishedPromise = new Promise<void>((resolve) => {
@@ -175,6 +178,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				if (killRequested) throw new Error("Process is being killed");
 				if (finished || hasExited()) throw new Error("Process already exited");
 				detached = true;
+				detachedByRequest = activeRequest;
 				// waitForChildProcess drops its error listener on detach; an unhandled late error would crash Pi.
 				child.on("error", () => {});
 				child.stdout?.off("data", onData);
@@ -225,14 +229,17 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			const runRequestedHandover = async (
 				callback: (process: BashTimeoutProcess) => Promise<void> | void,
 				pid: number,
-			): Promise<boolean> => {
-				if (isSettled() || signal?.aborted) return false;
+				token: object,
+			): Promise<void> => {
+				if (isSettled() || signal?.aborted) return;
+				activeRequest = token;
 				try {
 					await callback({ pid, detach });
 				} catch {
 					// The tool layer decides what a detach without a result means.
+				} finally {
+					activeRequest = undefined;
 				}
-				return detached;
 			};
 			const enqueueHandling = <T>(run: () => Promise<T> | T): Promise<T> => {
 				handlingsInFlight++;
@@ -250,9 +257,11 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			const requestHandover: BashProcessControl["requestHandover"] = (callback) => {
 				const pid = child.pid;
 				if (pid === undefined || isSettled()) return Promise.resolve(false);
-				const requested = enqueueHandling(() => runRequestedHandover(callback, pid)).catch(() => false);
+				const token = {};
+				const requested = enqueueHandling(() => runRequestedHandover(callback, pid, token)).catch(() => {});
 				// Never outlive the execution, e.g. behind a timeout handler that never settles after an abort.
-				return Promise.race([requested, finishedPromise.then(() => false)]);
+				// The result comes from the detach state, not from which promise settles first.
+				return Promise.race([requested, finishedPromise]).then(() => detachedByRequest === token);
 			};
 
 			try {
@@ -594,16 +603,21 @@ export function createShellToolDefinition(
 			const onStart =
 				onTimeout && registerHandover
 					? (control: BashProcessControl) => {
-							let requested = false;
-							unregisterHandover = registerHandover(toolCallId, async () => {
-								if (requested || handoverClosed || takenPid !== undefined) return false;
-								requested = true;
-								try {
-									const detachedNow = await control.requestHandover(handleSteer);
-									return detachedNow && takenReason === "steer" && handoverResult !== undefined;
-								} finally {
-									requested = false;
-								}
+							// Concurrent requests for this call join the one in flight.
+							let inFlight: Promise<boolean> | undefined;
+							unregisterHandover = registerHandover(toolCallId, () => {
+								if (inFlight) return inFlight;
+								if (handoverClosed || takenPid !== undefined) return Promise.resolve(false);
+								const request = control
+									.requestHandover(handleSteer)
+									.then(
+										(detachedNow) => detachedNow && takenReason === "steer" && handoverResult !== undefined,
+									)
+									.finally(() => {
+										if (inFlight === request) inFlight = undefined;
+									});
+								inFlight = request;
+								return request;
 							});
 						}
 					: undefined;
