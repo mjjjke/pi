@@ -9,7 +9,7 @@ This repository is the local Pi installation. `main` is the stable integration b
 - Commit: `f07218c4d4bbc12bef056a7058c3dd49dfe41abe`
 - Release publication: `2026-09-22T19:43:43Z`; GitHub publication flags and the upstream tag were verified on 2026-09-23.
 
-Keep this base accurate when preparing a new candidate. Update it only in that candidate, never in the running checkout during preparation.
+Keep this base accurate; update it in the merge commit that integrates a new release.
 
 ## Intentional differences
 
@@ -23,32 +23,27 @@ Test paths below are relative to the indicated package's `test/` directory. Reti
 | Tool renderer decorators | Decorate built-in or extension tool rendering in the TUI via `pi.registerToolRenderer()` without re-registering the tool, so theme extensions compose with extensions that own tool behavior. Layers are isolated (own state and last component per row), `base()` renders the inner layer at most once, and failing layers are bypassed per row and reported once per runner, extension, tool, and slot; nothing LLM-visible changes. Not applied to HTML export. | coding-agent: `tool-renderer-decorators.test.ts`, `extensions-fork-api-lifecycle.test.ts`; existing compaction extension fixtures remain type-compatible (`Extension.toolRenderers` is optional). | Upstream offers display-only tool renderer composition with per-layer isolation and no tool re-registration. |
 | Bash timeout handover | Fork extension event `bash_timeout`: when a model-invoked `bash` command times out, an extension can take the still-running process over (paused streams, captured output, no kill on abort/timeout/exit) and complete the tool call with a normal result; otherwise core kills it and reports the stock timeout. Core has no timeout policy. `tool_call` input mutation of `timeout` reaches execution without changing recorded arguments. Used by `pi-subagents`. | coding-agent: `bash-timeout-handover.test.ts`, `suite/agent-session-bash-timeout.test.ts`, `tools.test.ts` | Upstream offers an equivalent timeout ownership hook with the same no-handler behavior and handover guarantees. |
 | Fast mode capabilities | Advertise provider-specific fast/priority payloads and send Anthropic beta headers. Used by `pi-fast`; metadata retained by remote catalog overlays. | ai: `pi-fast-mode.test.ts`, `anthropic-sse-parsing.test.ts`; coding-agent: `remote-catalog-provider.test.ts` | Upstream supplies equivalent discovery, wire behavior and metadata preservation. |
+| Pinned model data | Generated model data (`packages/ai/src/providers/data`, gitignored) is taken from the published `@earendil-works/pi-ai` tarball of the upstream base, plus the fork capabilities (`scripts/fork-model-capabilities.ts`, shared with `generate-models.ts`), instead of live catalogs. Upstream tests pin model ids of their release, so live data breaks `npm run check` (and the pre-commit hook) as soon as a catalog changes. Build with `npm run build:offline`; pi-mjjjke `link:fork` does. | ai: `pin-release-model-data.test.ts`, plus upstream catalog tests (`fireworks-models.test.ts` and others) passing unmodified. | Upstream builds from pinned catalog data, or its tests stop depending on live catalog ids. |
 | Anthropic subscription OAuth | Use the subscription authorization endpoint/scopes without API-key creation permission. Consumed by native Anthropic auth and the `pi-anthropic-auth` wrapper. | ai: `anthropic-oauth.test.ts`; consumer: `pi-anthropic-auth/test/anthropic-oauth.test.ts` | Upstream supplies the same subscription flow and the consumer tests pass. |
-| Fork-aware updates | Avoid replacing this Git checkout with a registry installation. Verify a published release, then prepare an isolated merge candidate for review. Used by `pi update`. | coding-agent: `fork-update-release.test.ts`, `fork-self-update.test.ts`, `package-command-paths.test.ts` | Upstream supports the same release verification and preparation/approval boundary for local forks. |
 
-## Preparing an update
+## Install method
 
-1. Start with clean `main`, including index and untracked files. `pi update` (or `pi update --self`) detects the linked fork and verifies GitHub's **latest published stable release**, not the latest tag or `upstream/main`.
-2. Verification accepts GitHub HTTPS/SSH upstream URLs and uses GitHub's API, without requiring `gh`. It checks publication metadata, semantic version, the advertised tag and peeled commit, fetches only that tag without replacing local tags, and rechecks its identity. An already integrated release is a no-op; inconsistent versions, offline mode, network/rate-limit failures and moved tags block preparation. `--force` cannot bypass these checks.
-3. The nested agent receives the exact release and starting main SHA. It creates a uniquely named branch/worktree from **our main SHA**, outside the canonical repositories, then runs `git merge --no-ff --no-commit <verified-release-sha>`. It must not use rebase, whole-side conflict choices or the `ours` merge strategy to hide conflicts.
-4. Reconcile every inventory item with upstream APIs. Hydrate dependencies using `npm ci --ignore-scripts`. Use official model generators when necessary; review generated changes and dependency/lockfile changes. Do not run lifecycle scripts automatically.
-5. Run `npm run check` and focused regressions with isolated HOME, no inherited provider credentials/endpoints and `PI_OFFLINE=1`. Validate isolated extension copies against **candidate sources**, not installed dist files. Use temporary TypeScript paths and Vitest aliases derived from the candidate's root configurations; do not relink active consumers. If combining source projects introduces incompatible ambient declarations (for example, Node/DOM or highlight.js versions), first check the fork sources with their own configuration, emit declaration-only files into a temporary directory, then typecheck consumers against those fresh declarations. Runtime tests must still resolve candidate sources. This emits no JavaScript and uses no installed dist files; runtime build validation requires separate approval.
-6. Review the entire working tree diff against the verified release (staged, unstaged and untracked). Every difference must be an inventory behavior, a required adaptation or reviewed generated output. Update the upstream base above in the candidate.
-7. Report base SHA, release URL/version/tag/commit, branch/path, pending merge/conflicts, checks and consumer compatibility. Confirm the original main has not advanced and its checkout is unchanged. Keep incomplete candidates and diagnostics; never silently discard another run's work.
+The `pi` launcher (`~/.local/bin/pi`, from `~/dotfiles`) runs `packages/coding-agent/dist/cli.js` from this checkout with mise's Node. Never install this package globally: upstream `pi update` would then replace the fork with the registry package. With the launcher, upstream `pi update` cannot self-update (install method `unknown`, not under `npm root -g`) and leaves the checkout untouched.
 
-`candidate validated; activation pending` means all required checks passed. `candidate incomplete` means a blocker or missing validation remains. A zero exit status from the nested agent only means its process completed, not that validation or installation succeeded.
+## Updating from upstream
 
-Preparation does **not** commit, push, activate or relink. `--all` still explicitly updates installed packages separately; that package-manager operation is not isolated by the fork candidate. `PI_DISABLE_FORK_UPDATE_AGENT=1` explicitly opts out to the normal package-manager path; verification failures never fall back to it implicitly.
+Ask before destructive git operations (rollback, branch deletion).
 
-## Approval and promotion checklist
+0. Once: `git remote add upstream https://github.com/earendil-works/pi.git`.
+1. Start from a clean `main`. `git fetch upstream --tags`. Pick the latest **published stable** release on GitHub Releases, not just the newest tag or `upstream/main`.
+2. `git worktree add ../pi-mono-candidate -b update/vX.Y.Z main`. The worktree needs its own `npm ci --ignore-scripts`.
+3. `git merge --no-ff vX.Y.Z`. Resolve conflicts by adapting each row of the table above to upstream's APIs. Never use rebase, `-s ours` or whole-side conflict choices.
+4. `npm ci --ignore-scripts`, then `node packages/ai/scripts/pin-release-model-data.ts --version X.Y.Z` (release catalog + fork capabilities), then `npm run build:offline && npm run check`, plus the regression tests listed in the table. Review lockfile changes. Never use plain `npm run build`: it regenerates model data from live catalogs.
+5. Validate consumers from pi-mjjjke: `PI_MONO_PATH=../pi-mono-candidate node scripts/link-fork.mjs && npm run validate`, then `node scripts/link-fork.mjs` to relink `../pi-mono`. `validate` itself ignores `PI_MONO_PATH`; only `link-fork.mjs` reads it, and resolution goes through each package's `dist/`. Relinking temporarily is safe: the running pi does not resolve through pi-mjjjke's `node_modules` (the extension loader aliases `@earendil-works/pi-coding-agent` to the running instance).
+6. Update "Upstream base" above and commit the merge on the branch (release URL, tag and full SHA in the message; old main as first parent).
+7. `git merge --ff-only update/vX.Y.Z` on `main`; `npm ci --ignore-scripts` if `package-lock.json` changed; `npm run link:fork` from pi-mjjjke; restart pi and smoke-test. Push only when requested.
+8. `git worktree remove ../pi-mono-candidate && git branch -d update/vX.Y.Z`.
 
-These are separate authorized actions, not part of `pi update` preparation:
-
-- Review the candidate diff and validation report; approve any replacement/removal of intentional behavior.
-- Verify the original main still equals the pinned base. If it advanced, stop and prepare/revalidate from the new base rather than forcing promotion.
-- Complete one merge commit with the old main as first parent and the verified release as second parent. Include the release URL, tag and full SHA in its message. Stage explicit paths only and run checks before committing.
-- Advance main with `git merge --ff-only <candidate-branch>`; publish with a normal push only when requested.
-- Build and activate only with approval, then verify the installed version, extension loading and the relevant interactive behavior. Preserve a recovery bundle/snapshot until activation is checked.
-- Remove only this run's temporary worktree and branch after their work is safely integrated. Keep the two canonical repository paths stable.
+Rollback: `git reset --keep <previous main SHA>` (or `ORIG_HEAD`), `npm ci --ignore-scripts` if the lockfile differs, then `npm run link:fork`.
 
 The one-time history reconstruction candidate is different: its six commits reproduce the old snapshot but intentionally exclude duplicated historical ancestry. Do not merge the old main into that candidate or promote it through the normal fast-forward checklist. Replacing its already-published history requires a separate approved procedure; this document does not authorize it.
