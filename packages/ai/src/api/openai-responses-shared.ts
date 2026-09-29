@@ -35,6 +35,7 @@ import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import { parseTextSignature } from "../utils/text-signature.ts";
 import { resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
@@ -54,26 +55,6 @@ function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): st
 	const payload: TextSignatureV1 = { v: 1, id };
 	if (phase) payload.phase = phase;
 	return JSON.stringify(payload);
-}
-
-function parseTextSignature(
-	signature: string | undefined,
-): { id: string; phase?: TextSignatureV1["phase"] } | undefined {
-	if (!signature) return undefined;
-	if (signature.startsWith("{")) {
-		try {
-			const parsed = JSON.parse(signature) as Partial<TextSignatureV1>;
-			if (parsed.v === 1 && typeof parsed.id === "string") {
-				if (parsed.phase === "commentary" || parsed.phase === "final_answer") {
-					return { id: parsed.id, phase: parsed.phase };
-				}
-				return { id: parsed.id };
-			}
-		} catch {
-			// Fall through to legacy plain-string handling.
-		}
-	}
-	return { id: signature };
 }
 
 type ToolResultOutputContent = Array<ResponseInputText | ResponseInputImage>;

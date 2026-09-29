@@ -213,6 +213,31 @@ describe("Anthropic thinking display updates", () => {
 		expect(payload.thinking?.display).toBe("summarized");
 	});
 
+	it("does not send the beta when thinking is disabled", async () => {
+		const { payload, beta } = await capturePayload(anthropicModel(), {
+			thinkingEnabled: false,
+			thinkingDisplay: "updates",
+		});
+		expect(payload.thinking).toEqual({ type: "disabled" });
+		expect(beta ?? "").not.toContain(THINKING_DISPLAY_UPDATES_BETA);
+	});
+
+	it("keeps updates when a configured beta header already includes the beta", async () => {
+		const { payload, beta } = await capturePayload(
+			anthropicModel({ headers: { "anthropic-beta": `some-beta,${THINKING_DISPLAY_UPDATES_BETA}` } }),
+			{ thinkingDisplay: "updates" },
+		);
+		expect(payload.thinking?.display).toBe("updates");
+		expect(beta?.split(",")).toContain(THINKING_DISPLAY_UPDATES_BETA);
+	});
+
+	it("sends updates on managed-effort models even with reasoning off", async () => {
+		const model = anthropicModel({ compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true } });
+		const { payload, beta } = await capturePayload(model, { thinkingEnabled: false, thinkingDisplay: "updates" });
+		expect(payload.thinking?.display).toBe("updates");
+		expect(beta?.split(",")).toContain(THINKING_DISPLAY_UPDATES_BETA);
+	});
+
 	it("keeps summarized as the library default", async () => {
 		const { payload, beta } = await capturePayload(anthropicModel());
 		expect(payload.thinking?.display).toBe("summarized");
