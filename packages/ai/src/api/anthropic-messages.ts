@@ -1342,6 +1342,12 @@ export function convertMessages(
 	// turn; an instruction that never gets an anchor is simply not sent in this request (except in a
 	// transcript with no turns at all, see the end of this function).
 	//
+	// This includes native system messages carrying `tool_addition`/`tool_removal` blocks: without an
+	// anchor they are withheld for that request, so under native tool changes a removed tool stays
+	// callable (and an added one unavailable) until the next user turn places the change. Falling
+	// back to a non-native tool list for that request is deliberately not done: `tools` is the start
+	// of the cached prefix, so swapping it would miss the cache for that request and the next one.
+	//
 	// Stability: an instruction is only ever emitted after the last message already on the wire
 	// when it was queued, never inserted before an earlier (possibly signed-thinking) assistant turn,
 	// and each developer message keeps its own system message instead of being merged with later
@@ -1522,13 +1528,15 @@ export function convertMessages(
 			lastEmittedIsUser = true;
 		}
 	}
-	// A transcript without any user or assistant turn has no valid placement and is rejected by
-	// the API either way; still send its system messages rather than an empty `messages` array.
+	// A transcript without any user or assistant turn gets HTTP 400 either way: a content-carrying
+	// system message cannot come first, and an empty `messages` array is invalid too. Sending the
+	// system messages anyway keeps upstream's transcript-tool-changes test unmodified and makes the
+	// API error name the misplaced system message instead of an empty array.
 	if (params.length === 0) lastEmittedIsUser = true;
 	flushPendingSystemMessages();
 
-	// Add cache_control to the last user or system message. Developer instructions are
-	// kept outside the cached conversation prefix, so walk past them to the real anchor.
+	// Add cache_control to the last user or system message, walking past trailing developer
+	// messages to the real anchor.
 	if (cacheControl && params.length > 0) {
 		let cacheIndex = params.length - 1;
 		while (cacheIndex >= 0 && developerOutputMessages.has(params[cacheIndex])) cacheIndex--;

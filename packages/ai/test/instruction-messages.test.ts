@@ -308,6 +308,11 @@ describe("mid-conversation instruction messages", () => {
 			"claude-haiku-4-5",
 			"claude-opus-4-7",
 			"claude-3-7-sonnet-20250219",
+			"arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-5-5",
+			"my-custom-model",
+			"opus-5-5",
+			"gpt-5.5",
+			"",
 		]) {
 			expect(anthropicSupportsMidConversationInstructions(id), id).toBe(false);
 		}

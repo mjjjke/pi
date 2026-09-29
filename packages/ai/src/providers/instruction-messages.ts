@@ -25,11 +25,13 @@ export function openAiSupportsMidConversationInstructions(id: string | undefined
  * Fable 5.1/5, Mythos 5.1/5, Opus 5.5/5/4.8 and Sonnet 5.5, but not Sonnet 5.
  * Accepts native ids, dated variants (`-YYYYMMDD`, `@YYYYMMDD`) and provider-prefixed ids
  * (`us.anthropic.claude-...`, `anthropic/claude-...`). A one- or two-digit segment after the
- * major version is the minor version; an eight-digit one is a date.
+ * major version is the minor version; an eight-digit one is a date. Anything that is not a
+ * `claude-` id after the prefix strip (Bedrock ARNs, custom ids) is unsupported.
  */
 export function anthropicSupportsMidConversationInstructions(id: string | undefined): boolean {
 	if (!id) return false;
 	const m = id.toLowerCase().replace(/^(?:[\w-]+[./])+(?=claude-)/, "");
+	if (!m.startsWith("claude-")) return false;
 	if (/^claude-3(?:[.-]|$)/.test(m)) return false;
 	if (/^claude-haiku-4(?:[.-]|$)/.test(m)) return false;
 	const sonnet = m.match(/^claude-sonnet-(\d+)(?:[.-](\d{1,2})(?![0-9]))?/);
