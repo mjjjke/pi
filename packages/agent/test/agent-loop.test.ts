@@ -1503,7 +1503,7 @@ describe("agentLoop with AgentMessage", () => {
 		let steeringPolls = 0;
 		const config: AgentLoopConfig = {
 			model: createModel(),
-			convertToLlm: (messages) => messages as Message[],
+			convertToLlm: identityConverter,
 			getSteeringMessages: async () => {
 				steeringPolls++;
 				return queued.splice(0);
