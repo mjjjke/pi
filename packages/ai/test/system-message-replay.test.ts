@@ -7,10 +7,13 @@ import {
 	declarationsEqual,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
+	getInitialSystemMessage,
 	getToolStateChanges,
 	hasNonAdditiveToolChanges,
 	hasToolRedefinitions,
 	normalizeContext,
+	resolveTranscriptTools,
+	withoutInitialSystemMessage,
 } from "../src/utils/transcript.ts";
 
 function tool(name: string, description = `${name} tool`): Tool {
@@ -81,6 +84,28 @@ describe("system message replay", () => {
 		});
 		expect(getCurrentSystemPrompt(context.messages)).toBe("You are pi.");
 		expect(collapseSystemMessages(context).messages[0]).toMatchObject({ role: "system", toolsAdded: [tool("x")] });
+	});
+
+	test("recognizes an initial system snapshot after developer instructions but not after a turn", () => {
+		const boundary: Message = { role: "developer", content: "Plan boundary", timestamp: 1 };
+		const second: Message = { role: "developer", content: "No edits", timestamp: 2 };
+		const initial: Message = {
+			role: "system",
+			content: "",
+			sections: { preamble: "You are pi." },
+			toolsAdded: [tool("read")],
+			timestamp: 3,
+		};
+		const user: Message = { role: "user", content: "Research", timestamp: 4 };
+		const update: Message = { role: "system", content: "Later update", timestamp: 5 };
+		const messages = [boundary, second, initial, user, update];
+		expect(getInitialSystemMessage(messages)).toBe(initial);
+		expect(withoutInitialSystemMessage(messages)).toEqual([boundary, second, user, update]);
+		expect(resolveTranscriptTools(messages, true).requestTools).toEqual([tool("read")]);
+		expect(getInitialSystemMessage([boundary, user, initial])).toBeUndefined();
+		expect(getInitialSystemMessage([boundary, { role: "toolResult" }, initial])).toBeUndefined();
+		expect(getInitialSystemMessage([boundary, { role: "assistant" }, initial])).toBeUndefined();
+		expect(withoutInitialSystemMessage([boundary, user, initial])).toEqual([boundary, user, initial]);
 	});
 
 	test("renders complete prompts and framed updates", () => {

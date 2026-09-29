@@ -1,5 +1,9 @@
+import type { MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import { describe, expect, it } from "vitest";
-import { convertMessages as convertAnthropicMessagesRaw } from "../src/api/anthropic-messages.ts";
+import {
+	convertMessages as convertAnthropicMessagesRaw,
+	stream as streamAnthropic,
+} from "../src/api/anthropic-messages.ts";
 import { convertMessages as convertOpenAICompletionsMessages } from "../src/api/openai-completions.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
@@ -102,6 +106,25 @@ function anthropicModel(overrides: Partial<Model<"anthropic-messages">> = {}): M
 		capabilities: { midConversationInstructionMessages: true },
 		...overrides,
 	};
+}
+
+async function captureAnthropicPayload(messages: Message[]): Promise<MessageCreateParamsStreaming> {
+	let payload: MessageCreateParamsStreaming | undefined;
+	for await (const _ of streamAnthropic(
+		anthropicModel({ compat: { supportsMidConvoSystemMessages: true } }),
+		normalizeContext({ messages }),
+		{
+			apiKey: "test-key",
+			onPayload: (params) => {
+				payload = params as MessageCreateParamsStreaming;
+				throw new Error("payload captured before network request");
+			},
+		},
+	)) {
+		// The expected payload-capture error terminates the local stream without a network call.
+	}
+	if (!payload) throw new Error("Anthropic payload was not captured");
+	return payload;
 }
 
 function convertAnthropicMessages(
@@ -455,6 +478,30 @@ describe("mid-conversation instruction messages", () => {
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["user", "developer", "user"]);
 	});
 
+	it("keeps a leading snapshot out of Codex input when preceded by developers", () => {
+		const model = openAIResponsesModel();
+		const context = normalizeContext({
+			messages: [
+				{ role: "developer", content: "Plan boundary", timestamp: 1 },
+				{ role: "system", content: "Base prompt", timestamp: 2 },
+				{ role: "user", content: "First", timestamp: 3 },
+				assistant(model.api, model.id),
+				{ role: "system", content: "Later update", timestamp: 4 },
+			],
+		});
+		const input = convertResponsesMessages(model, context, new Set(), {
+			includeSystemPrompt: false,
+			supportsMidConvoSystemMessages: true,
+		});
+		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual([
+			"developer",
+			"user",
+			"assistant",
+			"developer",
+		]);
+		expect(input[3]).toMatchObject({ content: "Later update" });
+	});
+
 	it("skips blank instruction messages for OpenAI Responses", () => {
 		const model = openAIResponsesModel();
 		const context: Context = {
@@ -705,6 +752,119 @@ describe("mid-conversation instruction messages", () => {
 			}
 		}
 		expect(failures.slice(0, 10)).toEqual([]);
+	});
+
+	it("sends the snapshot after leading developers as the top-level prompt on first run and relaunch", async () => {
+		const boundary: Message = { role: "developer", content: "Plan boundary", timestamp: 1 };
+		const secondBoundary: Message = { role: "developer", content: "No edits", timestamp: 1 };
+		const snapshot: Message = {
+			role: "system",
+			content: "",
+			sections: { preamble: "You are pi.", rules: "Follow the rules." },
+			timestamp: 2,
+		};
+		const user: Message = { role: "user", content: "First", timestamp: 3 };
+		const first = await captureAnthropicPayload([boundary, secondBoundary, snapshot, user]);
+		const second = await captureAnthropicPayload([
+			boundary,
+			secondBoundary,
+			snapshot,
+			user,
+			anthropicAssistant([{ type: "text", text: "Done." }]),
+			{ role: "user", content: "Continue", timestamp: 4 },
+		]);
+		expect(first.system).toEqual(second.system);
+		expect(first.system).toEqual([
+			{
+				type: "text",
+				text: "You are pi.\n\nFollow the rules.",
+				cache_control: { type: "ephemeral" },
+			},
+		]);
+		expect(first.messages.map((message) => message.role)).toEqual(["user", "system", "system"]);
+		expect(first.messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "First", cache_control: { type: "ephemeral" } }],
+		});
+		expect(second.messages[0]).toMatchObject({ role: "user", content: "First" });
+		expect(first.messages.slice(1)).toEqual(second.messages.slice(1, 3));
+		expect(second.messages.map((message) => message.role)).toEqual(["user", "system", "system", "assistant", "user"]);
+	});
+
+	it("keeps genuinely later snapshots as updates after a user/assistant/tool history", async () => {
+		const boundary: Message = { role: "developer", content: "Plan boundary", timestamp: 1 };
+		const initial: Message = { role: "system", content: "Base prompt", timestamp: 2 };
+		const messages: Message[] = [
+			boundary,
+			initial,
+			{ role: "user", content: "First", timestamp: 3 },
+			anthropicAssistant([{ type: "text", text: "Done." }]),
+			{
+				role: "toolResult",
+				toolCallId: "id",
+				toolName: "read",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: 4,
+			},
+			{ role: "system", content: "Updated rule", timestamp: 5 },
+		];
+		const payload = await captureAnthropicPayload(messages);
+		expect(payload.system).toMatchObject([{ text: "Base prompt" }]);
+		expect(payload.messages.map((message) => message.role)).toEqual([
+			"user",
+			"system",
+			"assistant",
+			"user",
+			"system",
+		]);
+		expect(payload.messages.at(-1)).toMatchObject({
+			role: "system",
+			content: [{ type: "text", text: "Updated rule" }],
+		});
+	});
+
+	it("anchors cache control on the user before every trailing wire system update", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "First", timestamp: 1 },
+			{ role: "system", content: "Native update", timestamp: 2 },
+			{ role: "developer", content: "Plan boundary", timestamp: 3 },
+		];
+		const params = convertAnthropicMessagesRaw(messages, false, { type: "ephemeral" }).messages;
+		expect(params.map((message) => message.role)).toEqual(["user", "system", "system"]);
+		expect(params[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "First", cache_control: { type: "ephemeral" } }],
+		});
+		for (const param of params.slice(1)) {
+			expect(param.content).toEqual([{ type: "text", text: expect.any(String) }]);
+		}
+	});
+
+	it("keeps cache control off trailing native tool changes", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "First", timestamp: 1 },
+			{
+				role: "system",
+				content: "",
+				toolsAdded: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+				timestamp: 2,
+			},
+		];
+		const params = convertAnthropicMessagesRaw(
+			messages,
+			false,
+			{ type: "ephemeral" },
+			false,
+			undefined,
+			true,
+		).messages;
+		expect(params[0]).toMatchObject({
+			role: "user",
+			content: [{ cache_control: { type: "ephemeral" } }],
+		});
+		expect(params[1]).toMatchObject({ role: "system", content: [{ type: "tool_addition" }] });
+		expect(params[1].content).toEqual([{ type: "tool_addition", tool: { type: "tool_reference", name: "read" } }]);
 	});
 
 	it("does not move Anthropic prompt cache control to an earlier user when conversation ends with assistant", () => {

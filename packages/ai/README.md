@@ -1392,7 +1392,7 @@ All providers can handle messages from other providers — text, tool calls and 
 
 ## System Messages
 
-`Context.systemPrompt` and `Context.tools` are shorthand for a leading system message. The public entry points (`Models.stream()`, `streamSimple()`, `complete()`, `completeSimple()`) accept a `Context` and call `normalizeContext()` once; everything below them, including `Provider.stream()`, `ProviderStreams`, and the API implementation modules, receives the resulting `TranscriptContext`, which only has `messages`. The transcript can also carry system messages later in the conversation to change the prompt or the tool set without rewriting the history:
+`Context.systemPrompt` and `Context.tools` are shorthand for a leading system message. An initial system snapshot may also follow developer instructions committed before the first user turn; a system message after a user, assistant, or tool result remains a later update. The public entry points (`Models.stream()`, `streamSimple()`, `complete()`, `completeSimple()`) accept a `Context` and call `normalizeContext()` once; everything below them, including `Provider.stream()`, `ProviderStreams`, and the API implementation modules, receives the resulting `TranscriptContext`, which only has `messages`. The transcript can also carry system messages later in the conversation to change the prompt or the tool set without rewriting the history:
 
 ```typescript
 interface SystemMessage {

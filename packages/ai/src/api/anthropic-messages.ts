@@ -49,6 +49,7 @@ import {
 	hasToolRedefinitions,
 	resolveTranscript,
 	type TranscriptContext,
+	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
 
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
@@ -1119,8 +1120,11 @@ function buildParams(
 	const compat = getAnthropicCompat(model);
 	const initialSystemMessage = getInitialSystemMessage(context.messages);
 	const initialSystemText = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
-	const conversationMessages = initialSystemMessage ? transformedMessages.slice(1) : transformedMessages;
+	const conversationMessages = transformMessages(
+		withoutInitialSystemMessage(context.messages),
+		model,
+		normalizeToolCallId,
+	);
 	// Native tool changes reference tools by name, so a redefined name cannot be expressed,
 	// and Anthropic rejects a tool list where every tool is deferred, so there must be an
 	// initial active tool to anchor the deferred ones. Otherwise the current tool list is sent.
@@ -1356,7 +1360,6 @@ export function convertMessages(
 	// is a request whose answer is dropped (error/aborted/empty): a tail instruction then has to
 	// move past the next user turn, because `system` directly followed by `user` is rejected.
 	const pendingSystemMessages: MessageParam[] = [];
-	const developerOutputMessages = new Set<MessageParam>();
 	let lastEmittedIsUser = false;
 	const flushPendingSystemMessages = (): void => {
 		if (!lastEmittedIsUser) return;
@@ -1393,7 +1396,6 @@ export function convertMessages(
 			if (text.trim().length > 0) {
 				const message: MessageParam = { role: "system", content: [{ type: "text", text }] };
 				pendingSystemMessages.push(message);
-				developerOutputMessages.add(message);
 			}
 		} else if (msg.role === "user") {
 			const previousParamCount = params.length;
@@ -1535,11 +1537,11 @@ export function convertMessages(
 	if (params.length === 0) lastEmittedIsUser = true;
 	flushPendingSystemMessages();
 
-	// Add cache_control to the last user or system message, walking past trailing developer
-	// messages to the real anchor.
+	// Walk past every trailing wire system message (developer instructions and native
+	// prompt/tool updates) to keep the breakpoint on the user anchor.
 	if (cacheControl && params.length > 0) {
 		let cacheIndex = params.length - 1;
-		while (cacheIndex >= 0 && developerOutputMessages.has(params[cacheIndex])) cacheIndex--;
+		while (cacheIndex >= 0 && params[cacheIndex].role === "system") cacheIndex--;
 		const lastMessage = params[cacheIndex];
 		if (lastMessage && (lastMessage.role === "user" || lastMessage.role === "system")) {
 			if (Array.isArray(lastMessage.content)) {

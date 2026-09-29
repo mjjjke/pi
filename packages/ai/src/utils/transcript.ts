@@ -43,15 +43,21 @@ function isSystemMessage(message: { role: string }): message is SystemMessage {
 	return message.role === "system";
 }
 
-/** Return the leading system message, if the transcript starts with one. */
+/** Return the first system snapshot if only developer instructions precede it. Never promote an update past a turn. */
 export function getInitialSystemMessage(messages: TranscriptMessages): SystemMessage | undefined {
-	const first = messages[0];
-	return first && isSystemMessage(first) ? first : undefined;
+	for (const message of messages) {
+		if (isSystemMessage(message)) return message;
+		if (message.role !== "developer") break;
+	}
+	return undefined;
 }
 
-/** Drop the leading system message for APIs that carry the prompt outside the message list. */
+/** Drop only the initial snapshot for APIs that carry the prompt outside the message list. */
 export function withoutInitialSystemMessage(messages: Message[]): Message[] {
-	return getInitialSystemMessage(messages) ? messages.slice(1) : messages;
+	const initial = getInitialSystemMessage(messages);
+	if (!initial) return messages;
+	const index = messages.indexOf(initial);
+	return [...messages.slice(0, index), ...messages.slice(index + 1)];
 }
 
 /** Resolve the tools available after applying every transcript delta in order. */

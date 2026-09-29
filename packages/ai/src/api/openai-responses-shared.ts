@@ -36,7 +36,7 @@ import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import { parseTextSignature } from "../utils/text-signature.ts";
-import { resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getInitialSystemMessage, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	type GrammarToolInputJsonBuffer,
@@ -195,9 +195,9 @@ export function convertResponsesMessages<TApi extends Api>(
 	const instructionRole = model.reasoning && compat?.supportsDeveloperRole !== false ? "developer" : "system";
 
 	let msgIndex = 0;
-	let sourceIndex = 0;
+	const initialSystemMessage = getInitialSystemMessage(normalizedContext.messages);
 	for (const msg of transformedMessages) {
-		const isLeadingSystemMessage = sourceIndex++ === 0 && msg.role === "system";
+		const isLeadingSystemMessage = msg === initialSystemMessage;
 		if (msg.role === "system") {
 			if (!isLeadingSystemMessage) appendSystemToolAdditions(msg, `system:${msgIndex}`);
 			if (!isLeadingSystemMessage || includeInitialSystemMessage) {
