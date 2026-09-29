@@ -336,6 +336,38 @@ describe("AgentSession.queueDeveloperMessage", () => {
 		expect(developerEntries(harness)).toHaveLength(1);
 	});
 
+	it("commits an instruction queued from onCommit during the run-end commit before the session settles", async () => {
+		const harness = await setup();
+		const statuses: string[] = [];
+		const settledEntries: number[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "agent_settled") settledEntries.push(developerEntries(harness).length);
+		});
+		harness.setResponses([
+			() => {
+				const first = harness.session.queueDeveloperMessage("First.", {
+					onCommit: () => {
+						statuses.push(harness.session.queueDeveloperMessage("Second.").status);
+					},
+				});
+				statuses.push(first.status);
+				return fauxAssistantMessage("final");
+			},
+		]);
+
+		await harness.session.prompt("start");
+
+		expect(statuses).toEqual(["pending", "pending"]);
+		expect(entryKinds(harness)).toEqual([
+			"system",
+			"user:start",
+			"assistant",
+			"developer:First.",
+			"developer:Second.",
+		]);
+		expect(settledEntries).toEqual([2]);
+	});
+
 	it("keeps exactly one entry when disposed from a message_start handler of the committed instruction", async () => {
 		const barrier = createBarrierTool();
 		let harness: Harness | undefined;

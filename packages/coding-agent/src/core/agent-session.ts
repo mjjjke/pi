@@ -757,7 +757,14 @@ export class AgentSession {
 	}
 
 	private _commitPendingInstructionsAtRunEnd(): void {
-		for (const pending of this._pendingInstructions.slice()) {
+		// Also picks up items queued by onCommit callbacks while this runs (the run is still active).
+		const attempted = new Set<PendingInstruction>();
+		for (
+			let pending = this._pendingInstructions.find((item) => !attempted.has(item));
+			pending;
+			pending = this._pendingInstructions.find((item) => !attempted.has(item))
+		) {
+			attempted.add(pending);
 			try {
 				this._commitInstruction(pending, { refresh: true });
 			} catch {
