@@ -147,6 +147,53 @@ describe("mid-conversation instruction messages", () => {
 		).toBe(false);
 	});
 
+	it("excludes Claude Sonnet 5 but keeps Sonnet 5.5 and other documented Anthropic models", () => {
+		// https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages:
+		// not available on Claude Sonnet 5.
+		for (const id of [
+			"claude-sonnet-5",
+			"claude-sonnet-5-20260101",
+			"claude-sonnet-5@20260101",
+			"claude-sonnet-5-0",
+			"anthropic.claude-sonnet-5",
+			"us.anthropic.claude-sonnet-5",
+			"anthropic/claude-sonnet-5",
+			"claude-sonnet-4-6",
+			"claude-haiku-4-5",
+			"claude-opus-4-7",
+			"claude-3-7-sonnet-20250219",
+		]) {
+			expect(anthropicSupportsMidConversationInstructions(id), id).toBe(false);
+		}
+		for (const id of [
+			"claude-sonnet-5-5",
+			"claude-sonnet-5.5",
+			"claude-sonnet-5-5-20260101",
+			"global.anthropic.claude-sonnet-5-5",
+			"claude-fable-5-1",
+			"claude-fable-5",
+			"claude-mythos-5-1",
+			"claude-mythos-5",
+			"claude-opus-5-5",
+			"claude-opus-5",
+			"claude-opus-4-8",
+			"us.anthropic.claude-opus-5-5",
+		]) {
+			expect(anthropicSupportsMidConversationInstructions(id), id).toBe(true);
+		}
+	});
+
+	it("does not advertise mid-conversation instructions for the pinned Claude Sonnet 5 model", () => {
+		const sonnet5 = generatedModel("anthropic", "claude-sonnet-5");
+		expect(sonnet5.capabilities?.midConversationInstructionMessages).toBeUndefined();
+		expect(
+			(sonnet5.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)?.supportsMidConvoSystemMessages,
+		).not.toBe(true);
+		expect(generatedModel("anthropic", "claude-opus-5-5").capabilities?.midConversationInstructionMessages).toBe(
+			true,
+		);
+	});
+
 	it("generates instruction capabilities only for first-party supported model metadata", () => {
 		expect(generatedModel("anthropic", "claude-opus-4-8").capabilities?.midConversationInstructionMessages).toBe(
 			true,

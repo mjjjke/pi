@@ -19,11 +19,25 @@ export function openAiSupportsMidConversationInstructions(id: string | undefined
 	return major > 5 || (major === 5 && minor >= 4);
 }
 
+/**
+ * Anthropic models that accept mid-conversation `system` messages, per
+ * https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages:
+ * Fable 5.1/5, Mythos 5.1/5, Opus 5.5/5/4.8 and Sonnet 5.5, but not Sonnet 5.
+ * Accepts native ids, dated variants (`-YYYYMMDD`, `@YYYYMMDD`) and provider-prefixed ids
+ * (`us.anthropic.claude-...`, `anthropic/claude-...`). A one- or two-digit segment after the
+ * major version is the minor version; an eight-digit one is a date.
+ */
 export function anthropicSupportsMidConversationInstructions(id: string | undefined): boolean {
 	if (!id) return false;
-	const m = id.toLowerCase();
+	const m = id.toLowerCase().replace(/^(?:[\w-]+[./])+(?=claude-)/, "");
 	if (/^claude-3(?:[.-]|$)/.test(m)) return false;
-	if (/^claude-(?:sonnet|haiku)-4(?:[.-]|$)/.test(m)) return false;
+	if (/^claude-haiku-4(?:[.-]|$)/.test(m)) return false;
+	const sonnet = m.match(/^claude-sonnet-(\d+)(?:[.-](\d{1,2})(?![0-9]))?/);
+	if (sonnet) {
+		const major = Number(sonnet[1]);
+		const minor = Number(sonnet[2] ?? "0");
+		return major > 5 || (major === 5 && minor >= 5);
+	}
 	const opus = m.match(/^claude-opus-4(?:[.-](\d{1,2})(?![0-9]))?/);
 	if (opus) return Number(opus[1] ?? "0") >= 8;
 	return true;
