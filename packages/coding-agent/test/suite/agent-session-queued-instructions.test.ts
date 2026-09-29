@@ -546,6 +546,69 @@ describe("AgentSession.queueDeveloperMessage", () => {
 		expect(onCommit).toHaveBeenCalledTimes(1);
 	});
 
+	it("never lets an idle commit overtake an instruction left pending by a failed run-end commit", async () => {
+		const harness = await setup();
+		const originalAppend = harness.sessionManager.appendMessage.bind(harness.sessionManager);
+		let failA = true;
+		vi.spyOn(harness.sessionManager, "appendMessage").mockImplementation((message) => {
+			if (failA && message.role === "developer" && getMessageText(message) === "A") throw new Error("disk full");
+			return originalAppend(message);
+		});
+		harness.setResponses([
+			() => {
+				expect(harness.session.queueDeveloperMessage("A").status).toBe("pending");
+				return fauxAssistantMessage("final");
+			},
+		]);
+
+		await harness.session.prompt("start");
+		expect(developerEntries(harness)).toHaveLength(0);
+
+		// A still fails: B queues behind it instead of overtaking; appendDeveloperMessage does the same.
+		expect(harness.session.queueDeveloperMessage("B").status).toBe("pending");
+		harness.session.appendDeveloperMessage("C");
+		expect(developerEntries(harness)).toHaveLength(0);
+
+		// Once A can be appended, the next idle call drains in FIFO order.
+		failA = false;
+		const d = harness.session.queueDeveloperMessage("D");
+		expect(d.status).toBe("committed");
+		expect(entryKinds(harness).filter((kind) => kind.startsWith("developer:"))).toEqual([
+			"developer:A",
+			"developer:B",
+			"developer:C",
+			"developer:D",
+		]);
+	});
+
+	it("drains a pending instruction before an idle appendDeveloperMessage", async () => {
+		const harness = await setup();
+		const originalAppend = harness.sessionManager.appendMessage.bind(harness.sessionManager);
+		let failures = 0;
+		vi.spyOn(harness.sessionManager, "appendMessage").mockImplementation((message) => {
+			if (message.role === "developer" && getMessageText(message) === "A" && failures < 2) {
+				failures++;
+				throw new Error("disk full");
+			}
+			return originalAppend(message);
+		});
+		harness.setResponses([
+			() => {
+				harness.session.queueDeveloperMessage("A");
+				return fauxAssistantMessage("final");
+			},
+		]);
+
+		await harness.session.prompt("start");
+		expect(failures).toBe(2);
+		harness.session.appendDeveloperMessage("B");
+
+		expect(entryKinds(harness).filter((kind) => kind.startsWith("developer:"))).toEqual([
+			"developer:A",
+			"developer:B",
+		]);
+	});
+
 	it("isolates a throwing onCommit callback from the commit", async () => {
 		const barrier = createBarrierTool();
 		const harness = await setup({ tools: [barrier.tool] });

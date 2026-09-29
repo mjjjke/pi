@@ -778,6 +778,23 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Commit earlier pending instructions in order before an idle or agent_end commit, so a later
+	 * instruction never overtakes one left pending by a failed commit. Returns false when one still
+	 * fails: it and everything after it stay pending.
+	 */
+	private _drainPendingInstructions(): boolean {
+		for (const pending of this._pendingInstructions.slice()) {
+			try {
+				this._commitInstruction(pending, { refresh: true });
+			} catch (error) {
+				this._reportInstructionError(error);
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private _reportInstructionError(error: unknown): void {
 		this._extensionRunner.emitError({
 			extensionPath: "<runtime>",
@@ -2208,7 +2225,13 @@ export class AgentSession {
 			);
 		}
 
-		this._commitInstruction(this._createPendingInstruction(content), { refresh: true });
+		const pending = this._createPendingInstruction(content);
+		if (!this._drainPendingInstructions()) {
+			// An earlier instruction still fails to commit: queue behind it (committed later, in order).
+			this._pendingInstructions.push(pending);
+			return;
+		}
+		this._commitInstruction(pending, { refresh: true });
 	}
 
 	/**
@@ -2224,7 +2247,7 @@ export class AgentSession {
 		if (this._disposed) throw new Error("queueDeveloperMessage() cannot be called after the session is disposed.");
 		if (isBlankInstruction(content)) throw new Error("queueDeveloperMessage() requires non-blank content.");
 		const pending = this._createPendingInstruction(content, options?.onCommit);
-		if (!this.isStreaming || this._isEmittingAgentEndExtensionEvent) {
+		if ((!this.isStreaming || this._isEmittingAgentEndExtensionEvent) && this._drainPendingInstructions()) {
 			return { status: "committed", entryId: this._commitInstruction(pending, { refresh: true }) };
 		}
 		this._pendingInstructions.push(pending);
