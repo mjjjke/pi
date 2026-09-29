@@ -321,7 +321,8 @@ const result = pi.queueDeveloperMessage("Research only; do not edit files.", {
 - Instructions commit in the order they were queued. If an earlier one failed to commit (the session append threw) and is still pending, a later idle or `agent_end` call does not overtake it: it commits the earlier ones first, and if one still fails, the new instruction is queued behind it and `status: "pending"` is returned. `pi.appendDeveloperMessage()` behaves the same way (it returns nothing; its instruction then commits later, in order).
 - "Committed" means appended to the session; a new session file is written only once it has its first assistant message.
 - `onCommit(entryId)` is called exactly once per instruction, also for an immediate commit (before `queueDeveloperMessage()` returns). Errors thrown by it are reported as extension errors and do not affect the commit.
-- `message_start`/`message_end` for a committed instruction are observation-only: the message is frozen and a `message_end` replacement is ignored with a warning.
+- Committed developer messages are frozen, including those from `pi.appendDeveloperMessage()`: mutating one in place (for example `event.message.content = ...` in a handler) throws a `TypeError`. `message_start`/`message_end` for a queued instruction are observation-only: a `message_end` replacement is ignored with a warning.
+- If the session is disposed during a tool batch, pending instructions are committed after the assistant's tool call, whose result is never persisted. On the next request the provider layer adds a synthetic tool result for the orphaned call; models that support mid-conversation instructions receive the instruction after that result and the next user message (Anthropic: `tool_use`, `tool_result`, user, system), never between a tool call and its result.
 - Blank content, or a call after the session is disposed, throws.
 
 <a id="custom-ui"></a>

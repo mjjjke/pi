@@ -586,6 +586,38 @@ describe("mid-conversation instruction messages", () => {
 		expect(params.map((message) => message.role)).toEqual(["user", "system"]);
 	});
 
+	// A session disposed mid tool batch persists the tool call without its result, then the
+	// developer instructions committed by dispose, then the next user turn at relaunch.
+	it("places an Anthropic instruction after the synthetic result of an orphaned tool call", () => {
+		const model = anthropicModel();
+		const messages: Message[] = [
+			{ role: "user", content: "Implement this", timestamp: 1 },
+			anthropicAssistant(
+				[{ type: "toolCall", id: "toolu_1", name: "bash", arguments: { command: "ls" } }],
+				"toolUse",
+			),
+			{ role: "developer", content: "Plan boundary.", timestamp: 4 },
+			{ role: "user", content: "Continue", timestamp: 5 },
+			assistant(model.api, model.id),
+		];
+
+		const params = convertAnthropicMessages(messages, model, false);
+		const toolUseIndex = params.findIndex(
+			(param) =>
+				param.role === "assistant" &&
+				Array.isArray(param.content) &&
+				param.content.some((block) => block.type === "tool_use"),
+		);
+		const next = params[toolUseIndex + 1];
+		expect(next?.role).toBe("user");
+		expect(Array.isArray(next?.content) && next.content[0]?.type).toBe("tool_result");
+		const systemIndex = params.findIndex((param) => param.role === "system");
+		expect(systemIndex).toBeGreaterThan(toolUseIndex + 1);
+		expect(params[systemIndex - 1]?.role).toBe("user");
+		expect(params[systemIndex + 1]?.role).toBe("assistant");
+		expect(systemTexts(params)).toEqual(["Plan boundary."]);
+	});
+
 	it("places native Anthropic system updates only after a user turn", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "Implement this", timestamp: 1 },
