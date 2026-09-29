@@ -11,12 +11,19 @@ const rpcIo = vi.hoisted(() => ({
 	lineHandler: undefined as ((line: string) => void) | undefined,
 	flush: (async () => {}) as () => Promise<void>,
 	flushCalls: 0,
+	onBroken: undefined as (() => void) | undefined,
 }));
 
 vi.mock("../../src/core/output-guard.ts", () => ({
 	flushRawStdout: vi.fn(() => {
 		rpcIo.flushCalls++;
 		return rpcIo.flush();
+	}),
+	onRawStdoutBroken: vi.fn((handler: () => void) => {
+		rpcIo.onBroken = handler;
+		return () => {
+			if (rpcIo.onBroken === handler) rpcIo.onBroken = undefined;
+		};
 	}),
 	takeOverStdout: vi.fn(),
 	waitForRawStdoutBackpressure: vi.fn(async () => {}),
@@ -62,6 +69,7 @@ describe("RPC shutdown on stdin EOF", () => {
 		vi.restoreAllMocks();
 		rpcIo.flush = async () => {};
 		rpcIo.flushCalls = 0;
+		rpcIo.onBroken = undefined;
 		exits = [];
 	});
 
@@ -313,6 +321,36 @@ describe("RPC shutdown on stdin EOF", () => {
 		expect(handlerCalls).toBe(1);
 		expect(dispose).toHaveBeenCalledWith({ handlersDispatched: true });
 		expect(rpcIo.flushCalls).toBe(0);
+	});
+
+	it("runs the bounded shutdown when stdout's reader is gone: aborted assistant persisted, exit 0 once", async () => {
+		const { harness, dispose } = await setup();
+		const started = heldResponse(harness, { cooperative: true });
+		harness.send({ id: "p1", type: "prompt", message: "work" });
+		await started;
+
+		expect(rpcIo.onBroken).toBeDefined();
+		const at = Date.now();
+		rpcIo.onBroken?.();
+		// The parent's death also closes stdin; both triggers share one shutdown.
+		eof();
+		const exit = await waitForExit();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		expect(exit.code).toBe(0);
+		expect(exit.at - at).toBeLessThan(RPC_SHUTDOWN_BUDGET_MS);
+		expect(persistedAssistantStops(harness)).toEqual(["aborted"]);
+		expect(exits).toHaveLength(1);
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("ignores a gone stderr reader instead of crashing", async () => {
+		await setup();
+		const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+
+		expect(() => process.stderr.emit("error", epipe)).not.toThrow();
+		eof();
+		await waitForExit();
 	});
 
 	it("exits without waiting on stdout once the budget is spent", async () => {

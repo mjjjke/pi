@@ -22,6 +22,7 @@ import type {
 import { emitSessionShutdownEvent } from "../../core/extensions/runner.ts";
 import {
 	flushRawStdout,
+	onRawStdoutBroken,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
@@ -50,6 +51,9 @@ export type {
 
 /** Absolute time limit for an RPC shutdown, measured from its trigger (stdin EOF or a shutdown request). */
 export const RPC_SHUTDOWN_BUDGET_MS = 3000;
+
+/** Stream errors that mean the reader is gone (e.g. the parent process died). */
+const SINK_GONE_ERROR_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED"]);
 
 /**
  * Run in RPC mode.
@@ -90,6 +94,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let shutdownRequested = false;
 	let shuttingDown = false;
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	// stderr carries only diagnostics. If its reader is gone (usually a dead parent), keep running so
+	// the shutdown can still persist the session; an unhandled stream error would end the process.
+	const onStderrError = (streamError: NodeJS.ErrnoException) => {
+		if (!streamError.code || !SINK_GONE_ERROR_CODES.has(streamError.code)) {
+			throw streamError;
+		}
+	};
+	process.stderr.on("error", onStderrError);
+	signalCleanupHandlers.push(() => process.stderr.off("error", onStderrError));
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -874,6 +888,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		void shutdown();
 	};
 	process.stdin.on("end", onInputEnd);
+	// A gone stdout reader (EPIPE) means the parent is gone, like stdin EOF (which usually follows):
+	// run the same bounded shutdown instead of exiting 1 before the aborted run is persisted.
+	signalCleanupHandlers.push(
+		onRawStdoutBroken(() => {
+			void shutdown();
+		}),
+	);
 
 	detachInput = (() => {
 		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {

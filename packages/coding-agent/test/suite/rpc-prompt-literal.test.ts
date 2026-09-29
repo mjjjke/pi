@@ -13,6 +13,7 @@ const rpcIo = vi.hoisted(() => ({
 
 vi.mock("../../src/core/output-guard.ts", () => ({
 	flushRawStdout: vi.fn(async () => {}),
+	onRawStdoutBroken: vi.fn(() => () => {}),
 	takeOverStdout: vi.fn(),
 	waitForRawStdoutBackpressure: vi.fn(async () => {}),
 	writeRawStdout: (line: string) => {
