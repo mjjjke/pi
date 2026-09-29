@@ -725,6 +725,8 @@ export class AgentSession {
 	 */
 	private _commitInstruction(pending: PendingInstruction, options: { refresh?: boolean } = {}): string {
 		if (pending.state === "committed" && pending.entryId !== undefined) return pending.entryId;
+		// Unreachable today: appendMessage() is synchronous and calls back into nothing, so no caller
+		// can observe the "committing" state. Guard against a future reentrant path double-appending.
 		if (pending.state !== "pending") throw new Error("Developer instruction commit already in progress");
 		pending.state = "committing";
 		let entryId: string;
@@ -1107,8 +1109,8 @@ export class AgentSession {
 		// Handle session persistence
 		if (event.type === "message_end") {
 			let entryId: string | undefined;
-			if (this._entryIdsByMessage.has(event.message)) {
-				// Already committed (queued developer instructions are persisted before their events).
+			if (this._committedInstructions.has(event.message)) {
+				// Queued developer instructions are committed before their lifecycle events.
 			} else if (event.message.role === "custom") {
 				// Custom message from extensions
 				// Persist as CustomMessageEntry
