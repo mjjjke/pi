@@ -9,6 +9,7 @@ import type { Api, Model } from "../src/types.ts";
 
 function model(overrides: Partial<Model<Api>> & Pick<Model<Api>, "id" | "provider" | "api">): Model<Api> {
 	return {
+		type: "chat",
 		name: overrides.id,
 		baseUrl: "https://example.test",
 		reasoning: true,
@@ -34,10 +35,10 @@ describe("pin-release-model-data", () => {
 		mkdirSync(sourceDir);
 		const write = (file: string, value: unknown) =>
 			writeFileSync(join(sourceDir, file), `${JSON.stringify(value)}\n`);
-		write("anthropic.json", { "anthropic-messages": { [anthropicModel.id]: anthropicModel } });
-		write("openai-codex.json", { "openai-codex-responses": { [codexModel.id]: codexModel } });
-		write("xai.json", { "openai-responses": { [plainModel.id]: plainModel } });
-		write(MODEL_DATA_MANIFEST_FILE, { schemaVersion: 3, generatedAt: "2026-09-22T19:00:00.000Z", files: {} });
+		write("anthropic.json", { "anthropic-messages": { [`chat:${anthropicModel.id}`]: anthropicModel } });
+		write("openai-codex.json", { "openai-codex-responses": { [`chat:${codexModel.id}`]: codexModel } });
+		write("xai.json", { "openai-responses": { [`chat:${plainModel.id}`]: plainModel } });
+		write(MODEL_DATA_MANIFEST_FILE, { schemaVersion: 6, generatedAt: "2026-09-22T19:00:00.000Z", files: {} });
 	});
 
 	afterEach(() => {
@@ -54,7 +55,7 @@ describe("pin-release-model-data", () => {
 			["xai.json", "openai-responses", plainModel],
 		] as const) {
 			const expected = getGeneratedCapabilities(structuredClone(source));
-			expect(read(file)[api][source.id].capabilities).toEqual(expected);
+			expect(read(file)[api][`chat:${source.id}`].capabilities).toEqual(expected);
 		}
 	});
 

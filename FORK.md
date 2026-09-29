@@ -5,9 +5,9 @@ This repository is the local Pi installation. `main` is the stable integration b
 ## Upstream base
 
 - Repository: [earendil-works/pi](https://github.com/earendil-works/pi)
-- Published stable release: [v0.87.1](https://github.com/earendil-works/pi/releases/tag/v0.87.1)
-- Commit: `f07218c4d4bbc12bef056a7058c3dd49dfe41abe`
-- Release publication: `2026-09-22T19:43:43Z`; GitHub publication flags and the upstream tag were verified on 2026-09-23.
+- Published stable release: [v0.99.1](https://github.com/earendil-works/pi/releases/tag/v0.99.1)
+- Commit: `d86654abb8862e201933517d6f1fce9f88dd117f`
+- Release publication: `2026-09-29T18:27:00Z`; GitHub publication flags and the upstream tag were verified on 2026-09-29.
 
 Keep this base accurate; update it in the merge commit that integrates a new release.
 
@@ -45,7 +45,7 @@ Ask before destructive git operations (rollback, branch deletion).
 1. Start from a clean `main`. `git fetch upstream --tags`. Pick the latest **published stable** release on GitHub Releases, not just the newest tag or `upstream/main`.
 2. `git worktree add ../pi-mono-candidate -b update/vX.Y.Z main`. The worktree needs its own `npm ci --ignore-scripts`.
 3. `git merge --no-ff vX.Y.Z`. Resolve conflicts by adapting each row of the table above to upstream's APIs. Never use rebase, `-s ours` or whole-side conflict choices.
-4. `npm ci --ignore-scripts`, then `node packages/ai/scripts/pin-release-model-data.ts --version X.Y.Z` (release catalog + fork capabilities), then `npm run build:offline && npm run check`, plus the regression tests listed in the table. Review lockfile changes. Never use plain `npm run build`: it regenerates model data from live catalogs.
+4. `npm ci --ignore-scripts`, then `node packages/ai/scripts/pin-release-model-data.ts --version X.Y.Z` (release catalog + fork capabilities; for a release younger than the `.npmrc` `min-release-age`, prefix only this command with `npm_config_min_release_age=0`, it fetches the release's own data tarball), then `npm run build:offline && npm run check`, plus the regression tests listed in the table. Review lockfile changes. Never use plain `npm run build`: it regenerates model data from live catalogs.
 5. Validate consumers from pi-mjjjke: `PI_MONO_PATH=../pi-mono-candidate node scripts/link-fork.mjs && npm run validate`, then `node scripts/link-fork.mjs` to relink `../pi-mono`. `validate` itself ignores `PI_MONO_PATH`; only `link-fork.mjs` reads it, and resolution goes through each package's `dist/`. Relinking temporarily is safe: the running pi does not resolve through pi-mjjjke's `node_modules` (the extension loader aliases `@earendil-works/pi-coding-agent` to the running instance).
 6. Update "Upstream base" above and commit the merge on the branch (release URL, tag and full SHA in the message; old main as first parent).
 7. `git merge --ff-only update/vX.Y.Z` on `main`; `npm ci --ignore-scripts` if `package-lock.json` changed; `npm run link:fork` from pi-mjjjke; restart pi and smoke-test. Push only when requested.

@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import type { PromptDisposition } from "../../src/core/agent-session.ts";
 import type { ExtensionAPI } from "../../src/index.ts";
 import { createHarness, getUserTexts, type Harness } from "./harness.ts";
 
@@ -83,11 +84,11 @@ describe("AgentSession prompt admission", () => {
 		const release = newGate();
 		const harness = await setup({ extensionFactories: [heldInput(started, release)] });
 		harness.setResponses([fauxAssistantMessage("should not run")]);
-		let preflight: boolean | undefined;
+		let preflight: PromptDisposition | undefined;
 
 		const prompt = harness.session.prompt("held prompt", {
-			preflightResult: (success) => {
-				preflight = success;
+			preflightResult: (disposition) => {
+				preflight = disposition;
 			},
 		});
 		await started.promise;
@@ -96,7 +97,7 @@ describe("AgentSession prompt admission", () => {
 
 		await expect(prompt).rejects.toThrow("prompt cancelled: session shutting down");
 		await expect(harness.session.prompt("later")).rejects.toThrow("prompt cancelled: session shutting down");
-		expect(preflight).toBe(false);
+		expect(preflight).toBeUndefined();
 		expect(harness.faux.state.callCount).toBe(0);
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "message")).toBe(false);
 	});
@@ -138,7 +139,7 @@ describe("AgentSession prompt admission", () => {
 	});
 
 	it("does not run a prompt deferred from agent_settled once admission closed", async () => {
-		const preflights: boolean[] = [];
+		const preflights: PromptDisposition[] = [];
 		let harness: Harness | undefined;
 		let deferred = false;
 		harness = await setup({
@@ -148,7 +149,7 @@ describe("AgentSession prompt admission", () => {
 						if (deferred || !harness) return;
 						deferred = true;
 						void harness.session.prompt("deferred", {
-							preflightResult: (success) => preflights.push(success),
+							preflightResult: (disposition) => preflights.push(disposition),
 						});
 						harness.session.closeAdmission();
 					});
@@ -161,7 +162,7 @@ describe("AgentSession prompt admission", () => {
 		await harness.session.waitForIdle();
 
 		expect(deferred).toBe(true);
-		expect(preflights).toEqual([false]);
+		expect(preflights).toEqual([]);
 		expect(harness.faux.state.callCount).toBe(1);
 		expect(getUserTexts(harness)).toEqual(["first"]);
 	});
