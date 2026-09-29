@@ -158,4 +158,40 @@ describe("RPC prompt expandPromptTemplates", () => {
 		expect(seen[1]).toEqual(["start", "/tpl Y"]);
 		expect(commandRuns).toEqual([]);
 	});
+
+	it("queues a literal follow-up while streaming", async () => {
+		const harness = await setup();
+		const seen: string[][] = [];
+		let release = () => {};
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		harness.faux.setResponses([
+			async (context) => {
+				seen.push(context.messages.filter((m) => m.role === "user").map((m) => getMessageText(m)));
+				await released;
+				return fauxAssistantMessage("first");
+			},
+			(context) => {
+				seen.push(context.messages.filter((m) => m.role === "user").map((m) => getMessageText(m)));
+				return fauxAssistantMessage("second");
+			},
+		]);
+		harness.send({ id: "f0", type: "prompt", message: "start" });
+		await harness.waitForResponse("f0");
+		await vi.waitFor(() => expect(seen).toHaveLength(1));
+		harness.send({
+			id: "f1",
+			type: "prompt",
+			message: "/tpl Z",
+			streamingBehavior: "followUp",
+			expandPromptTemplates: false,
+		});
+		expect(await harness.waitForResponse("f1")).toMatchObject({ success: true });
+		release();
+		await vi.waitFor(() => expect(seen).toHaveLength(2));
+		await harness.runtime.session.waitForIdle();
+		expect(seen[1]).toEqual(["start", "/tpl Z"]);
+		expect(commandRuns).toEqual([]);
+	});
 });
