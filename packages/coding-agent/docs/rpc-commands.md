@@ -32,6 +32,12 @@ If the agent is streaming and no `streamingBehavior` is specified, the command r
 
 **Input expansion**: Skill commands (`/skill:name`) and prompt templates (`/template`) are expanded before sending/queueing.
 
+**Literal prompts**: Set `"expandPromptTemplates": false` to send the message as written: no extension command dispatch, no skill or prompt template expansion. `input` extension handlers still run. Default: `true`.
+
+```json
+{"type": "prompt", "message": "/not-a-command, just text", "expandPromptTemplates": false}
+```
+
 Response:
 ```json
 {"id": "req-1", "type": "response", "command": "prompt", "success": true}
