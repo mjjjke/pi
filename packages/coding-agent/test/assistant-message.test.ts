@@ -389,6 +389,25 @@ describe("AssistantMessageComponent", () => {
 			expect(stripAnsi(renderLines(streaming).join("\n"))).not.toContain("•");
 		});
 
+		test("separates commentary text from following text with a blank line", () => {
+			initTheme("dark");
+			const message = createAssistantMessage([
+				{ type: "text", text: "Checking first.", textSignature: commentary },
+				{ type: "text", text: "All done.", textSignature: finalAnswer },
+			]);
+			const lines = renderLines(message).map((line) => stripAnsi(line).trimEnd());
+			const update = lines.findIndex((line) => line.includes("• Checking first."));
+			expect(lines[update + 1]).toBe("");
+			expect(lines[update + 2]).toContain("All done.");
+
+			const trailing = createAssistantMessage([
+				{ type: "text", text: "Checking.", textSignature: commentary },
+				toolCall,
+			]);
+			const trailingLines = renderLines(trailing).map((line) => stripAnsi(line).trimEnd());
+			expect(trailingLines.at(-1)).toContain("• Checking.");
+		});
+
 		test("indents wrapped progress update lines under the bullet", () => {
 			initTheme("dark");
 			const message = anthropicMessage([

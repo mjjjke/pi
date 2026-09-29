@@ -116,6 +116,9 @@ export class AssistantMessageComponent extends Container {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim() && progressUpdates.has(i)) {
 				this.contentContainer.addChild(this.createProgressUpdate(content.text.trim()));
+				if (hasVisibleContentAfter(i)) {
+					this.contentContainer.addChild(new Spacer(1));
+				}
 			} else if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions

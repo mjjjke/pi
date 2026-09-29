@@ -4898,7 +4898,7 @@ export class InteractiveMode {
 					},
 					onThinkingDisplayChange: (display) => {
 						this.settingsManager.setThinkingDisplay(display);
-						this.showStatus(`Thinking display: ${display}`);
+						this.showStatus(`Thinking display: ${display} (next request)`);
 					},
 					onMermaidRenderingModeChange: (mode) => {
 						this.settingsManager.setMermaidRenderingMode(mode);

@@ -1,17 +1,8 @@
-import { type AssistantMessage, anthropicSupportsProgressUpdates } from "@earendil-works/pi-ai";
+import { type AssistantMessage, anthropicSupportsProgressUpdates, parseTextSignature } from "@earendil-works/pi-ai";
 import { type Component, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 
 const BULLET = "• ";
-
-function isCommentaryText(textSignature: string | undefined): boolean {
-	if (!textSignature?.startsWith("{")) return false;
-	try {
-		return (JSON.parse(textSignature) as { phase?: unknown }).phase === "commentary";
-	} catch {
-		return false;
-	}
-}
 
 /**
  * Content indices of an assistant message that render as progress updates:
@@ -20,7 +11,12 @@ function isCommentaryText(textSignature: string | undefined): boolean {
  * - summarized Anthropic messages from models with progress updates: in a run of
  *   two or more thinking blocks directly followed by a tool call, the last block.
  *   The API does not mark updates under "summarized", so this is a render-time
- *   heuristic that never changes the stored message.
+ *   heuristic that never changes the stored message. While streaming, the block
+ *   first renders as reasoning and re-styles as an update once the tool call starts.
+ *   Gating differs from the request side on purpose: requests send display
+ *   "updates" only for provider "anthropic" (capability), while this heuristic
+ *   matches any `anthropic-messages` message from a supporting model id, since
+ *   proxies such as OpenRouter return the same summarized block layout.
  */
 export function getProgressUpdateIndices(message: AssistantMessage): Set<number> {
 	const indices = new Set<number>();
@@ -31,7 +27,7 @@ export function getProgressUpdateIndices(message: AssistantMessage): Set<number>
 		if (block.type === "thinking" && block.progressUpdate) {
 			indices.add(i);
 			hasMarkedUpdates = true;
-		} else if (block.type === "text" && isCommentaryText(block.textSignature)) {
+		} else if (block.type === "text" && parseTextSignature(block.textSignature)?.phase === "commentary") {
 			indices.add(i);
 		}
 	}
@@ -40,26 +36,28 @@ export function getProgressUpdateIndices(message: AssistantMessage): Set<number>
 	if (hasMarkedUpdates || message.api !== "anthropic-messages" || !anthropicSupportsProgressUpdates(nativeModelId)) {
 		return indices;
 	}
-	let runStart = -1;
-	for (let i = 0; i <= content.length; i++) {
-		const block = content[i];
-		if (block?.type === "thinking") {
-			if (runStart === -1) runStart = i;
-			continue;
-		}
-		const last = content[i - 1];
+	// A run of 2+ thinking blocks followed by a tool call: its last non-empty block is the update.
+	let run: number[] = [];
+	const flushRun = (next: AssistantMessage["content"][number] | undefined) => {
+		const lastIndex = run.at(-1);
+		const last = lastIndex === undefined ? undefined : content[lastIndex];
 		if (
-			runStart !== -1 &&
-			i - runStart >= 2 &&
-			block?.type === "toolCall" &&
+			run.length >= 2 &&
+			next?.type === "toolCall" &&
 			last?.type === "thinking" &&
 			!last.redacted &&
 			last.thinking.trim()
 		) {
-			indices.add(i - 1);
+			indices.add(lastIndex as number);
 		}
-		runStart = -1;
+		run = [];
+	};
+	for (let i = 0; i < content.length; i++) {
+		const block = content[i];
+		if (block.type === "thinking") run.push(i);
+		else flushRun(block);
 	}
+	flushRun(undefined);
 	return indices;
 }
 
