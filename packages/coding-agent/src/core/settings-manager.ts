@@ -90,6 +90,10 @@ export type DefaultProjectTrust = "ask" | "always" | "never";
 
 export type TransportSetting = Transport;
 
+/** Anthropic thinking display: readable progress updates only, or reasoning summaries. */
+export type ThinkingDisplaySetting = "updates" | "summarized";
+export const THINKING_DISPLAY_SETTINGS: readonly ThinkingDisplaySetting[] = ["updates", "summarized"];
+
 /**
  * Package source for npm/git packages.
  * - String form: load all resources from the package
@@ -121,6 +125,7 @@ export interface Settings {
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
+	thinkingDisplay?: ThinkingDisplaySetting; // default: "updates" - Anthropic progress updates; "summarized" returns reasoning summaries
 	showCacheMissNotices?: boolean; // default: false - show cache cost and provider recovery notices
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
@@ -973,6 +978,17 @@ export class SettingsManager {
 
 	getWebSocketConnectTimeoutMs(): number | undefined {
 		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
+	}
+
+	getThinkingDisplay(): ThinkingDisplaySetting {
+		const display = this.settings.thinkingDisplay;
+		return display !== undefined && THINKING_DISPLAY_SETTINGS.includes(display) ? display : "updates";
+	}
+
+	setThinkingDisplay(display: ThinkingDisplaySetting): void {
+		this.globalSettings.thinkingDisplay = display;
+		this.markModified("thinkingDisplay");
+		this.save();
 	}
 
 	getHideThinkingBlock(): boolean {

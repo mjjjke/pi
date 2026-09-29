@@ -57,6 +57,26 @@ describe("SettingsSelectorComponent", () => {
 		expect(onCopyOnSelectChange.mock.calls.flat()).toEqual([false, true]);
 	});
 
+	it("cycles the thinking display setting", () => {
+		const onThinkingDisplayChange = vi.fn();
+		const config = {
+			thinkingDisplay: "updates",
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = { onThinkingDisplayChange } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "Thinking display") list.handleInput(character);
+		expect(stripAnsi(list.render(120).join("\n"))).toContain("updates");
+		list.handleInput("\r");
+		list.handleInput("\r");
+		expect(onThinkingDisplayChange.mock.calls.flat()).toEqual(["summarized", "updates"]);
+	});
+
 	it("keeps the configured fixed theme marked while browsing", () => {
 		const config = {
 			defaultModel: "not set",

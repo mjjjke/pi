@@ -4794,6 +4794,7 @@ export class InteractiveMode {
 					terminalTheme: this.themeController.getTerminalTheme(),
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
+					thinkingDisplay: this.settingsManager.getThinkingDisplay(),
 					mermaidRenderingMode: this.settingsManager.getMermaidRenderingMode(),
 					collapseChangelog: this.settingsManager.getCollapseChangelog(),
 					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
@@ -4894,6 +4895,10 @@ export class InteractiveMode {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
 						this.updateThinkingBlockVisibility();
+					},
+					onThinkingDisplayChange: (display) => {
+						this.settingsManager.setThinkingDisplay(display);
+						this.showStatus(`Thinking display: ${display}`);
 					},
 					onMermaidRenderingModeChange: (mode) => {
 						this.settingsManager.setMermaidRenderingMode(mode);

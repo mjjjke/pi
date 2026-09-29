@@ -217,6 +217,25 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("thinking display setting", () => {
+		it("defaults to updates and persists summarized", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getThinkingDisplay()).toBe("updates");
+
+			manager.setThinkingDisplay("summarized");
+			await manager.flush();
+
+			expect(manager.getThinkingDisplay()).toBe("summarized");
+			expect(JSON.parse(readFileSync(settingsPath, "utf-8")).thinkingDisplay).toBe("summarized");
+		});
+
+		it("ignores unknown values", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ thinkingDisplay: "omitted" }));
+			expect(SettingsManager.create(projectDir, agentDir).getThinkingDisplay()).toBe("updates");
+		});
+	});
+
 	describe("error tracking", () => {
 		it("should collect and clear load errors via drainErrors", () => {
 			const globalSettingsPath = join(agentDir, "settings.json");

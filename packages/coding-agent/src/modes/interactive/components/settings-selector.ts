@@ -18,6 +18,8 @@ import {
 	type DefaultProjectTrust,
 	type FullscreenExitOutput,
 	type MermaidRenderingMode,
+	THINKING_DISPLAY_SETTINGS,
+	type ThinkingDisplaySetting,
 	type TuiMode,
 	type WarningSettings,
 } from "../../../core/settings-manager.ts";
@@ -70,6 +72,7 @@ export interface SettingsConfig {
 	terminalTheme: TerminalTheme;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
+	thinkingDisplay: ThinkingDisplaySetting;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
 	collapseChangelog: boolean;
@@ -108,6 +111,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onThinkingDisplayChange: (display: ThinkingDisplaySetting) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
@@ -515,6 +519,14 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "thinking-display",
+				label: "Thinking display",
+				description:
+					"Anthropic models with progress updates. 'updates': hide reasoning, show short progress notes before tool calls. 'summarized': reasoning summaries.",
+				currentValue: config.thinkingDisplay,
+				values: [...THINKING_DISPLAY_SETTINGS],
+			},
+			{
 				id: "mermaid-rendering",
 				label: "Mermaid diagrams",
 				description: "Render Mermaid code blocks as Unicode diagrams",
@@ -880,6 +892,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
+						break;
+					case "thinking-display":
+						callbacks.onThinkingDisplayChange(newValue as ThinkingDisplaySetting);
 						break;
 					case "mermaid-rendering":
 						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);

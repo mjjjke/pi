@@ -3,6 +3,7 @@ import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } fr
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import { getProgressUpdateIndices, ProgressUpdateComponent } from "./progress-update.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -103,11 +104,19 @@ export class AssistantMessageComponent extends Container {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 
+		const progressUpdates = getProgressUpdateIndices(message);
+		const hasVisibleContentAfter = (index: number) =>
+			message.content
+				.slice(index + 1)
+				.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+
 		// Render content in order
 		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" && content.text.trim()) {
+			if (content.type === "text" && content.text.trim() && progressUpdates.has(i)) {
+				this.contentContainer.addChild(this.createProgressUpdate(content.text.trim()));
+			} else if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
@@ -115,11 +124,20 @@ export class AssistantMessageComponent extends Container {
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
 				);
+			} else if (content.type === "thinking" && progressUpdates.has(i)) {
+				const text = content.thinking.trim();
+				if (!text) continue;
+				// Progress updates are written for the user: always visible, even with thinking hidden.
+				this.contentContainer.addChild(this.createProgressUpdate(text));
+				if (hasVisibleContentAfter(i)) {
+					this.contentContainer.addChild(new Spacer(1));
+				}
 			} else if (content.type === "thinking") {
+				// Coalesce adjacent reasoning blocks up to the next progress update or non-thinking block.
 				const thinkingBlocks: string[] = [];
 				for (; i < message.content.length; i++) {
 					const thinkingContent = message.content[i];
-					if (thinkingContent.type !== "thinking") {
+					if (thinkingContent.type !== "thinking" || progressUpdates.has(i)) {
 						break;
 					}
 					const thinking = thinkingContent.thinking.trim();
@@ -129,15 +147,10 @@ export class AssistantMessageComponent extends Container {
 				}
 				i--;
 
+				// Empty reasoning (display "updates" or "omitted") renders nothing, not even the hidden label.
 				if (thinkingBlocks.length === 0) {
 					continue;
 				}
-
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
@@ -168,7 +181,9 @@ export class AssistantMessageComponent extends Container {
 						return { handled: true };
 					}),
 				);
-				if (hasVisibleContentAfter) {
+				// Add spacing only when another visible assistant content block follows.
+				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
+				if (hasVisibleContentAfter(i)) {
 					this.contentContainer.addChild(new Spacer(1));
 				}
 			}
@@ -198,5 +213,14 @@ export class AssistantMessageComponent extends Container {
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}
 		}
+	}
+
+	private createProgressUpdate(text: string): ProgressUpdateComponent {
+		return new ProgressUpdateComponent(
+			text,
+			this.outputPad,
+			this.markdownTheme,
+			createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+		);
 	}
 }

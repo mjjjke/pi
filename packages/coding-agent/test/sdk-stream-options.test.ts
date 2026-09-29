@@ -222,6 +222,18 @@ describe("createAgentSession stream options", () => {
 		expect(options?.timeoutMs).toBe(0);
 	});
 
+	it("forwards thinkingDisplay updates by default", async () => {
+		const options = await captureStreamOptions("anthropic-messages", {});
+
+		expect(options?.thinkingDisplay).toBe("updates");
+	});
+
+	it("forwards the configured thinkingDisplay", async () => {
+		const options = await captureStreamOptions("anthropic-messages", { thinkingDisplay: "summarized" });
+
+		expect(options?.thinkingDisplay).toBe("summarized");
+	});
+
 	it("forwards websocketConnectTimeoutMs from settings", async () => {
 		const options = await captureStreamOptions("openai-codex-responses", { websocketConnectTimeoutMs: 1234 });
 

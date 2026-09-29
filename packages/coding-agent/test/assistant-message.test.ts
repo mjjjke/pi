@@ -3,7 +3,7 @@ import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -261,6 +261,145 @@ describe("AssistantMessageComponent", () => {
 			{ type: "text", text: "answer" },
 			{ type: "thinking", thinking: "reasoning" },
 		]);
+	});
+
+	describe("progress updates", () => {
+		// Thinking style marker; italics are not emitted in every terminal/test environment.
+		const thinkingStyle = () => theme.fg("thinkingText", "x").split("x")[0];
+
+		function anthropicMessage(content: AssistantMessage["content"], model = "claude-opus-5-5"): AssistantMessage {
+			return { ...createAssistantMessage(content), api: "anthropic-messages", provider: "anthropic", model };
+		}
+
+		const toolCall = { type: "toolCall" as const, id: "tool-1", name: "read", arguments: { path: "file.txt" } };
+		const commentary = JSON.stringify({ v: 1, id: "msg_1", phase: "commentary" });
+		const finalAnswer = JSON.stringify({ v: 1, id: "msg_2", phase: "final_answer" });
+
+		function renderLines(message: AssistantMessage, hideThinking = false): string[] {
+			return new AssistantMessageComponent(message, hideThinking).render(80);
+		}
+
+		function lineWith(lines: string[], text: string): string | undefined {
+			return lines.find((line) => stripAnsi(line).includes(text));
+		}
+
+		test("shows marked progress updates as bullets even when thinking is hidden", () => {
+			initTheme("dark");
+			const message = anthropicMessage([
+				{ type: "thinking", thinking: "", thinkingSignature: "sig-reasoning" },
+				{ type: "thinking", thinking: "Found the bug.", thinkingSignature: "sig-update", progressUpdate: true },
+				toolCall,
+			]);
+			for (const hidden of [true, false]) {
+				const lines = renderLines(message, hidden);
+				const rendered = stripAnsi(lines.join("\n"));
+				expect(rendered).toContain("• Found the bug.");
+				expect(rendered).not.toContain("Thinking...");
+				expect(lineWith(lines, "Found the bug.")).not.toContain(`${thinkingStyle()}Found`);
+			}
+		});
+
+		test("renders nothing for empty reasoning blocks", () => {
+			initTheme("dark");
+			const message = anthropicMessage([{ type: "thinking", thinking: "", thinkingSignature: "sig" }, toolCall]);
+			for (const hidden of [true, false]) {
+				expect(stripAnsi(renderLines(message, hidden).join("\n")).trim()).toBe("");
+			}
+		});
+
+		test("treats the last of several thinking blocks before a tool call as an update in summarized mode", () => {
+			initTheme("dark");
+			const message = anthropicMessage([
+				{ type: "thinking", thinking: "private reasoning", thinkingSignature: "sig-1" },
+				{ type: "thinking", thinking: "Reading the config next.", thinkingSignature: "sig-2" },
+				toolCall,
+			]);
+			const hiddenRendered = stripAnsi(renderLines(message, true).join("\n"));
+			expect(hiddenRendered).toContain("Thinking...");
+			expect(hiddenRendered).toContain("• Reading the config next.");
+			expect(hiddenRendered).not.toContain("private reasoning");
+
+			const lines = renderLines(message);
+			expect(lineWith(lines, "private reasoning")).toContain(`${thinkingStyle()}private`);
+			expect(lineWith(lines, "Reading the config next.")).not.toContain(`${thinkingStyle()}Reading`);
+			expect(message.content[1]).toEqual({
+				type: "thinking",
+				thinking: "Reading the config next.",
+				thinkingSignature: "sig-2",
+			});
+		});
+
+		test("does not apply the heuristic without a following tool call, to single blocks, or to other models", () => {
+			initTheme("dark");
+			const cases = [
+				anthropicMessage([
+					{ type: "thinking", thinking: "first", thinkingSignature: "sig-1" },
+					{ type: "thinking", thinking: "second", thinkingSignature: "sig-2" },
+					{ type: "text", text: "answer" },
+				]),
+				anthropicMessage([{ type: "thinking", thinking: "second", thinkingSignature: "sig-2" }, toolCall]),
+				anthropicMessage(
+					[
+						{ type: "thinking", thinking: "first", thinkingSignature: "sig-1" },
+						{ type: "thinking", thinking: "second", thinkingSignature: "sig-2" },
+						toolCall,
+					],
+					"claude-opus-4-6",
+				),
+				createAssistantMessage([
+					{ type: "thinking", thinking: "first" },
+					{ type: "thinking", thinking: "second" },
+					toolCall,
+				]),
+			];
+			for (const message of cases) {
+				const rendered = stripAnsi(renderLines(message, true).join("\n"));
+				expect(rendered).not.toContain("•");
+				expect(rendered).not.toContain("second");
+			}
+		});
+
+		test("does not apply the heuristic to messages that already mark updates", () => {
+			initTheme("dark");
+			const message = anthropicMessage([
+				{ type: "thinking", thinking: "Update one.", thinkingSignature: "sig-1", progressUpdate: true },
+				toolCall,
+				{ type: "thinking", thinking: "", thinkingSignature: "sig-2" },
+				{ type: "thinking", thinking: "stray summary", thinkingSignature: "sig-3" },
+				toolCall,
+			]);
+			const rendered = stripAnsi(renderLines(message, true).join("\n"));
+			expect(rendered).toContain("• Update one.");
+			expect(rendered).not.toContain("stray summary");
+		});
+
+		test("renders OpenAI commentary text as a progress update once its phase is known", () => {
+			initTheme("dark");
+			const message = createAssistantMessage([
+				{ type: "text", text: "Checking the tests first.", textSignature: commentary },
+				toolCall,
+				{ type: "text", text: "All done.", textSignature: finalAnswer },
+			]);
+			const rendered = stripAnsi(renderLines(message, true).join("\n"));
+			expect(rendered).toContain("• Checking the tests first.");
+			expect(rendered).not.toContain("• All done.");
+			expect(rendered).toContain("All done.");
+
+			const streaming = createAssistantMessage([{ type: "text", text: "Checking the tests first." }]);
+			expect(stripAnsi(renderLines(streaming).join("\n"))).not.toContain("•");
+		});
+
+		test("indents wrapped progress update lines under the bullet", () => {
+			initTheme("dark");
+			const message = anthropicMessage([
+				{ type: "thinking", thinking: "word ".repeat(30).trim(), thinkingSignature: "sig", progressUpdate: true },
+				toolCall,
+			]);
+			const lines = new AssistantMessageComponent(message).render(40).map((line) => stripAnsi(line));
+			const first = lines.findIndex((line) => line.includes("•"));
+			expect(lines[first].startsWith(" • word")).toBe(true);
+			expect(lines[first + 1].startsWith("   word")).toBe(true);
+		});
 	});
 
 	test("uses configured output padding for user messages", () => {
