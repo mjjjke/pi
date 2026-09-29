@@ -4,6 +4,7 @@ import {
 	convertMessages as convertAnthropicMessagesRaw,
 	stream as streamAnthropic,
 } from "../src/api/anthropic-messages.ts";
+import { stream as streamCodex } from "../src/api/openai-codex-responses.ts";
 import { convertMessages as convertOpenAICompletionsMessages } from "../src/api/openai-completions.ts";
 import { convertResponsesMessages } from "../src/api/openai-responses-shared.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
@@ -478,6 +479,69 @@ describe("mid-conversation instruction messages", () => {
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["user", "developer", "user"]);
 	});
 
+	it("excludes only the first occurrence when a system snapshot object is reused", () => {
+		const model = openAIResponsesModel();
+		const snapshot: Message = { role: "system", content: "", sections: { rules: "Base rules" }, timestamp: 1 };
+		const input = convertResponsesMessages(
+			model,
+			normalizeContext({ messages: [snapshot, { role: "user", content: "First", timestamp: 2 }, snapshot] }),
+			new Set(),
+			{ includeSystemPrompt: false, supportsMidConvoSystemMessages: true },
+		);
+		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["user", "developer"]);
+		expect(input[1]).toMatchObject({ content: 'Updated system prompt section "rules":\n\nBase rules' });
+	});
+
+	it.each(["null", "omitted"] as const)("tracks the initial sections snapshot with %s content", (kind) => {
+		const model = openAIResponsesModel();
+		const snapshot = {
+			role: "system",
+			...(kind === "null" ? { content: null } : {}),
+			sections: { rules: "Base rules" },
+			timestamp: 1,
+		} as unknown as Message;
+		const context = normalizeContext({
+			messages: [
+				{ role: "developer", content: "Plan boundary", timestamp: 0 },
+				snapshot,
+				{ role: "user", content: "First", timestamp: 2 },
+			],
+		});
+		const options = { supportsMidConvoSystemMessages: true };
+		const withPrompt = convertResponsesMessages(model, context, new Set(), options);
+		expect(withPrompt.map((item) => ("role" in item ? item.role : item.type))).toEqual([
+			"developer",
+			"developer",
+			"user",
+		]);
+		expect(withPrompt[0]).toMatchObject({ content: [{ type: "input_text", text: "Plan boundary" }] });
+		expect(withPrompt[1]).toMatchObject({ content: "Base rules" });
+		const withoutPrompt = convertResponsesMessages(model, context, new Set(), {
+			...options,
+			includeSystemPrompt: false,
+		});
+		expect(withoutPrompt.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "user"]);
+	});
+
+	it("does not promote a later system update when an aborted assistant is filtered", () => {
+		const model = openAIResponsesModel();
+		const input = convertResponsesMessages(
+			model,
+			normalizeContext({
+				messages: [
+					{ role: "developer", content: "Plan boundary", timestamp: 0 },
+					{ ...assistant(model.api, model.id), stopReason: "aborted" },
+					{ role: "system", content: "Later update", timestamp: 1 },
+					{ role: "user", content: "Next", timestamp: 2 },
+				],
+			}),
+			new Set(),
+			{ includeSystemPrompt: false, supportsMidConvoSystemMessages: true },
+		);
+		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "developer", "user"]);
+		expect(input[1]).toMatchObject({ content: "Later update" });
+	});
+
 	it("keeps a leading snapshot out of Codex input when preceded by developers", () => {
 		const model = openAIResponsesModel();
 		const context = normalizeContext({
@@ -500,6 +564,41 @@ describe("mid-conversation instruction messages", () => {
 			"developer",
 		]);
 		expect(input[3]).toMatchObject({ content: "Later update" });
+	});
+
+	it("sends the initial snapshot as Codex instructions without duplicating it in input", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			...openAIResponsesModel(),
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			compat: { supportsMidConvoSystemMessages: true },
+		};
+		const context = normalizeContext({
+			messages: [
+				{ role: "developer", content: "Plan boundary", timestamp: 1 },
+				{ role: "developer", content: "No edits", timestamp: 2 },
+				{ role: "system", content: "", sections: { rules: "Base rules" }, timestamp: 3 },
+				{ role: "user", content: "First", timestamp: 4 },
+				{ role: "system", content: "Later update", timestamp: 5 },
+			],
+		});
+		const tokenPayload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test" } }),
+		).toString("base64");
+		let payload: { instructions?: string; input?: Array<{ role?: string; content?: unknown }> } | undefined;
+		await streamCodex(model, context, {
+			apiKey: `aaa.${tokenPayload}.bbb`,
+			onPayload: (params) => {
+				payload = params as typeof payload;
+				throw new Error("payload captured before network request");
+			},
+		}).result();
+		expect(payload?.instructions).toBe("Base rules");
+		expect(payload?.input?.map((item) => item.role)).toEqual(["developer", "developer", "user", "developer"]);
+		expect(payload?.input?.[0]).toMatchObject({ content: [{ text: "Plan boundary" }] });
+		expect(payload?.input?.[1]).toMatchObject({ content: [{ text: "No edits" }] });
+		expect(payload?.input?.[3]).toMatchObject({ content: "Later update" });
+		expect(JSON.stringify(payload).match(/Base rules/g)).toHaveLength(1);
 	});
 
 	it("skips blank instruction messages for OpenAI Responses", () => {
@@ -765,14 +864,17 @@ describe("mid-conversation instruction messages", () => {
 		};
 		const user: Message = { role: "user", content: "First", timestamp: 3 };
 		const first = await captureAnthropicPayload([boundary, secondBoundary, snapshot, user]);
-		const second = await captureAnthropicPayload([
-			boundary,
-			secondBoundary,
-			snapshot,
-			user,
-			anthropicAssistant([{ type: "text", text: "Done." }]),
-			{ role: "user", content: "Continue", timestamp: 4 },
-		]);
+		const resumedMessages = JSON.parse(
+			JSON.stringify([
+				boundary,
+				secondBoundary,
+				snapshot,
+				user,
+				anthropicAssistant([{ type: "text", text: "Done." }]),
+				{ role: "user", content: "Continue", timestamp: 4 },
+			]),
+		) as Message[];
+		const second = await captureAnthropicPayload(resumedMessages);
 		expect(first.system).toEqual(second.system);
 		expect(first.system).toEqual([
 			{
@@ -788,6 +890,10 @@ describe("mid-conversation instruction messages", () => {
 		});
 		expect(second.messages[0]).toMatchObject({ role: "user", content: "First" });
 		expect(first.messages.slice(1)).toEqual(second.messages.slice(1, 3));
+		expect(first.messages.slice(1)).toEqual([
+			{ role: "system", content: [{ type: "text", text: "Plan boundary" }] },
+			{ role: "system", content: [{ type: "text", text: "No edits" }] },
+		]);
 		expect(second.messages.map((message) => message.role)).toEqual(["user", "system", "system", "assistant", "user"]);
 	});
 

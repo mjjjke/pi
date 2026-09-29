@@ -60,6 +60,26 @@ export function withoutInitialSystemMessage(messages: Message[]): Message[] {
 	return [...messages.slice(0, index), ...messages.slice(index + 1)];
 }
 
+/**
+ * Mark the initial source occurrence for converters that transform the whole transcript.
+ * A unique, content-normalized copy survives transformMessages unchanged: repeated source
+ * objects stay distinct, and null/omitted content cannot cause normalization to clone it.
+ * Select before transformation so filtered assistant turns cannot promote a later update.
+ */
+export function markInitialSystemMessage(messages: Message[]): {
+	messages: Message[];
+	initialSystemMessage?: SystemMessage;
+} {
+	const initial = getInitialSystemMessage(messages);
+	if (!initial) return { messages };
+	const index = messages.indexOf(initial);
+	const initialSystemMessage = { ...initial, content: initial.content ?? [] };
+	return {
+		messages: [...messages.slice(0, index), initialSystemMessage, ...messages.slice(index + 1)],
+		initialSystemMessage,
+	};
+}
+
 /** Resolve the tools available after applying every transcript delta in order. */
 export function getCurrentTools(messages: TranscriptMessages): Tool[] {
 	const tools = new Map<string, Tool>();

@@ -278,6 +278,64 @@ describe("transcript system messages", () => {
 		expect(payload.input.filter((item) => item.role === "developer")).toHaveLength(2);
 	});
 
+	test("keeps a developer-preceded snapshot's sections and tools initial in Chat Completions", async () => {
+		const model: Model<"openai-completions"> = {
+			...modelBase,
+			id: "custom-additions",
+			name: "Custom additions",
+			api: "openai-completions",
+			provider: "custom-provider",
+			capabilities: { midConversationInstructionMessages: true },
+			compat: {
+				supportsDeveloperRole: true,
+				supportsMidConvoSystemMessages: true,
+				supportsMidConvoToolAdditions: true,
+			},
+		};
+		const payload = await capturePayload<{
+			tools?: Array<{ function?: { name: string } }>;
+			messages: Array<{ role: string; content?: string; tools?: Array<{ function?: { name: string } }> }>;
+		}>(model, {
+			messages: [
+				{ role: "developer", content: "Plan boundary", timestamp: 1 },
+				{ role: "developer", content: "No edits", timestamp: 2 },
+				{
+					role: "system",
+					content: "",
+					sections: { rules: "Base rules" },
+					toolsAdded: [baseTool],
+					timestamp: 3,
+				},
+				{ role: "user", content: "First", timestamp: 4 },
+				{
+					role: "system",
+					content: "",
+					sections: { more: "Later rules" },
+					toolsAdded: [lateTool],
+					timestamp: 5,
+				},
+			],
+		});
+		expect(payload.tools?.map((value) => value.function?.name)).toEqual(["base_tool"]);
+		expect(payload.messages.map((message) => message.role)).toEqual([
+			"developer",
+			"developer",
+			"developer",
+			"user",
+			"system",
+			"developer",
+		]);
+		expect(payload.messages.slice(0, 3).map((message) => message.content)).toEqual([
+			"Plan boundary",
+			"No edits",
+			"Base rules",
+		]);
+		expect(payload.messages[4]?.tools?.map((value) => value.function?.name)).toEqual(["late_tool"]);
+		expect(payload.messages[5]?.content).toBe('Updated system prompt section "more":\n\nLater rules');
+		expect(JSON.stringify(payload).match(/Base rules/g)).toHaveLength(1);
+		expect(JSON.stringify(payload).match(/Later rules/g)).toHaveLength(1);
+	});
+
 	test("anchors Kimi additions in tool-bearing system messages", async () => {
 		const model: Model<"openai-completions"> = {
 			...modelBase,

@@ -48,6 +48,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
 	getDeclaredTools,
+	markInitialSystemMessage,
 	resolveTranscript,
 	resolveTranscriptTools,
 	type TranscriptContext,
@@ -1218,7 +1219,8 @@ export function convertMessages(
 		return id;
 	};
 
-	const transformedMessages = transformMessages(normalizedContext.messages, model, (id) => normalizeToolCallId(id));
+	const { messages: sourceMessages, initialSystemMessage } = markInitialSystemMessage(normalizedContext.messages);
+	const transformedMessages = transformMessages(sourceMessages, model, (id) => normalizeToolCallId(id));
 	const transcriptTools = resolveTranscriptTools(
 		normalizedContext.messages,
 		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true,
@@ -1243,7 +1245,8 @@ export function convertMessages(
 		}
 
 		if (msg.role === "system") {
-			const addedTools = i > 0 && transcriptTools.anchorsAdditions ? (msg.toolsAdded ?? []) : [];
+			const isInitialSystemMessage = msg === initialSystemMessage;
+			const addedTools = !isInitialSystemMessage && transcriptTools.anchorsAdditions ? (msg.toolsAdded ?? []) : [];
 			if (addedTools.length > 0) {
 				const kimiToolMessage: KimiToolSystemMessageParam = {
 					role: "system",
@@ -1251,7 +1254,7 @@ export function convertMessages(
 				};
 				params.push(kimiToolMessage as unknown as ChatCompletionMessageParam);
 			}
-			const text = i === 0 ? getSystemMessageText(msg) : renderSystemMessageUpdate(msg);
+			const text = isInitialSystemMessage ? getSystemMessageText(msg) : renderSystemMessageUpdate(msg);
 			if (text.length > 0) {
 				params.push({ role: instructionRole, content: sanitizeSurrogates(text) });
 			}
