@@ -215,6 +215,14 @@ async function runLoop(
 			}
 			pendingMessages = [];
 
+			// Instructions go last, after tool results and this turn's steering messages.
+			for (const message of (await config.getInstructionMessages?.(currentContext)) ?? []) {
+				await emit({ type: "message_start", message });
+				await emit({ type: "message_end", message });
+				currentContext.messages.push(message);
+				newMessages.push(message);
+			}
+
 			const requestUpdate = await config.prepareRequest?.(
 				{
 					context: currentContext,

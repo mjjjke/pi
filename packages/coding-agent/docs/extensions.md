@@ -305,6 +305,24 @@ pi.appendDeveloperMessage([{ type: "text", text: "Stay in plan mode until approv
 
 Blank content is ignored. Calls are allowed while idle and from `agent_end` handlers. Other active-run events, including `before_provider_request`, reject these calls; wait for idle when an interactive action occurs mid-stream. The canonical persisted role is `developer`; the wire role is resolved per provider as described above.
 
+### pi.queueDeveloperMessage(content, options?)
+
+Queue a passive, persisted developer instruction that also works during a run. `ctx.queueDeveloperMessage()` on command contexts does the same:
+
+```typescript
+const result = pi.queueDeveloperMessage("Research only; do not edit files.", {
+  onCommit: (entryId) => pi.appendEntry("my-ack", { entryId }),
+});
+// { status: "committed", entryId } or { status: "pending", pendingId }
+```
+
+- While idle or from an `agent_end` handler, the instruction is committed now (`status: "committed"`).
+- During a run it stays pending (`status: "pending"`) and is committed immediately before the next provider request whose last non-instruction message is a user message or tool results: after that turn's tool results and steering messages, before `prepareRequest` (a `prepareRequest` handler sees it already appended). This covers retries, overflow recovery and queued continuations. A pending instruction left when the run ends (for example after an abort) is committed at run end; `dispose()` commits pending instructions too. `clearQueue()` and `abort()` do not discard it.
+- "Committed" means appended to the session; a new session file is written only once it has its first assistant message.
+- `onCommit(entryId)` is called exactly once per instruction, also for an immediate commit (before `queueDeveloperMessage()` returns). Errors thrown by it are reported as extension errors and do not affect the commit.
+- `message_start`/`message_end` for a committed instruction are observation-only: the message is frozen and a `message_end` replacement is ignored with a warning.
+- Blank content, or a call after the session is disposed, throws.
+
 <a id="custom-ui"></a>
 <a id="mode-behavior"></a>
 <a id="interact-with-the-user"></a>

@@ -83,6 +83,7 @@ describe("ExtensionRunner", () => {
 		sendMessage: () => {},
 		sendUserMessage: () => {},
 		appendDeveloperMessage: () => {},
+		queueDeveloperMessage: () => ({ status: "committed", entryId: "entry" }),
 		appendEntry: () => {},
 		setSessionName: () => {},
 		getSessionName: () => undefined,

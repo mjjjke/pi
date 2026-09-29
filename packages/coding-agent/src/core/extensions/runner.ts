@@ -427,6 +427,7 @@ export class ExtensionRunner {
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendDeveloperMessage = actions.appendDeveloperMessage;
+		this.runtime.queueDeveloperMessage = actions.queueDeveloperMessage;
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
@@ -1018,6 +1019,10 @@ export class ExtensionRunner {
 		context.reload = () => {
 			this.assertActive();
 			return this.reloadHandler();
+		};
+		context.queueDeveloperMessage = (content, options) => {
+			this.assertActive();
+			return this.runtime.queueDeveloperMessage(content, options);
 		};
 		return context;
 	}

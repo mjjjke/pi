@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -88,6 +89,8 @@ import {
 	type MessageEndEvent,
 	type MessageStartEvent,
 	type MessageUpdateEvent,
+	type QueueDeveloperMessageOptions,
+	type QueueDeveloperMessageResult,
 	type ReplacedSessionContext,
 	type RequestBashHandoverOptions,
 	type RequestNewSessionOptions,
@@ -278,6 +281,21 @@ export interface PromptOptions {
 	preflightResult?: (success: boolean) => void;
 }
 
+/** A developer instruction queued with queueDeveloperMessage() and not yet committed. */
+interface PendingInstruction {
+	pendingId: string;
+	message: DeveloperMessage;
+	onCommit?: (entryId: string) => void;
+	state: "pending" | "committing" | "committed";
+	entryId?: string;
+}
+
+function isBlankInstruction(content: string | TextContent[]): boolean {
+	return typeof content === "string"
+		? content.trim().length === 0
+		: content.every((part) => part.text.trim().length === 0);
+}
+
 /** Options for model/thinking mutations. */
 export interface ModelMutationOptions {
 	/** Persist the new value to global defaults. Defaults to session-only. */
@@ -385,6 +403,10 @@ export class AgentSession {
 	private _disposed = false;
 	private _turnIndex = 0;
 	private readonly _entryIdsByMessage = new WeakMap<object, string>();
+	/** Instructions queued during a run, committed at the next anchored provider request or at run end. */
+	private _pendingInstructions: PendingInstruction[] = [];
+	/** Committed developer instructions: their lifecycle events are observation-only. */
+	private readonly _committedInstructions = new WeakSet<object>();
 	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
 	private _lastAssistantMessage: AssistantMessage | undefined;
 	private _lastAssistantToolResults: AgentMessage[] = [];
@@ -454,6 +476,7 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
 		this._installAgentRequestProjection();
+		this._installAgentInstructionBoundary();
 		this._installAgentBoundaryHooks();
 		this._installAgentForcedPromptProjection();
 
@@ -649,6 +672,110 @@ export class AgentSession {
 				thinkingLevel: previous?.thinkingLevel ?? this.agent.state.thinkingLevel,
 			};
 		};
+	}
+
+	/**
+	 * Commit queued instructions immediately before a provider request, after the turn's tool results
+	 * and steering messages. Only when the request is anchored (the last non-instruction message is a
+	 * user message or tool results); otherwise they stay pending for a later request or run end.
+	 */
+	private _installAgentInstructionBoundary(): void {
+		const previousGetInstructionMessages = this.agent.getInstructionMessages;
+		this.agent.getInstructionMessages = async (context) => {
+			const previous = (await previousGetInstructionMessages?.(context)) ?? [];
+			if (this._pendingInstructions.length === 0) return previous;
+			const anchor = convertToLlm(context.messages)
+				.filter((message) => message.role !== "system" && message.role !== "developer")
+				.at(-1)?.role;
+			if (anchor !== "user" && anchor !== "toolResult") return previous;
+			const committed: AgentMessage[] = [];
+			for (const pending of this._pendingInstructions.slice()) {
+				try {
+					this._commitInstruction(pending);
+				} catch (error) {
+					// Stays pending (in order) for the next request or run end.
+					this._reportInstructionError(error);
+					break;
+				}
+				committed.push(pending.message);
+			}
+			return [...previous, ...committed];
+		};
+	}
+
+	private _createPendingInstruction(
+		content: string | TextContent[],
+		onCommit?: (entryId: string) => void,
+	): PendingInstruction {
+		return {
+			pendingId: randomUUID(),
+			message: { role: "developer", content, timestamp: Date.now() },
+			onCommit,
+			state: "pending",
+		};
+	}
+
+	/**
+	 * Commit one instruction to the session exactly once. On an append failure the item returns to
+	 * `pending` and the error is rethrown. Persistence precedes every event; the committed message is
+	 * frozen, and `onCommit` runs last, isolated from the commit.
+	 */
+	private _commitInstruction(pending: PendingInstruction, options: { refresh?: boolean } = {}): string {
+		if (pending.state === "committed" && pending.entryId !== undefined) return pending.entryId;
+		if (pending.state !== "pending") throw new Error("Developer instruction commit already in progress");
+		pending.state = "committing";
+		let entryId: string;
+		try {
+			entryId = this.sessionManager.appendMessage(pending.message);
+		} catch (error) {
+			pending.state = "pending";
+			throw error;
+		}
+		pending.state = "committed";
+		pending.entryId = entryId;
+		const index = this._pendingInstructions.indexOf(pending);
+		if (index !== -1) this._pendingInstructions.splice(index, 1);
+		this._entryIdsByMessage.set(pending.message, entryId);
+		this._committedInstructions.add(pending.message);
+		const content = pending.message.content;
+		if (Array.isArray(content)) {
+			for (const part of content) Object.freeze(part);
+			Object.freeze(content);
+		}
+		Object.freeze(pending.message);
+		if (options.refresh) this._refreshFinalizedContext();
+		if (pending.onCommit) {
+			try {
+				pending.onCommit(entryId);
+			} catch (error) {
+				this._reportInstructionError(error);
+			}
+		}
+		return entryId;
+	}
+
+	private _commitPendingInstructionsAtRunEnd(): void {
+		for (const pending of this._pendingInstructions.slice()) {
+			try {
+				this._commitInstruction(pending, { refresh: true });
+			} catch {
+				try {
+					this._commitInstruction(pending, { refresh: true });
+				} catch (error) {
+					// Stays pending for the next run's first request.
+					this._reportInstructionError(error);
+				}
+			}
+		}
+	}
+
+	private _reportInstructionError(error: unknown): void {
+		this._extensionRunner.emitError({
+			extensionPath: "<runtime>",
+			event: "queue_developer_message",
+			error: error instanceof Error ? error.message : String(error),
+			stack: error instanceof Error ? error.stack : undefined,
+		});
 	}
 
 	private async _dispatchTurnEndBoundary(
@@ -953,8 +1080,10 @@ export class AgentSession {
 		// Handle session persistence
 		if (event.type === "message_end") {
 			let entryId: string | undefined;
-			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
+			if (this._entryIdsByMessage.has(event.message)) {
+				// Already committed (queued developer instructions are persisted before their events).
+			} else if (event.message.role === "custom") {
+				// Custom message from extensions
 				// Persist as CustomMessageEntry
 				entryId = this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
@@ -964,6 +1093,7 @@ export class AgentSession {
 				);
 			} else if (
 				event.message.role === "system" ||
+				event.message.role === "developer" ||
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
@@ -1205,7 +1335,11 @@ export class AgentSession {
 				message: event.message,
 			};
 			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
-			if (replacement) {
+			if (replacement && this._committedInstructions.has(event.message)) {
+				console.warn(
+					"Ignoring a message_end replacement of a committed developer instruction: its lifecycle events are observation-only.",
+				);
+			} else if (replacement) {
 				// Untyped extension handlers can return messages with null/missing content;
 				// normalize so it never enters agent state or session history.
 				const normalized =
@@ -1278,6 +1412,14 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		this._disposed = true;
+		for (const pending of this._pendingInstructions.splice(0)) {
+			try {
+				this._commitInstruction(pending);
+			} catch (error) {
+				// The session is going away: report and drop.
+				this._reportInstructionError(error);
+			}
+		}
 		this._settleAllBashHandoverWaiters();
 		this._bashHandoverRequests.clear();
 		try {
@@ -1594,6 +1736,7 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
+			if (!this._disposed) this._commitPendingInstructionsAtRunEnd();
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
 			this._runSystemPromptOptions = undefined;
 			this._flushPendingBashMessages();
@@ -2039,11 +2182,7 @@ export class AgentSession {
 	}
 
 	appendDeveloperMessage(content: string | TextContent[]): void {
-		const isBlank =
-			typeof content === "string"
-				? content.trim().length === 0
-				: content.every((part) => part.text.trim().length === 0);
-		if (isBlank) return;
+		if (isBlankInstruction(content)) return;
 
 		if (this.isStreaming && !this._isEmittingAgentEndExtensionEvent) {
 			throw new Error(
@@ -2051,13 +2190,27 @@ export class AgentSession {
 			);
 		}
 
-		const message: DeveloperMessage = {
-			role: "developer",
-			content,
-			timestamp: Date.now(),
-		};
-		this.sessionManager.appendMessage(message);
-		this._refreshFinalizedContext();
+		this._commitInstruction(this._createPendingInstruction(content), { refresh: true });
+	}
+
+	/**
+	 * Queue a passive developer instruction. Committed now while idle or from an agent_end handler;
+	 * during a run it is committed immediately before the next anchored provider request (after that
+	 * turn's tool results and steering messages), otherwise at run end or dispose. clearQueue() and
+	 * abort() do not discard it. `onCommit` is called once with the entry id.
+	 */
+	queueDeveloperMessage(
+		content: string | TextContent[],
+		options?: QueueDeveloperMessageOptions,
+	): QueueDeveloperMessageResult {
+		if (this._disposed) throw new Error("queueDeveloperMessage() cannot be called after the session is disposed.");
+		if (isBlankInstruction(content)) throw new Error("queueDeveloperMessage() requires non-blank content.");
+		const pending = this._createPendingInstruction(content, options?.onCommit);
+		if (!this.isStreaming || this._isEmittingAgentEndExtensionEvent) {
+			return { status: "committed", entryId: this._commitInstruction(pending, { refresh: true }) };
+		}
+		this._pendingInstructions.push(pending);
+		return { status: "pending", pendingId: pending.pendingId };
 	}
 
 	/**
@@ -3252,6 +3405,7 @@ export class AgentSession {
 				appendDeveloperMessage: (content) => {
 					this.appendDeveloperMessage(content);
 				},
+				queueDeveloperMessage: (content, options) => this.queueDeveloperMessage(content, options),
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);

@@ -124,6 +124,7 @@ export interface AgentOptions {
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	finishTurn?: FinishTurn;
 	prepareRequest?: PrepareRequest;
+	getInstructionMessages?: AgentLoopConfig["getInstructionMessages"];
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -219,6 +220,8 @@ export class Agent {
 	) => Promise<AfterToolCallResult | undefined>;
 	public finishTurn?: FinishTurn;
 	public prepareRequest?: PrepareRequest;
+	/** Instructions appended last before every provider request; see {@link AgentLoopConfig.getInstructionMessages}. */
+	public getInstructionMessages?: AgentLoopConfig["getInstructionMessages"];
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -252,6 +255,7 @@ export class Agent {
 		this.afterToolCall = runtimeOptions.afterToolCall;
 		this.finishTurn = runtimeOptions.finishTurn;
 		this.prepareRequest = runtimeOptions.prepareRequest;
+		this.getInstructionMessages = runtimeOptions.getInstructionMessages;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -490,6 +494,7 @@ export class Agent {
 			afterToolCall: this.afterToolCall,
 			finishTurn: this.finishTurn,
 			prepareRequest: this.prepareRequest,
+			getInstructionMessages: this.getInstructionMessages,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {

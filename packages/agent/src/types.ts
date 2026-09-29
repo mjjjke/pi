@@ -260,6 +260,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	finishTurn?: FinishTurn;
 
 	/**
+	 * Called immediately before every conversational provider request, including the first, after
+	 * prepared and steering messages are appended and before `prepareRequest`. Returned messages are
+	 * appended to the context last and emitted (`message_start`, `message_end`) like pending messages.
+	 * Use it for instructions committed at the request boundary.
+	 *
+	 * Contract: must not throw or reject. Return [] when there is nothing to add.
+	 */
+	getInstructionMessages?: (context: AgentContext) => AgentMessage[] | Promise<AgentMessage[]>;
+
+	/**
 	 * Called immediately before every conversational provider request, including the first.
 	 * Pending messages have already been appended. The returned context, model, and thinking level
 	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.

@@ -414,7 +414,27 @@ export interface ExtensionCommandContext extends ExtensionContext {
 
 	/** Reload extensions, skills, prompts, themes, and context files. */
 	reload(): Promise<void>;
+
+	/** Queue a developer instruction; see {@link ExtensionAPI.queueDeveloperMessage}. */
+	queueDeveloperMessage(
+		content: string | TextContent[],
+		options?: QueueDeveloperMessageOptions,
+	): QueueDeveloperMessageResult;
 }
+
+/** Options for `queueDeveloperMessage()`. */
+export interface QueueDeveloperMessageOptions {
+	/**
+	 * Called once with the session entry id when the instruction is committed, including an
+	 * immediate commit (before `queueDeveloperMessage()` returns). Errors are reported, never rethrown.
+	 */
+	onCommit?: (entryId: string) => void;
+}
+
+/** Result of `queueDeveloperMessage()`. */
+export type QueueDeveloperMessageResult =
+	| { status: "committed"; entryId: string }
+	| { status: "pending"; pendingId: string };
 
 /**
  * Fresh command-capable context bound to the replacement session after a session switch.
@@ -1702,6 +1722,19 @@ export interface ExtensionAPI {
 	 */
 	appendDeveloperMessage(content: string | TextContent[]): void;
 
+	/**
+	 * Queue a passive, persisted developer instruction without triggering a turn.
+	 * While idle or from an `agent_end` handler it is committed now (`status: "committed"`).
+	 * During a run it stays pending (`status: "pending"`) and is committed immediately before the
+	 * next provider request that follows a user message or tool results, after that turn's tool
+	 * results and steering messages; otherwise at the end of the run. Abort and queue clearing do
+	 * not discard it. Lifecycle events for the committed message are observation-only.
+	 */
+	queueDeveloperMessage(
+		content: string | TextContent[],
+		options?: QueueDeveloperMessageOptions,
+	): QueueDeveloperMessageResult;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1972,6 +2005,11 @@ export type SendUserMessageHandler = (
 
 export type AppendDeveloperMessageHandler = (content: string | TextContent[]) => void;
 
+export type QueueDeveloperMessageHandler = (
+	content: string | TextContent[],
+	options?: QueueDeveloperMessageOptions,
+) => QueueDeveloperMessageResult;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -2036,6 +2074,7 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendDeveloperMessage: AppendDeveloperMessageHandler;
+	queueDeveloperMessage: QueueDeveloperMessageHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

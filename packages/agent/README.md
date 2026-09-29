@@ -141,6 +141,8 @@ agent.prepareRequest = async ({ context }) => ({
 
 `prepareRequest` does not poll queues. Steering queued while it runs waits for the next normal steering poll.
 
+`getInstructionMessages(context)` runs just before `prepareRequest` on every request, after prepared and steering messages are appended. Messages it returns are appended last and emitted (`message_start`, `message_end`) like pending input. Use it for instructions that must be committed at the request boundary; `prepareRequest` then sees them already appended.
+
 `finishTurn` runs after the assistant and all tool results are finalized, but before `turn_end`. It runs for normal, error, and aborted responses:
 
 ```typescript
@@ -166,6 +168,7 @@ Each provider turn follows this lifecycle:
 
 ```text
 selected input events
+→ getInstructionMessages (appended and emitted)
 → prepareRequest
 → provider response
 → tool results

@@ -1407,6 +1407,94 @@ describe("agentLoop with AgentMessage", () => {
 		expect(prepareCalls).toBe(1);
 	});
 
+	it("appends instruction messages after steering and before prepareRequest on every request", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "noop",
+			label: "Noop",
+			description: "Noop tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "noop done" }], details: {} };
+			},
+		};
+		const steering = createUserMessage("steer");
+		const instruction: AgentMessage = { role: "developer", content: "instruction", timestamp: Date.now() };
+		const order: string[] = [];
+		const events: string[] = [];
+		const requests: string[][] = [];
+		const hookContexts: string[][] = [];
+		let steeringPolls = 0;
+		let instructionCalls = 0;
+		const describe = (message: AgentMessage) =>
+			`${message.role}:${"content" in message && typeof message.content === "string" ? message.content : ""}`;
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: (messages) => messages as Message[],
+			getSteeringMessages: async () => {
+				steeringPolls++;
+				// Deliver the steer after the tool batch (second poll).
+				return steeringPolls === 2 ? [steering] : [];
+			},
+			getInstructionMessages: async (context) => {
+				instructionCalls++;
+				order.push("instructions");
+				hookContexts.push(context.messages.map(describe));
+				return instructionCalls === 2 ? [instruction] : [];
+			},
+			prepareRequest: ({ context }) => {
+				order.push(`prepareRequest:${context.messages.at(-1)?.role}`);
+			},
+		};
+
+		let call = 0;
+		const stream = agentLoop(
+			[createUserMessage("run")],
+			{ messages: [], tools: [tool] },
+			config,
+			undefined,
+			(_model, context) => {
+				call++;
+				order.push("stream");
+				requests.push(context.messages.map((message) => message.role));
+				const response = new MockAssistantStream();
+				queueMicrotask(() => {
+					response.push({
+						type: "done",
+						reason: call === 1 ? "toolUse" : "stop",
+						message:
+							call === 1
+								? createAssistantMessage(
+										[{ type: "toolCall", id: "tool-1", name: "noop", arguments: {} }],
+										"toolUse",
+									)
+								: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				});
+				return response;
+			},
+		);
+		for await (const event of stream) {
+			if (event.type === "message_start" || event.type === "message_end") {
+				if (event.message === instruction) events.push(event.type);
+			}
+		}
+		const messages = await stream.result();
+
+		expect(order).toEqual([
+			"instructions",
+			"prepareRequest:user",
+			"stream",
+			"instructions",
+			"prepareRequest:developer",
+			"stream",
+		]);
+		expect(hookContexts[1]).toEqual(["system:", "user:run", "assistant:", "toolResult:", "user:steer"]);
+		expect(requests[1]).toEqual(["system", "user", "assistant", "toolResult", "user", "developer"]);
+		expect(events).toEqual(["message_start", "message_end"]);
+		expect(messages).toContain(instruction);
+	});
+
 	it("does not poll steering after prepareRequest", async () => {
 		const queued: AgentMessage[] = [];
 		const lateSteering = createUserMessage("late steering");
@@ -1415,7 +1503,7 @@ describe("agentLoop with AgentMessage", () => {
 		let steeringPolls = 0;
 		const config: AgentLoopConfig = {
 			model: createModel(),
-			convertToLlm: identityConverter,
+			convertToLlm: (messages) => messages as Message[],
 			getSteeringMessages: async () => {
 				steeringPolls++;
 				return queued.splice(0);

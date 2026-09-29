@@ -143,6 +143,8 @@ export type {
 	ProjectTrustHandler,
 	ProviderConfig,
 	ProviderModelConfig,
+	QueueDeveloperMessageOptions,
+	QueueDeveloperMessageResult,
 	ReadToolCallEvent,
 	RegisteredCommand,
 	RegisteredTool,
