@@ -1328,29 +1328,34 @@ export function convertMessages(
 ): ConvertedAnthropicMessages {
 	const params: MessageParam[] = [];
 	const assistantLevels = new Map<number, AnthropicEffort>();
-	// Later system and developer messages are held back and emitted directly before the next assistant
-	// message (or at the end of the transcript). Anthropic requires `tool_result` blocks to
-	// immediately follow their `tool_use`, so an instruction between them is rejected.
+	// Later system and developer messages become message-level `system` entries. Anthropic accepts a
+	// content-carrying system group only directly after a user turn (tool_result users included)
+	// and directly before an assistant turn or at the end of `messages`; anything else is a 400,
+	// including a position between `tool_use` and its `tool_result`.
+	//
+	// Placement: instructions are queued in transcript order, one wire message each, and flushed
+	// only at a flush point (before an emitted assistant turn, or at the end) whose last emitted
+	// message is a user turn. Assistants that emit nothing (empty after filtering; error/aborted ones
+	// are already removed by transformMessages) are transparent, so they neither flush nor reset the
+	// anchor. At a flush point without a user anchor (e.g. an instruction right after an assistant,
+	// or before the first user turn) the queue is kept, not dropped, and flushed after the next user
+	// turn; an instruction that never gets an anchor is simply not sent in this request (except in a
+	// transcript with no turns at all, see the end of this function).
+	//
+	// Stability: an instruction is only ever emitted after the last message already on the wire
+	// when it was queued, never inserted before an earlier (possibly signed-thinking) assistant turn,
+	// and each developer message keeps its own system message instead of being merged with later
+	// ones. So once a request is answered by a non-empty assistant turn, appending that turn and
+	// later messages leaves every earlier wire message byte-identical. The one unavoidable exception
+	// is a request whose answer is dropped (error/aborted/empty): a tail instruction then has to
+	// move past the next user turn, because `system` directly followed by `user` is rejected.
 	const pendingSystemMessages: MessageParam[] = [];
 	const developerOutputMessages = new Set<MessageParam>();
+	let lastEmittedIsUser = false;
 	const flushPendingSystemMessages = (): void => {
+		if (!lastEmittedIsUser) return;
 		params.push(...pendingSystemMessages);
 		pendingSystemMessages.length = 0;
-	};
-
-	const pendingInstructions: string[] = [];
-	let canPlacePendingInstruction = false;
-	const flushPendingInstructions = () => {
-		if (pendingInstructions.length === 0) return;
-		if (canPlacePendingInstruction) {
-			const message: MessageParam = {
-				role: "system",
-				content: [{ type: "text", text: pendingInstructions.join("\n\n") }],
-			};
-			pendingSystemMessages.push(message);
-			developerOutputMessages.add(message);
-		}
-		pendingInstructions.length = 0;
 	};
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -1379,7 +1384,11 @@ export function convertMessages(
 			if (blocks.length > 0) pendingSystemMessages.push({ role: "system", content: blocks });
 		} else if (msg.role === "developer") {
 			const text = sanitizeSurrogates(instructionContentToText(msg.content));
-			if (text.trim().length > 0) pendingInstructions.push(text);
+			if (text.trim().length > 0) {
+				const message: MessageParam = { role: "system", content: [{ type: "text", text }] };
+				pendingSystemMessages.push(message);
+				developerOutputMessages.add(message);
+			}
 		} else if (msg.role === "user") {
 			const previousParamCount = params.length;
 			if (typeof msg.content === "string") {
@@ -1421,11 +1430,9 @@ export function convertMessages(
 				}
 			}
 			if (params.length > previousParamCount) {
-				canPlacePendingInstruction = true;
+				lastEmittedIsUser = true;
 			}
 		} else if (msg.role === "assistant") {
-			flushPendingInstructions();
-			flushPendingSystemMessages();
 			const blocks: ContentBlockParam[] = [];
 
 			for (const block of msg.content) {
@@ -1479,10 +1486,9 @@ export function convertMessages(
 					});
 				}
 			}
-			if (blocks.length === 0) {
-				canPlacePendingInstruction = false;
-				continue;
-			}
+			// An assistant that emits nothing is transparent: no flush point, anchor unchanged.
+			if (blocks.length === 0) continue;
+			flushPendingSystemMessages();
 			const messageIndex = params.length;
 			params.push({
 				role: "assistant",
@@ -1496,7 +1502,7 @@ export function convertMessages(
 			) {
 				assistantLevels.set(messageIndex, msg.providerThinkingLevel);
 			}
-			canPlacePendingInstruction = false;
+			lastEmittedIsUser = false;
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint.
 			const toolResults: ContentBlockParam[] = [];
@@ -1513,12 +1519,12 @@ export function convertMessages(
 				role: "user",
 				content: toolResults,
 			});
-			canPlacePendingInstruction = true;
+			lastEmittedIsUser = true;
 		}
 	}
-	if (canPlacePendingInstruction) {
-		flushPendingInstructions();
-	}
+	// A transcript without any user or assistant turn has no valid placement and is rejected by
+	// the API either way; still send its system messages rather than an empty `messages` array.
+	if (params.length === 0) lastEmittedIsUser = true;
 	flushPendingSystemMessages();
 
 	// Add cache_control to the last user or system message. Developer instructions are

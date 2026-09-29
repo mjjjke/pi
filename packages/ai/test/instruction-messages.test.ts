@@ -126,6 +126,152 @@ function assistant(api: AssistantMessage["api"], model: string): AssistantMessag
 	};
 }
 
+type AnthropicParam = ReturnType<typeof convertAnthropicMessages>[number];
+
+function anthropicAssistant(
+	content: AssistantMessage["content"],
+	stopReason: AssistantMessage["stopReason"] = "stop",
+): AssistantMessage {
+	const model = anthropicModel();
+	return {
+		role: "assistant",
+		content,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage,
+		stopReason,
+		timestamp: 3,
+	};
+}
+
+/**
+ * Mid-conversation system placement rule: a content-carrying system group must immediately
+ * follow a user turn (tool_result users included) and precede an assistant turn or end the array.
+ */
+function expectValidAnthropicSystemPlacement(params: AnthropicParam[], label = ""): void {
+	// Without any turn the request is invalid anyway; its system messages are still sent.
+	if (params.every((param) => param.role === "system")) return;
+	for (let i = 0; i < params.length; i++) {
+		if (params[i].role !== "system") continue;
+		let start = i;
+		while (start > 0 && params[start - 1].role === "system") start--;
+		let end = i;
+		while (end + 1 < params.length && params[end + 1].role === "system") end++;
+		expect(params[start - 1]?.role, `${label} system at ${i} must follow a user turn`).toBe("user");
+		if (end + 1 < params.length) {
+			expect(params[end + 1].role, `${label} system at ${i} must precede an assistant turn`).toBe("assistant");
+		}
+	}
+}
+
+function systemTexts(params: AnthropicParam[]): string[] {
+	return params.flatMap((param) =>
+		param.role === "system" && Array.isArray(param.content)
+			? param.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+			: [],
+	);
+}
+
+/**
+ * Transcript tokens: U user, D developer, S native system update, A assistant with signed
+ * thinking, T assistant tool call + tool result, M tool call with a developer message
+ * between the call and its result, E empty assistant, X aborted assistant.
+ */
+type Token = "U" | "D" | "S" | "A" | "T" | "M" | "E" | "X";
+const TOKENS: Token[] = ["U", "D", "S", "A", "T", "M", "E", "X"];
+
+function buildTranscript(tokens: Token[]): { messages: Message[]; instructionTexts: string[] } {
+	const messages: Message[] = [];
+	const instructionTexts: string[] = [];
+	const signedThinking = (n: number) => ({
+		type: "thinking" as const,
+		thinking: `think-${n}`,
+		thinkingSignature: `sig-${n}`,
+	});
+	tokens.forEach((token, n) => {
+		switch (token) {
+			case "U":
+				messages.push({ role: "user", content: `user-${n}`, timestamp: n });
+				break;
+			case "D":
+				instructionTexts.push(`dev-${n}`);
+				messages.push({ role: "developer", content: `dev-${n}`, timestamp: n });
+				break;
+			case "S":
+				instructionTexts.push(`sys-${n}`);
+				messages.push({ role: "system", content: `sys-${n}`, timestamp: n });
+				break;
+			case "A":
+				messages.push(anthropicAssistant([signedThinking(n), { type: "text", text: `answer-${n}` }]));
+				break;
+			case "T":
+			case "M": {
+				const id = `call_${n}`;
+				messages.push(
+					anthropicAssistant(
+						[signedThinking(n), { type: "toolCall", id, name: "read", arguments: { path: `f${n}` } }],
+						"toolUse",
+					),
+				);
+				if (token === "M") {
+					instructionTexts.push(`dev-${n}`);
+					messages.push({ role: "developer", content: `dev-${n}`, timestamp: n });
+				}
+				messages.push({
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "read",
+					content: [{ type: "text", text: `result-${n}` }],
+					isError: false,
+					timestamp: n,
+				});
+				break;
+			}
+			case "E":
+				messages.push(anthropicAssistant([{ type: "text", text: "  " }]));
+				break;
+			case "X":
+				messages.push(anthropicAssistant([{ type: "text", text: `partial-${n}` }], "aborted"));
+				break;
+		}
+	});
+	return { messages, instructionTexts };
+}
+
+/** Instructions that must be on the wire: those followed by a flush point (next emitted assistant or end) right after a user turn. */
+function expectedEmittedInstructions(tokens: Token[]): string[] {
+	const emitted: string[] = [];
+	const pending: string[] = [];
+	let lastIsUser = false;
+	const flush = () => {
+		if (lastIsUser) emitted.push(...pending.splice(0));
+	};
+	tokens.forEach((token, n) => {
+		if (token === "U") lastIsUser = true;
+		else if (token === "D") pending.push(`dev-${n}`);
+		else if (token === "S") pending.push(`sys-${n}`);
+		else if (token === "A" || token === "T" || token === "M") {
+			flush();
+			if (token === "M") pending.push(`dev-${n}`);
+			lastIsUser = token !== "A";
+		}
+	});
+	if (!tokens.some((token) => ["U", "A", "T", "M"].includes(token))) lastIsUser = true;
+	flush();
+	return emitted;
+}
+
+function allTokenSequences(maxLength: number): Token[][] {
+	const result: Token[][] = [[]];
+	let frontier: Token[][] = [[]];
+	for (let length = 1; length <= maxLength; length++) {
+		frontier = frontier.flatMap((sequence) => TOKENS.map((token) => [...sequence, token]));
+		result.push(...frontier);
+	}
+	return result;
+}
+
 function generatedModel(provider: BuiltinProvider, id: string): Model<Api> {
 	const model = (getModels(provider) as Model<Api>[]).find((candidate) => candidate.id === id);
 	if (!model) throw new Error(`Missing generated model ${provider}/${id}`);
@@ -366,7 +512,7 @@ describe("mid-conversation instruction messages", () => {
 		});
 	});
 
-	it("drops Anthropic instruction messages outside valid placement instead of throwing", () => {
+	it("defers Anthropic instruction messages without a valid anchor until the next user turn", () => {
 		const model = anthropicModel();
 		const messages: Message[] = [
 			{ role: "user", content: "Implement this", timestamp: 1 },
@@ -376,6 +522,152 @@ describe("mid-conversation instruction messages", () => {
 
 		const params = convertAnthropicMessages(messages, model, false);
 		expect(params.map((message) => message.role)).toEqual(["user", "assistant"]);
+
+		const later = convertAnthropicMessages(
+			[...messages, { role: "user", content: "Next", timestamp: 5 }, assistant(model.api, model.id)],
+			model,
+			false,
+		);
+		expect(later.map((message) => message.role)).toEqual(["user", "assistant", "user", "system", "assistant"]);
+		expect(systemTexts(later)).toEqual(["Too late."]);
+	});
+
+	it("defers an Anthropic instruction between two assistant turns past the second one", () => {
+		const model = anthropicModel();
+		const messages: Message[] = [
+			{ role: "user", content: "Implement this", timestamp: 1 },
+			assistant(model.api, model.id),
+			{ role: "developer", content: "Deferred.", timestamp: 2 },
+			assistant(model.api, model.id),
+			{ role: "user", content: "Next", timestamp: 3 },
+			assistant(model.api, model.id),
+		];
+
+		const params = convertAnthropicMessages(messages, model, false);
+		expect(params.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"assistant",
+			"user",
+			"system",
+			"assistant",
+		]);
+	});
+
+	it("does not place an Anthropic instruction before a user turn when the assistant between them is empty", () => {
+		const model = anthropicModel();
+		const messages: Message[] = [
+			{ role: "user", content: "Implement this", timestamp: 1 },
+			{ role: "developer", content: "Plan first.", timestamp: 2 },
+			anthropicAssistant([]),
+			{ role: "user", content: "Continue", timestamp: 3 },
+			assistant(model.api, model.id),
+		];
+
+		const params = convertAnthropicMessages(messages, model, false);
+		expect(params.map((message) => message.role)).toEqual(["user", "user", "system", "assistant"]);
+		expect(systemTexts(params)).toEqual(["Plan first."]);
+	});
+
+	it("keeps an Anthropic instruction after the user turn when the transcript ends with an empty assistant", () => {
+		const model = anthropicModel();
+		const messages: Message[] = [
+			{ role: "user", content: "Implement this", timestamp: 1 },
+			{ role: "developer", content: "Plan first.", timestamp: 2 },
+			anthropicAssistant([{ type: "text", text: " " }]),
+		];
+
+		const params = convertAnthropicMessages(messages, model, false);
+		expect(params.map((message) => message.role)).toEqual(["user", "system"]);
+	});
+
+	it("places native Anthropic system updates only after a user turn", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "Implement this", timestamp: 1 },
+			{ role: "system", content: "Tools changed.", timestamp: 2 },
+			anthropicAssistant([]),
+			{ role: "user", content: "Continue", timestamp: 3 },
+			anthropicAssistant([{ type: "text", text: "Done." }]),
+			{ role: "system", content: "Late update.", timestamp: 4 },
+			anthropicAssistant([{ type: "text", text: "More." }]),
+		];
+
+		const params = convertAnthropicMessagesRaw(messages, false).messages;
+		expect(params.map((message) => message.role)).toEqual(["user", "user", "system", "assistant", "assistant"]);
+		expect(systemTexts(params)).toEqual(["Tools changed."]);
+	});
+
+	it("emits consecutive Anthropic instructions as separate system messages in transcript order", () => {
+		const model = anthropicModel();
+		const messages: Message[] = [
+			{ role: "user", content: "Implement this", timestamp: 1 },
+			{ role: "developer", content: "First.", timestamp: 2 },
+			{ role: "system", content: "Native.", timestamp: 3 },
+			{ role: "developer", content: "Second.", timestamp: 4 },
+			assistant(model.api, model.id),
+		];
+
+		const params = convertAnthropicMessages(messages, model, false);
+		expect(params.map((message) => message.role)).toEqual(["user", "system", "system", "system", "assistant"]);
+		expect(systemTexts(params)).toEqual(["First.", "Native.", "Second."]);
+	});
+
+	it("keeps earlier Anthropic wire messages byte-identical as the conversation grows", () => {
+		const model = anthropicModel();
+		// Each request is the previous one plus the model's answer (A, T or M; E only where the
+		// previous request had no trailing instruction) and new input.
+		const requests: Token[][] = [
+			["U", "D"],
+			["U", "D", "T", "D"],
+			["U", "D", "T", "D", "M", "S", "D"],
+			["U", "D", "T", "D", "M", "S", "D", "A", "D"],
+			["U", "D", "T", "D", "M", "S", "D", "A", "D", "A", "D", "U"],
+			["U", "D", "T", "D", "M", "S", "D", "A", "D", "A", "D", "U", "A", "U"],
+			["U", "D", "T", "D", "M", "S", "D", "A", "D", "A", "D", "U", "A", "U", "E", "U", "D", "D"],
+			["U", "D", "T", "D", "M", "S", "D", "A", "D", "A", "D", "U", "A", "U", "E", "U", "D", "D", "T", "A"],
+		];
+		let previous: string[] | undefined;
+		for (const tokens of requests) {
+			const { messages, instructionTexts } = buildTranscript(tokens);
+			const params = convertAnthropicMessages(messages, model, false);
+			expectValidAnthropicSystemPlacement(params, tokens.join(""));
+			expect(systemTexts(params).every((text) => instructionTexts.includes(text))).toBe(true);
+			const wire = params.map((param) => JSON.stringify(param));
+			if (previous) expect(wire.slice(0, previous.length), tokens.join("")).toEqual(previous);
+			previous = wire;
+		}
+		expect(systemTexts(convertAnthropicMessages(buildTranscript(requests.at(-1)!).messages, model, false))).toEqual(
+			expectedEmittedInstructions(requests.at(-1)!),
+		);
+	});
+
+	it("places, defers and keeps Anthropic instructions stable for every short transcript", () => {
+		const model = anthropicModel();
+		const serialize = (tokens: Token[]) =>
+			convertAnthropicMessages(buildTranscript(tokens).messages, model, false).map((param) => JSON.stringify(param));
+		const failures: string[] = [];
+		for (const tokens of allTokenSequences(4)) {
+			const label = tokens.join("") || "(empty)";
+			const params = convertAnthropicMessages(buildTranscript(tokens).messages, model, false);
+			try {
+				expectValidAnthropicSystemPlacement(params, label);
+				expect(systemTexts(params), label).toEqual(expectedEmittedInstructions(tokens));
+			} catch (error) {
+				failures.push(error instanceof Error ? error.message.split("\n")[0] : String(error));
+				continue;
+			}
+			// Appending a successful, non-empty response must not change what was already sent
+			// (a request without any turn is rejected by the API, so it has no answer to append).
+			if (params.every((param) => param.role === "system")) continue;
+			const wire = params.map((param) => JSON.stringify(param));
+			for (const response of ["A", "T", "M"] as const) {
+				const next = serialize([...tokens, response]);
+				if (JSON.stringify(next.slice(0, wire.length)) !== JSON.stringify(wire)) {
+					failures.push(`${label}+${response}: earlier wire messages changed`);
+				}
+			}
+		}
+		expect(failures.slice(0, 10)).toEqual([]);
 	});
 
 	it("does not move Anthropic prompt cache control to an earlier user when conversation ends with assistant", () => {
