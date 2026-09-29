@@ -407,6 +407,8 @@ export class AgentSession {
 	private _pendingInstructions: PendingInstruction[] = [];
 	/** Committed developer instructions: their lifecycle events are observation-only. */
 	private readonly _committedInstructions = new WeakSet<object>();
+	/** Incremented by abort() and dispose(); a prompt whose preflight spans a change is cancelled. */
+	private _admissionGen = 0;
 	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
 	private _lastAssistantMessage: AssistantMessage | undefined;
 	private _lastAssistantToolResults: AgentMessage[] = [];
@@ -1412,6 +1414,7 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		this._disposed = true;
+		this._admissionGen++;
 		for (const pending of this._pendingInstructions.splice(0)) {
 			try {
 				this._commitInstruction(pending);
@@ -1873,6 +1876,7 @@ export class AgentSession {
 		}
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
+		const admissionGen = this._admissionGen;
 		let messages: AgentMessage[] | undefined;
 
 		try {
@@ -1920,6 +1924,7 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
+				this._throwIfAdmissionChanged(admissionGen);
 				if (options.streamingBehavior === "followUp") {
 					await this._queueFollowUp(expandedText, currentImages);
 				} else {
@@ -1977,6 +1982,8 @@ export class AgentSession {
 			if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
 
 			const normalized = await this._normalizePromptImages(currentImages);
+			// Last await before the run starts: abort()/dispose() during preflight cancel the prompt.
+			this._throwIfAdmissionChanged(admissionGen);
 			const userText =
 				normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
 
@@ -2021,6 +2028,10 @@ export class AgentSession {
 
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);
+	}
+
+	private _throwIfAdmissionChanged(admissionGen: number): void {
+		if (admissionGen !== this._admissionGen) throw new Error("prompt cancelled: session shutting down");
 	}
 
 	/**
@@ -2412,6 +2423,7 @@ export class AgentSession {
 	}
 
 	async abort(): Promise<void> {
+		this._admissionGen++;
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
 		}

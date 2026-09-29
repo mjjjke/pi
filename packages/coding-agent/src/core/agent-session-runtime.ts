@@ -403,11 +403,18 @@ export class AgentSessionRuntime {
 		return { cancelled: false };
 	}
 
-	async dispose(): Promise<void> {
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
-			type: "session_shutdown",
-			reason: "quit",
-		});
+	/**
+	 * Emit `session_shutdown` and dispose the session. With `handlersDispatched`, the caller has
+	 * already dispatched `session_shutdown` (for example with a time limit): dispose without
+	 * running the handlers again.
+	 */
+	async dispose(options?: { handlersDispatched?: boolean }): Promise<void> {
+		if (!options?.handlersDispatched) {
+			await emitSessionShutdownEvent(this.session.extensionRunner, {
+				type: "session_shutdown",
+				reason: "quit",
+			});
+		}
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
 	}

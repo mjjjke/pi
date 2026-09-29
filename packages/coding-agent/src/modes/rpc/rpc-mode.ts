@@ -19,6 +19,7 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { emitSessionShutdownEvent } from "../../core/extensions/runner.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,
@@ -46,6 +47,9 @@ export type {
 	RpcResponse,
 	RpcSessionState,
 } from "./rpc-types.ts";
+
+/** Absolute time limit for an RPC shutdown, measured from its trigger (stdin EOF or a shutdown request). */
+export const RPC_SHUTDOWN_BUDGET_MS = 3000;
 
 /**
  * Run in RPC mode.
@@ -385,6 +389,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
 		const id = command.id;
+		if (shuttingDown) return error(id, command.type, "shutting down");
 
 		switch (command.type) {
 			// =================================================================
@@ -720,27 +725,90 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 	};
 
-	/**
-	 * Check if shutdown was requested and perform shutdown if so.
-	 * Called after handling each command when waiting for the next command.
-	 */
 	let detachInput = () => {};
+	let shutdownPromise: Promise<never> | undefined;
+	let escalate: ((exitCode: number, signal: NodeJS.Signals) => void) | undefined;
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
-		if (shuttingDown) {
-			process.exit(exitCode);
+	/**
+	 * Shut down once. On stdin EOF or a shutdown request, within RPC_SHUTDOWN_BUDGET_MS: stop
+	 * admitting input, abort the run (a cooperating stream persists its aborted message), dispatch
+	 * session_shutdown once, then always dispose, kill detached children, flush stdout with the
+	 * remaining budget and exit. Re-entry awaits the same shutdown. A signal during that drain skips
+	 * the remaining phases. A signal-triggered shutdown skips the abort drain and is not time-limited.
+	 */
+	function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
+		if (shutdownPromise) {
+			if (signal) escalate?.(exitCode, signal);
+			return shutdownPromise;
 		}
+		shutdownPromise = runShutdown(exitCode, signal);
+		return shutdownPromise;
+	}
+
+	async function runShutdown(initialExitCode: number, initialSignal?: NodeJS.Signals): Promise<never> {
+		const deadline = Date.now() + RPC_SHUTDOWN_BUDGET_MS;
+		let exitCode = initialExitCode;
+		let signal = initialSignal;
+		let escalated = false;
+		let wakeEscalation = () => {};
+		const escalation = new Promise<void>((resolve) => {
+			wakeEscalation = resolve;
+		});
+		escalate = (code, nextSignal) => {
+			if (signal) process.exit(code);
+			exitCode = code;
+			signal = nextSignal;
+			escalated = true;
+			wakeEscalation();
+		};
+		const withinBudget = async (work: () => Promise<unknown>): Promise<void> => {
+			if (initialSignal) {
+				await work().catch(() => {});
+				return;
+			}
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const expired = new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+			});
+			try {
+				await Promise.race([work().catch(() => {}), expired, escalation]);
+			} finally {
+				clearTimeout(timer);
+			}
+		};
+
+		// Admission barrier: no new input, commands rejected, dialogs cancelled.
 		shuttingDown = true;
-		for (const cleanup of signalCleanupHandlers) {
-			cleanup();
-		}
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		await runtimeHost.dispose();
 		detachInput();
 		process.stdin.pause();
+		for (const [requestId, pending] of pendingExtensionRequests) {
+			pendingExtensionRequests.delete(requestId);
+			pending.resolve({ type: "extension_ui_response", id: requestId, cancelled: true });
+		}
+
+		if (!signal) {
+			// abort() also cancels prompts whose preflight is still running.
+			await withinBudget(() => session.abort());
+		}
+		if (!escalated) {
+			await withinBudget(() =>
+				emitSessionShutdownEvent(runtimeHost.session.extensionRunner, { type: "session_shutdown", reason: "quit" }),
+			);
+		}
+
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		try {
+			await runtimeHost.dispose({ handlersDispatched: true });
+		} catch {
+			// Disposal is best-effort; exit regardless.
+		}
+		killTrackedDetachedChildren();
 		if (signal !== "SIGTERM") {
-			await flushRawStdout();
+			await withinBudget(() => flushRawStdout());
+		}
+		for (const cleanup of signalCleanupHandlers) {
+			cleanup();
 		}
 		process.exit(exitCode);
 	}

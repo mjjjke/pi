@@ -90,6 +90,15 @@ Clients must also handle child-process startup failures, unexpected exits, stder
 
 Close the child's stdin to request an orderly shutdown. Pi disposes the active runtime before exiting. Clients should still handle process signals and unexpected exits.
 
+Shutdown on stdin EOF (or an extension shutdown request) is bounded to 3 seconds from its trigger and runs once:
+
+1. Pi stops reading input, answers any further command with `error: "shutting down"`, cancels pending extension dialogs, and cancels a `prompt` whose preflight is still running (its response is `error: "prompt cancelled: session shutting down"`; no run starts and nothing is queued).
+2. It aborts the active run. A provider stream that honors the abort ends with an aborted assistant message, which is persisted.
+3. It dispatches `session_shutdown` handlers once. A handler still running at the deadline is abandoned.
+4. It always disposes the session, kills tracked detached child processes, flushes stdout with whatever budget remains, and exits.
+
+Messages persisted at their `message_end` are recoverable; the aborted partial message is best-effort within the budget. SIGTERM or SIGHUP during this drain skips the remaining steps, disposes and exits with 143 or 129.
+
 An extension can also request shutdown through its extension context. Pi completes shutdown after the current command or after the active run emits `agent_settled`.
 
 ## Minimal client

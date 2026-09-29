@@ -122,6 +122,20 @@ describe("AgentSessionRuntime characterization", () => {
 		return { runtime, faux, tempDir };
 	}
 
+	it("dispose({ handlersDispatched: true }) disposes without re-dispatching session_shutdown", async () => {
+		let shutdownCalls = 0;
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", () => {
+				shutdownCalls++;
+			});
+		});
+
+		await runtime.dispose({ handlersDispatched: true });
+
+		expect(shutdownCalls).toBe(0);
+		expect(() => runtime.session.queueDeveloperMessage("late")).toThrow(/disposed/);
+	});
+
 	it("persists message_end assistant replacements to the session manager", async () => {
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
 			pi.on("message_end", (event) => {
