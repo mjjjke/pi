@@ -779,6 +779,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		// Admission barrier: no new input, commands rejected, dialogs cancelled.
 		shuttingDown = true;
+		session.closeAdmission();
 		detachInput();
 		process.stdin.pause();
 		for (const [requestId, pending] of pendingExtensionRequests) {
@@ -787,7 +788,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		if (!signal) {
-			// abort() also cancels prompts whose preflight is still running.
 			await withinBudget(() => session.abort());
 		}
 		if (!escalated) {

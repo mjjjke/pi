@@ -407,8 +407,9 @@ export class AgentSession {
 	private _pendingInstructions: PendingInstruction[] = [];
 	/** Committed developer instructions: their lifecycle events are observation-only. */
 	private readonly _committedInstructions = new WeakSet<object>();
-	/** Incremented by abort() and dispose(); a prompt whose preflight spans a change is cancelled. */
+	/** Incremented by closeAdmission() and dispose(); a prompt whose preflight spans a change is cancelled. */
 	private _admissionGen = 0;
+	private _admissionClosed = false;
 	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
 	private _lastAssistantMessage: AssistantMessage | undefined;
 	private _lastAssistantToolResults: AgentMessage[] = [];
@@ -1439,6 +1440,7 @@ export class AgentSession {
 	dispose(): void {
 		this._disposed = true;
 		this._admissionGen++;
+		this._admissionClosed = true;
 		for (const pending of this._pendingInstructions.splice(0)) {
 			try {
 				this._commitInstruction(pending);
@@ -1894,13 +1896,31 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		await this._prompt(text, options, this._admissionGen);
+	}
+
+	/**
+	 * Stop admitting prompts: a prompt whose preflight is still running is cancelled before it is
+	 * queued or starts a run, and later prompts are rejected. Used by RPC shutdown.
+	 */
+	closeAdmission(): void {
+		this._admissionGen++;
+		this._admissionClosed = true;
+	}
+
+	private async _prompt(text: string, options: PromptOptions | undefined, admissionGen: number): Promise<void> {
 		if (this._isEmittingAgentSettled) {
-			this._deferredSettledActions.push(async () => await this.prompt(text, options));
+			this._deferredSettledActions.push(async () => {
+				if (this._isAdmissionChanged(admissionGen)) {
+					options?.preflightResult?.(false);
+					return;
+				}
+				await this._prompt(text, options, admissionGen);
+			});
 			return;
 		}
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
-		const admissionGen = this._admissionGen;
 		let messages: AgentMessage[] | undefined;
 
 		try {
@@ -2006,7 +2026,7 @@ export class AgentSession {
 			if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
 
 			const normalized = await this._normalizePromptImages(currentImages);
-			// Last await before the run starts: abort()/dispose() during preflight cancel the prompt.
+			// Last await before the run starts: closeAdmission()/dispose() during preflight cancel the prompt.
 			this._throwIfAdmissionChanged(admissionGen);
 			const userText =
 				normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
@@ -2054,8 +2074,12 @@ export class AgentSession {
 		await this._runAgentPrompt(messages);
 	}
 
+	private _isAdmissionChanged(admissionGen: number): boolean {
+		return this._admissionClosed || admissionGen !== this._admissionGen;
+	}
+
 	private _throwIfAdmissionChanged(admissionGen: number): void {
-		if (admissionGen !== this._admissionGen) throw new Error("prompt cancelled: session shutting down");
+		if (this._isAdmissionChanged(admissionGen)) throw new Error("prompt cancelled: session shutting down");
 	}
 
 	/**
@@ -2453,7 +2477,6 @@ export class AgentSession {
 	}
 
 	async abort(): Promise<void> {
-		this._admissionGen++;
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
 		}
