@@ -1,5 +1,5 @@
 // Fork-only: model capabilities the fork adds to generated model data
-// (fast mode, mid-conversation developer instructions). Shared by
+// (fast mode, mid-conversation developer instructions, progress updates). Shared by
 // generate-models.ts and pin-release-model-data.ts so live generation and
 // release pinning produce the same metadata. See FORK.md.
 import {
@@ -7,6 +7,7 @@ import {
 	openAiSupportsMidConversationInstructions,
 } from "../src/providers/instruction-messages.ts";
 import { getAnthropicFastModeCapability, getCodexFastModeCapability } from "../src/providers/pi-fast-mode.ts";
+import { anthropicSupportsProgressUpdates } from "../src/providers/progress-updates.ts";
 import type { Api, Model, ModelCapabilities } from "../src/types.ts";
 
 const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
@@ -31,6 +32,13 @@ export function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities |
 			if (capabilities.fastMode === undefined && model.provider === "anthropic" && nativeModelId.startsWith("claude-")) {
 				const fastMode = getAnthropicFastModeCapability(nativeModelId);
 				if (fastMode) capabilities.fastMode = fastMode;
+			}
+			if (
+				capabilities.progressUpdates === undefined &&
+				model.provider === "anthropic" &&
+				anthropicSupportsProgressUpdates(nativeModelId)
+			) {
+				capabilities.progressUpdates = true;
 			}
 			break;
 		}

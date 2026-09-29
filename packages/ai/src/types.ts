@@ -330,7 +330,18 @@ export interface SimpleStreamOptions extends StreamOptions {
 	deferred?: boolean | { window?: "15m" | "1h" | "24h" };
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
+	/**
+	 * How thinking content is returned. Currently honored by `anthropic-messages` only;
+	 * `"updates"` falls back to `"summarized"` on models without the `progressUpdates` capability.
+	 */
+	thinkingDisplay?: ThinkingDisplay;
 }
+
+/**
+ * Thinking display mode. `"summarized"` returns reasoning summaries, `"omitted"` returns empty
+ * thinking blocks, `"updates"` returns empty reasoning blocks plus readable progress updates.
+ */
+export type ThinkingDisplay = "summarized" | "omitted" | "updates";
 
 // Generic StreamFunction with typed options.
 //
@@ -371,6 +382,10 @@ export interface ThinkingContent {
 	type: "thinking";
 	thinking: string;
 	thinkingSignature?: string; // Provider-specific opaque or serialized reasoning replay data
+	/** When true, the block is a user-facing progress update written before a tool call
+	 *  (Anthropic `thinking.display: "updates"`), not reasoning. Display metadata only;
+	 *  providers never send it back. */
+	progressUpdate?: true;
 	/** When true, the thinking content was redacted by safety filters. The opaque
 	 *  encrypted payload is stored in `thinkingSignature` so it can be passed back
 	 *  to the API for multi-turn continuity. */
@@ -872,6 +887,8 @@ export interface ModelCapabilities {
 	midConversationInstructionMessages?: boolean;
 	/** Wire mutation that enables a faster/priority response tier for this model. */
 	fastMode?: FastModeCapability;
+	/** Whether this model writes progress updates between tool calls and accepts Anthropic `thinking.display: "updates"`. */
+	progressUpdates?: boolean;
 }
 
 /** Compatibility settings for the Mistral chat API. */

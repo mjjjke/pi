@@ -12,6 +12,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import { calculateCost } from "../models.ts";
 import { instructionContentToText } from "../providers/instruction-messages.ts";
+import { supportsProgressUpdates, THINKING_DISPLAY_UPDATES_BETA } from "../providers/progress-updates.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -27,6 +28,7 @@ import type {
 	StreamOptions,
 	TextContent,
 	ThinkingContent,
+	ThinkingDisplay,
 	Tool,
 	ToolCall,
 	ToolResultMessage,
@@ -177,7 +179,7 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 
 export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-export type AnthropicThinkingDisplay = "summarized" | "omitted";
+export type AnthropicThinkingDisplay = ThinkingDisplay;
 
 const FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
@@ -306,6 +308,11 @@ export interface AnthropicOptions extends StreamOptions {
 	 * - "omitted": Thinking blocks return an empty thinking field; the encrypted
 	 *   signature still travels back for multi-turn continuity. Use for faster
 	 *   time-to-first-text-token when your UI does not surface thinking.
+	 * - "updates" (beta): reasoning blocks come back empty (signature kept) and only
+	 *   progress updates written before tool calls carry text; those blocks are
+	 *   marked `progressUpdate: true`. Sends the `thinking-display-updates` beta.
+	 *   Falls back to "summarized" for models without the `progressUpdates`
+	 *   capability or when a configured `anthropic-beta` header omits the beta.
 	 *
 	 * Note: Anthropic's API default for Claude Opus 4.7 and Claude Mythos Preview
 	 * is "omitted". We default to "summarized" here to keep behavior consistent
@@ -632,6 +639,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			if (nextParams !== undefined) {
 				params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
 			}
+			// Under display "updates", any thinking block with text is a progress update.
+			const marksProgressUpdates =
+				params.thinking !== undefined && "display" in params.thinking && params.thinking.display === "updates";
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -700,10 +710,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						output.content.push(block);
 						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "thinking") {
+						const thinking = event.content_block.thinking ?? "";
 						const block: Block = {
 							type: "thinking",
-							thinking: event.content_block.thinking ?? "",
+							thinking,
 							thinkingSignature: event.content_block.signature ?? "",
+							...(marksProgressUpdates && thinking.length > 0 ? { progressUpdate: true as const } : {}),
 							index: event.index,
 						};
 						output.content.push(block);
@@ -750,6 +762,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
 							block.thinking += event.delta.thinking;
+							if (marksProgressUpdates && event.delta.thinking.length > 0) block.progressUpdate = true;
 							stream.push({
 								type: "thinking_delta",
 								contentIndex: index,
@@ -926,6 +939,7 @@ export const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOpti
 	const base = {
 		...buildBaseOptions(model, context, options, options?.apiKey),
 		toolChoice: options?.toolChoice,
+		thinkingDisplay: options?.thinkingDisplay,
 	} satisfies AnthropicOptions;
 	if (!options?.reasoning) {
 		return stream(model, context, {
@@ -1054,6 +1068,7 @@ function getBetaFeatures(
 	context: TranscriptContext,
 	isOAuthToken: boolean,
 	nativeToolChanges: boolean,
+	thinkingDisplayUpdates: boolean,
 	options?: AnthropicOptions,
 ): NonNullable<MessageCreateParamsStreaming["betas"]> {
 	let configuredFeatures: string | null | undefined;
@@ -1090,6 +1105,7 @@ function getBetaFeatures(
 		features.push(MID_CONVERSATION_OUTPUT_CONFIG_BETA, THINKING_BINDING_CONTROLS_BETA);
 	}
 	if (nativeToolChanges) features.push(MID_CONVERSATION_TOOL_CHANGES_BETA);
+	if (thinkingDisplayUpdates) features.push(THINKING_DISPLAY_UPDATES_BETA);
 	return [...new Set(features)];
 }
 
@@ -1123,7 +1139,26 @@ function buildParams(
 		nativeToolChanges,
 	);
 	const activeEffort = options?.effort ?? "high";
-	const betaFeatures = getBetaFeatures(model, context, isOAuthToken, nativeToolChanges, options);
+	const sendsThinking =
+		model.compat?.supportsMidConvoEffort === true || (model.reasoning && options?.thinkingEnabled === true);
+	const requestedDisplay: AnthropicThinkingDisplay =
+		options?.thinkingDisplay === "updates" && !supportsProgressUpdates(model)
+			? "summarized"
+			: (options?.thinkingDisplay ?? "summarized");
+	const betaFeatures = getBetaFeatures(
+		model,
+		context,
+		isOAuthToken,
+		nativeToolChanges,
+		sendsThinking && requestedDisplay === "updates",
+		options,
+	);
+	// A configured anthropic-beta header replaces the computed list; without the beta the
+	// API rejects display "updates", so fall back to summaries.
+	const display: AnthropicThinkingDisplay =
+		requestedDisplay === "updates" && !betaFeatures.includes(THINKING_DISPLAY_UPDATES_BETA)
+			? "summarized"
+			: requestedDisplay;
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages:
@@ -1214,15 +1249,14 @@ function buildParams(
 	if (model.compat?.supportsMidConvoEffort === true) {
 		params.thinking = {
 			type: "adaptive",
-			display: options?.thinkingDisplay ?? "summarized",
+			display,
 			block_binding: { prefix_mismatch_behavior: "drop_block" },
 		};
 		params.output_config = { effort: "high" };
 	} else if (model.reasoning) {
 		if (options?.thinkingEnabled) {
-			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
+			// `display` defaults to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").
-			const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
 			if (model.compat?.forceAdaptiveThinking === true) {
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
