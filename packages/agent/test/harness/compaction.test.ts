@@ -426,6 +426,35 @@ describe("harness compaction", () => {
 		expect(getOrThrow(prepareCompaction([], DEFAULT_COMPACTION_SETTINGS))).toBeUndefined();
 	});
 
+	it("skips empty signed thinking blocks when serializing", () => {
+		const result = serializeConversation([
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: "sig-reasoning" },
+					{ type: "thinking", thinking: "  ", thinkingSignature: "sig-blank" },
+					{ type: "thinking", thinking: "Found it.", thinkingSignature: "sig-update", progressUpdate: true },
+					{ type: "toolCall", id: "tc1", name: "read", arguments: { path: "a" } },
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		] as Message[]);
+		expect(result).toContain("[Assistant thinking]: Found it.\n");
+		expect(result).not.toMatch(/\[Assistant thinking\]: \s*\n/);
+	});
+
 	it("serializes conversation with instruction messages", () => {
 		const result = serializeConversation([
 			{ role: "system", content: "system instruction", timestamp: Date.now() },

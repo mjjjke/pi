@@ -104,7 +104,8 @@ export function serializeConversation(messages: Message[]): string {
 
 			for (const block of msg.content) {
 				if (block.type === "thinking") {
-					thinkingParts.push(block.thinking);
+					// Empty signed blocks (display "updates"/"omitted") carry no readable text.
+					if (block.thinking.trim()) thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
 					const args = block.arguments as Record<string, unknown>;
 					const argsStr = Object.entries(args)

@@ -19,6 +19,39 @@ describe("serializeConversation", () => {
 		expect(result).toContain("[Developer]: developer instruction");
 	});
 
+	it("skips empty signed thinking blocks", () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: "sig-reasoning" },
+					{ type: "thinking", thinking: "  ", thinkingSignature: "sig-blank" },
+					{ type: "thinking", thinking: "Found it.", thinkingSignature: "sig-update", progressUpdate: true },
+					{ type: "toolCall", id: "tc1", name: "read", arguments: { path: "a" } },
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-5-5",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		];
+
+		const result = serializeConversation(messages);
+
+		expect(result).toContain("[Assistant thinking]: Found it.\n");
+		expect(result).not.toMatch(/\[Assistant thinking\]: \s*\n/);
+		expect(result).toContain('[Assistant tool calls]: read(path="a")');
+	});
+
 	it("should truncate long tool results", () => {
 		const longContent = "x".repeat(5000);
 		const messages: Message[] = [
