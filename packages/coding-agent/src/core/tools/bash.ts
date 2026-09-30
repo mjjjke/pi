@@ -456,9 +456,6 @@ export function createShellToolDefinition(
 		parameters: bashSchema,
 		outputSchema: bashOutputSchema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
-		// Fork: a batch with a shell call runs in message order, so a command never races an
-		// edit/write issued earlier in the same message (see FORK.md "Parallel tool call rule").
-		executionMode: "sequential",
 		async execute(
 			toolCallId,
 			{ command, timeout }: { command: string; timeout?: number },

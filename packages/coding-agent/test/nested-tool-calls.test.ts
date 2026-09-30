@@ -161,7 +161,7 @@ describe("NestedToolCallRunner", () => {
 		expect(runner.takeRecord("free")).toMatchObject({ calls: { complete: true }, usage: undefined });
 	});
 
-	it("serializes concurrent calls to sequential tools", async () => {
+	it.each(["sequential", "exclusive"] as const)("serializes concurrent calls to %s tools", async (mode) => {
 		let active = 0;
 		let maxActive = { sequential: 0, parallel: 0 };
 		const makeTool = (name: "sequential" | "parallel"): AgentTool => ({
@@ -169,7 +169,7 @@ describe("NestedToolCallRunner", () => {
 			label: name,
 			description: name,
 			parameters: Type.Object({}),
-			executionMode: name === "sequential" ? "sequential" : undefined,
+			executionMode: name === "sequential" ? mode : undefined,
 			async execute() {
 				active++;
 				maxActive = { ...maxActive, [name]: Math.max(maxActive[name], active) };
@@ -185,6 +185,44 @@ describe("NestedToolCallRunner", () => {
 
 		expect(maxActive).toEqual({ sequential: 1, parallel: 3 });
 	});
+});
+
+describe("exclusive nested calls", () => {
+	it.each(["sequential", "exclusive"] as const)(
+		"borrows the reentrant queue for descendants of a %s tool",
+		async (mode) => {
+			const tools: AgentTool[] = [];
+			const { runner, events } = createRunner(tools);
+			tools.push(
+				{
+					name: "leaf",
+					label: "Leaf",
+					description: "Leaf",
+					parameters: Type.Object({}),
+					executionMode: "exclusive",
+					async execute() {
+						return { content: [], details: {} };
+					},
+				},
+				{
+					name: "parent",
+					label: "Parent",
+					description: "Calls leaf",
+					parameters: Type.Object({}),
+					executionMode: mode,
+					async execute(id) {
+						await runner.execute(id, "leaf", {});
+						return { content: [], details: {} };
+					},
+				},
+			);
+			await Promise.all([runner.execute("call", "parent", {}), runner.execute("call", "leaf", {})]);
+			expect(events.filter((event) => event.type === "tool_execution_end").map((event) => event.toolCallId)).toEqual(
+				["call/1/1", "call/1", "call/2"],
+			);
+			expect(runner.takeRecord("call")?.calls?.complete).toBe(true);
+		},
+	);
 });
 
 describe("NestedCallRecorder", () => {

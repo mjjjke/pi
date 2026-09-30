@@ -198,10 +198,10 @@ export class NestedToolCallRunner {
 			parentToolCallId: callerId,
 		});
 
+		const executionMode = this.host.getTools().find((tool) => tool.name === name)?.executionMode;
 		const exclusive =
 			!scope.holdsQueue &&
-			(this.host.isSequential() ||
-				this.host.getTools().find((tool) => tool.name === name)?.executionMode === "sequential");
+			(this.host.isSequential() || executionMode === "sequential" || executionMode === "exclusive");
 		let release: (() => void) | undefined;
 		if (exclusive) {
 			const previous = this.queueTail;

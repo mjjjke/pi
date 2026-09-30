@@ -123,6 +123,10 @@ In parallel mode, tool completion events follow tool completion order, but persi
 
 The mode can be set globally via `toolExecution` in the agent config, or per-tool via `executionMode` on `AgentTool`. If any tool call in a batch targets a tool with `executionMode: "sequential"`, the entire batch executes sequentially regardless of the global setting.
 
+A tool with `executionMode: "exclusive"` instead forms a source-order barrier: earlier calls finish (including updates, `afterToolCall` and `tool_execution_end`), it runs alone, then later calls may prepare and execute. Calls between barriers are prepared sequentially and execute concurrently, just like a parallel batch. For example, `exclusive → parallel A + parallel B → exclusive` orders the mutations while letting A and B overlap. Result messages are still emitted after the batch in source order. On abort, calls in not-yet-prepared segments are skipped; calls already started get matching end events. A sequential tool or global `"sequential"` setting still wins.
+
+Ordering is by tool completion, not process completion: a shell call that hands its process to the background can finish while that process continues.
+
 The `beforeToolCall` hook runs after `tool_execution_start` and validated argument parsing. It can block execution and attach `terminate: true` to the blocked result. The `afterToolCall` hook runs after tool execution finishes and before `tool_execution_end` and final tool result message events are emitted.
 
 Tools, blocked `beforeToolCall` results, and `afterToolCall` overrides can return `terminate: true` to hint that the automatic follow-up LLM call should be skipped. The loop only stops early when every finalized tool result in that batch sets `terminate: true`. Mixed batches continue normally.
@@ -475,7 +479,8 @@ const readFileTool: AgentTool = {
   }),
   // Override execution mode for this tool (optional).
   // "sequential" forces the entire batch to run one at a time.
-  // "parallel" allows concurrent execution with other tool calls.
+  // "exclusive" runs this call alone in source order, between concurrent runs.
+  // "parallel" allows concurrent execution with other non-exclusive tool calls.
   // If omitted, the global toolExecution config applies.
   executionMode: "sequential",
   execute: async (toolCallId, params, signal, onUpdate) => {

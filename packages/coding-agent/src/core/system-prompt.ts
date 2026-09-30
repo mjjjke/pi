@@ -108,14 +108,14 @@ function buildRules(
 		}
 	}
 
-	// Fork: tool calls of one message run in parallel (agent toolExecution default) and the
-	// file mutation queue does not order a shell command against edit/write. Models often
-	// assume in-order execution and read "dependency" as data only (see FORK.md).
+	// Fork: edit/write are exclusive source-order barriers; other calls between them
+	// remain parallel. Shell dependencies still need one command or a later message
+	// (see FORK.md). Ordering is by tool completion, not background process exit.
 	const hasShell = hasBash || hasPowerShell;
 	const mutatesFiles = selectedTools.includes("edit") || selectedTools.includes("write");
 	if (hasShell && mutatesFiles) {
 		addRule(
-			"Tool calls in one message start concurrently, in no guaranteed order. A call that needs the effect of another call in the same message (git add/commit, tests or builds after an edit/write; reading a file just written) must wait for it to finish: make it in a later message, even if its arguments are already known. Independent reads and searches can still share a message.",
+			"In one message, edit/write calls run alone in message order: later calls see their effect. Other calls (shell commands, reads, searches) start concurrently in no guaranteed order: a command that needs another command's effect (e.g. git add then commit) goes in the same command with && or in a later message.",
 		);
 	}
 

@@ -193,8 +193,9 @@ Throw from `execute()` to produce a failed tool result.
 Returning an object does not mark it as an error.
 Return `terminate: true` only when the agent should skip its automatic follow-up after every completed tool in that batch agrees to terminate.
 
-Use sequential execution when tools share mutable in-memory state.
-File-mutating tools should wrap the complete read-modify-write operation with `withFileMutationQueue()`.
+Use `executionMode: "exclusive"` when a model-issued call must run alone, after earlier calls finalize and before later calls prepare. Built-in `edit` and `write` use this mode; shell commands, reads, and searches remain concurrent between these barriers. `executionMode: "sequential"` instead forces the entire assistant batch to run one call at a time. Nested exclusive calls use the existing reentrant serialization queue, like nested sequential calls.
+File-mutating tools should still wrap the complete read-modify-write operation with `withFileMutationQueue()` for direct callers and calls outside one assistant batch.
+Ordering follows tool completion, not background process completion: a bash timeout/steer handover finishes the call while its process continues.
 Truncate large model-facing results and tell the model where to read the complete output.
 
 Declare `outputSchema` and return a matching `structuredContent` when the result is data. The model still receives `content`; programmatic callers such as codemode scripts receive `structuredContent` instead of the text. Tools without `outputSchema` are passed to scripts as their text content. To report a failure that still carries data, return the result with `isError: true` instead of throwing: the model sees an error, and scripts still receive `structuredContent`.

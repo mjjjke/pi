@@ -40,11 +40,14 @@ export type StreamFn = (
  * Configuration for how tool calls from a single assistant message are executed.
  *
  * - "sequential": each tool call is prepared, executed, and finalized before the next one starts.
- * - "parallel": tool calls are prepared sequentially, then allowed tools execute concurrently.
+ *   Any tool with this mode forces the whole batch to run sequentially.
+ * - "exclusive": per-tool barrier; waits for earlier calls to finalize, runs alone, and
+ *   blocks later calls (including their preparation) until it is finalized.
+ * - "parallel": tool calls between barriers are prepared sequentially, then allowed tools execute concurrently.
  *   `tool_execution_end` is emitted in tool completion order after each tool is finalized,
  *   while tool-result message artifacts are emitted later in assistant source order.
  */
-export type ToolExecutionMode = "sequential" | "parallel";
+export type ToolExecutionMode = "sequential" | "parallel" | "exclusive";
 
 /**
  * Controls how many queued user messages are injected when the agent loop reaches a queue drain point.
@@ -318,9 +321,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Tool execution mode.
 	 * - "sequential": execute tool calls one by one
-	 * - "parallel": preflight tool calls sequentially, then execute allowed tools concurrently;
-	 *   emit `tool_execution_end` in tool completion order after each tool is finalized,
-	 *   then emit tool-result message artifacts later in assistant source order
+	 * - "parallel": preflight tool calls sequentially within each non-exclusive segment,
+	 *   then execute allowed tools concurrently; per-tool "exclusive" calls form source-order barriers.
+	 *   Emit `tool_execution_end` in tool completion order after each tool is finalized,
+	 *   then emit tool-result message artifacts later in assistant source order.
+	 * Any per-tool "sequential" override forces the entire batch to execute sequentially.
 	 *
 	 * Default: "parallel"
 	 */
@@ -498,8 +503,9 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	replay?: "never" | "safe";
 	/**
 	 * Per-tool execution mode override.
-	 * - "sequential": this tool must execute one at a time with other tool calls.
-	 * - "parallel": this tool can execute concurrently with other tool calls.
+	 * - "sequential": forces the entire assistant batch to execute one call at a time.
+	 * - "exclusive": runs alone in source order, after earlier calls finalize and before later calls prepare.
+	 * - "parallel": this tool can execute concurrently with other non-exclusive tool calls.
 	 *
 	 * If omitted, the default execution mode applies.
 	 */

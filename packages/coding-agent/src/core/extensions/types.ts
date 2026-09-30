@@ -657,8 +657,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 
 	/**
 	 * Per-tool execution mode override.
-	 * - "sequential": this tool must execute one at a time with other tool calls.
-	 * - "parallel": this tool can execute concurrently with other tool calls.
+	 * - "sequential": forces the entire assistant batch to execute one call at a time.
+	 * - "exclusive": runs alone in source order, after earlier calls finalize and before later calls prepare.
+	 * - "parallel": this tool can execute concurrently with other non-exclusive tool calls.
 	 *
 	 * If omitted, the default execution mode applies.
 	 */

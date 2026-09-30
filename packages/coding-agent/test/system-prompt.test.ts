@@ -109,7 +109,7 @@ describe("buildSystemPrompt", () => {
 		});
 
 		const PARALLEL_CALLS_RULE =
-			"- Tool calls in one message start concurrently, in no guaranteed order. A call that needs the effect of another call in the same message (git add/commit, tests or builds after an edit/write; reading a file just written) must wait for it to finish: make it in a later message, even if its arguments are already known. Independent reads and searches can still share a message.";
+			"- In one message, edit/write calls run alone in message order: later calls see their effect. Other calls (shell commands, reads, searches) start concurrently in no guaranteed order: a command that needs another command's effect (e.g. git add then commit) goes in the same command with && or in a later message.";
 
 		test.each([
 			[["read", "bash", "edit", "write"], true],
@@ -120,7 +120,7 @@ describe("buildSystemPrompt", () => {
 			[["read", "edit", "write"], false],
 			[[], false],
 		] as const)(
-			"states that calls run concurrently only for a shell plus edit/write (%j)",
+			"describes exclusive mutations and parallel calls only for a shell plus edit/write (%j)",
 			(selectedTools, expected) => {
 				const prompt = buildSystemPrompt({
 					selectedTools: [...selectedTools],

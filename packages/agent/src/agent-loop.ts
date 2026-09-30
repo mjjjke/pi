@@ -527,6 +527,12 @@ async function executeToolCalls(
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
 	}
+	const hasExclusiveToolCall = toolCalls.some(
+		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "exclusive",
+	);
+	if (hasExclusiveToolCall) {
+		return executeToolCallsWithExclusive(currentContext, assistantMessage, toolCalls, config, signal, emit);
+	}
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
 }
 
@@ -591,6 +597,44 @@ async function executeToolCallsSequential(
 	};
 }
 
+async function executeToolCallsWithExclusive(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCalls: AgentToolCall[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
+	const finalizedCalls: FinalizedToolCallOutcome[] = [];
+	const isExclusive = (toolCall: AgentToolCall) =>
+		currentContext.tools?.find((tool) => tool.name === toolCall.name)?.executionMode === "exclusive";
+
+	// A fair read/write barrier in source order: concurrent runs alternate with single
+	// exclusive calls. Preparation stays inside each segment, so hooks and validation
+	// after a barrier see the earlier call's effects, including its after-hooks.
+	for (let start = 0; start < toolCalls.length; ) {
+		let end = start + 1;
+		if (!isExclusive(toolCalls[start])) {
+			while (end < toolCalls.length && !isExclusive(toolCalls[end])) end++;
+		}
+		finalizedCalls.push(
+			...(await executeToolCallsParallelSegment(
+				currentContext,
+				assistantMessage,
+				toolCalls.slice(start, end),
+				config,
+				signal,
+				emit,
+			)),
+		);
+		// Like the sequential path, unprepared calls get no start/end or result on
+		// abort. Within an admitted segment, the parallel path pairs every start.
+		if (signal?.aborted) break;
+		start = end;
+	}
+	return emitToolBatchResults(finalizedCalls, emit);
+}
+
 async function executeToolCallsParallel(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -599,6 +643,25 @@ async function executeToolCallsParallel(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
+	const finalizedCalls = await executeToolCallsParallelSegment(
+		currentContext,
+		assistantMessage,
+		toolCalls,
+		config,
+		signal,
+		emit,
+	);
+	return emitToolBatchResults(finalizedCalls, emit);
+}
+
+async function executeToolCallsParallelSegment(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCalls: AgentToolCall[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<FinalizedToolCallOutcome[]> {
 	const finalizedCalls: FinalizedToolCallEntry[] = [];
 
 	for (const toolCall of toolCalls) {
@@ -651,9 +714,13 @@ async function executeToolCallsParallel(
 		}
 	}
 
-	const orderedFinalizedCalls = await Promise.all(
-		finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
-	);
+	return Promise.all(finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))));
+}
+
+async function emitToolBatchResults(
+	orderedFinalizedCalls: FinalizedToolCallOutcome[],
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		const toolResultMessage = createToolResultMessage(finalized);
