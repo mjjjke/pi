@@ -5,7 +5,12 @@ import { join } from "node:path";
 import type { Text } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { BashBackgroundEvent, ExtensionToolContext } from "../src/core/extensions/types.ts";
-import { type BashOperations, createBashTool, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import {
+	type BashOperations,
+	createBashTool,
+	createBashToolDefinition,
+	createShellToolDefinition,
+} from "../src/core/tools/bash.ts";
 import { createPowerShellTool, createPowerShellToolDefinition } from "../src/core/tools/powershell.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -252,6 +257,91 @@ describe("bash run_in_background", () => {
 			/Background execution is not available/,
 		);
 		expect(ops.calls).toEqual([]);
+	});
+
+	it("passes the call's abort signal and refuses a claimed result once the call is aborted", async () => {
+		const controller = new AbortController();
+		let seen: AbortSignal | undefined;
+		const bash = createBashTool(testDir, {
+			onBackground: async (event) => {
+				seen = event.signal;
+				// An earlier (async) handler runs while the call is cancelled...
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				controller.abort();
+				// ...and a claim made anyway is not returned as a normal result.
+				event.claim({ content: [{ type: "text", text: "started anyway" }] });
+			},
+		});
+		await expect(
+			bash.execute("bg-abort", { command: "true", run_in_background: true }, controller.signal),
+		).rejects.toThrow("Command aborted");
+		expect(seen).toBe(controller.signal);
+	});
+
+	it("gives the event a signal that never aborts when the call has none", async () => {
+		let seen: AbortSignal | undefined;
+		const bash = createBashTool(testDir, {
+			onBackground: (event) => {
+				seen = event.signal;
+				event.claim({ content: [{ type: "text", text: "ok" }] });
+			},
+		});
+		await bash.execute("bg-no-signal", { command: "true", run_in_background: true });
+		expect(seen).toBeInstanceOf(AbortSignal);
+		expect(seen!.aborted).toBe(false);
+	});
+
+	it("closes the dispatch when a handler throws: a saved claim fails afterwards", async () => {
+		let saved: BashBackgroundEvent | undefined;
+		const bash = createBashTool(testDir, {
+			onBackground: (event) => {
+				saved = event;
+				throw new Error("handler failed");
+			},
+		});
+		await expect(bash.execute("bg-throw", { command: "true", run_in_background: true })).rejects.toThrow(
+			"handler failed",
+		);
+		expect(() => saved!.claim({ content: [{ type: "text", text: "late" }] })).toThrow(/already settled/);
+	});
+
+	it("only emits for the bash tool config, whatever options a shell tool gets", async () => {
+		const ops = spyOperations();
+		const events: BashBackgroundEvent[] = [];
+		const other = createShellToolDefinition(
+			testDir,
+			{
+				name: "zsh",
+				label: "zsh",
+				shellName: "zsh",
+				prompt: "%",
+				promptSnippet: "zsh",
+				tempFilePrefix: "pi-zsh",
+			},
+			{ operations: ops, exposeSessionEnvironment: false, onBackground: (event) => void events.push(event) },
+		);
+		await expect(
+			other.execute("zsh-bg", { command: "true", run_in_background: true }, undefined, undefined, {} as never),
+		).rejects.toThrow(/Background execution is not available/);
+		expect(events).toEqual([]);
+		expect(ops.calls).toEqual([]);
+	});
+
+	it("fails like a foreground call when the working directory does not exist, before dispatch", async () => {
+		const missing = join(testDir, "missing");
+		const events: BashBackgroundEvent[] = [];
+		const bash = createBashToolDefinition(testDir, {
+			exposeSessionEnvironment: false,
+			onBackground: (event) => void events.push(event),
+		});
+		const ctx = { cwd: missing } as never;
+		await expect(
+			bash.execute("bg-missing-cwd", { command: "true", run_in_background: true }, undefined, undefined, ctx),
+		).rejects.toThrow(`Working directory does not exist: ${missing}\nCannot execute bash commands.`);
+		await expect(bash.execute("fg-missing-cwd", { command: "true" }, undefined, undefined, ctx)).rejects.toThrow(
+			`Working directory does not exist: ${missing}\nCannot execute bash commands.`,
+		);
+		expect(events).toEqual([]);
 	});
 
 	it("tags background calls in the call row and hides the ignored timeout", () => {

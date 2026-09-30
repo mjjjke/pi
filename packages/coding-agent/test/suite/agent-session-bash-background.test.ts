@@ -134,6 +134,84 @@ describe("AgentSession bash_background", () => {
 		expect(events).toEqual([]);
 	});
 
+	it("limits a claim to its handler: a returned handler's saved event cannot claim later", async () => {
+		let saved: BashBackgroundEvent | undefined;
+		const lateClaim: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("bash_background", (event) => {
+						saved = event;
+					});
+				},
+				(pi) => {
+					pi.on("bash_background", async (event) => {
+						await new Promise((resolve) => setTimeout(resolve, 5));
+						try {
+							saved!.claim({ content: [{ type: "text", text: "stale" }] });
+						} catch (error) {
+							lateClaim.push((error as Error).message);
+						}
+						expect(event.claimed).toBe(false);
+						event.claim({ content: [{ type: "text", text: "own claim" }] });
+						expect(saved!.claimed).toBe(true);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("bash", { command: "echo hi", run_in_background: true })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("start it");
+
+		expect(lateClaim).toEqual(["bash_background: handler already returned; claim before it returns"]);
+		const [result] = getToolResults(harness);
+		expect(result.isError).toBe(false);
+		expect(getMessageText(result)).toBe("own claim");
+	});
+
+	it("stops dispatching once the call is aborted during an earlier handler", async () => {
+		let laterHandlerCalls = 0;
+		let signalAborted: boolean | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("bash_background", async (event, ctx) => {
+						await new Promise((resolve) => setTimeout(resolve, 5));
+						ctx.abort();
+						signalAborted = event.signal.aborted;
+					});
+				},
+				(pi) => {
+					pi.on("bash_background", (event) => {
+						laterHandlerCalls++;
+						event.claim({ content: [{ type: "text", text: "should not start" }] });
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("bash", { command: "echo hi", run_in_background: true })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("start it");
+
+		expect(signalAborted).toBe(true);
+		expect(laterHandlerCalls).toBe(0);
+		const [result] = getToolResults(harness);
+		expect(result.isError).toBe(true);
+		expect(getMessageText(result)).toBe("Command aborted");
+	});
+
 	it("runs foreground calls without emitting bash_background", async () => {
 		let emitted = 0;
 		const harness = await createHarness({

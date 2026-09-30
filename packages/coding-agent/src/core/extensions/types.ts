@@ -1309,10 +1309,15 @@ export interface BashBackgroundSpawn {
 
 /**
  * Offers a model-invoked `bash` call with `run_in_background: true` to extensions, before anything
- * is spawned. Handlers run in load order until one calls `claim()`; later handlers are not called.
- * The claimed result completes the tool call and core spawns nothing: the claiming extension
- * starts and owns the command. Unclaimed, the call fails ("Background execution is not
- * available"). A handler that throws fails the call with its error. `timeout` does not apply.
+ * is spawned. Handlers run in load order until one calls `claim()` or the call is aborted; later
+ * handlers are not called. The claimed result completes the tool call and core spawns nothing: the
+ * claiming extension starts and owns the command. Unclaimed, the call fails ("Background execution
+ * is not available"). A handler that throws fails the call with its error. `timeout` does not apply.
+ *
+ * Cancellation: check `signal.aborted` right before starting anything and claim in the same
+ * synchronous step. If the call is aborted by the time dispatch ends, core fails it with
+ * "Command aborted" even when it was claimed; anything the claimer already started stays its own
+ * (it no longer depends on the turn).
  */
 export interface BashBackgroundEvent {
 	type: "bash_background";
@@ -1325,11 +1330,16 @@ export interface BashBackgroundEvent {
 	notifyOn: string | undefined;
 	/** `description`: a short UI label */
 	description: string | undefined;
+	/** Abort signal of the tool call (never aborts when the call has none) */
+	signal: AbortSignal;
 	/** True once a handler has claimed the call */
 	readonly claimed: boolean;
 	/**
-	 * Complete the tool call with `result` (a normal, non-error result). Call it before the handler
-	 * returns or its promise resolves. Single-shot: a second call throws, as does a late one.
+	 * Complete the tool call with `result` (a normal, non-error result). Single-shot: a second call
+	 * throws. Lifetime: through `pi.on("bash_background")`, each handler's event claims only until
+	 * that handler returns or its promise settles; a saved event from a handler that already returned
+	 * throws. At the tool level (`BashToolOptions.onBackground`), claims close when `onBackground`
+	 * settles or throws.
 	 */
 	claim(result: BashBackgroundResult): void;
 }

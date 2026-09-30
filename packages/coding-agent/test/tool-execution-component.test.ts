@@ -238,6 +238,26 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).not.toContain("[Showing lines 2001-4000 of 4000. Full output:");
 	});
 
+	test("bash renderer tags run_in_background calls with [background] and their description", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-bg",
+			{ command: "npm run dev", run_in_background: true, timeout: 120, description: "dev server" },
+			{},
+			createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false }),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "Started shell-1 in the background." }], isError: false },
+			false,
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("$ npm run dev [background] dev server");
+		expect(rendered).not.toContain("timeout 120s");
+		expect(rendered).toContain("Started shell-1 in the background.");
+	});
+
 	// Issue #9628: keep short durations precise and make long shell durations readable.
 	test.each([
 		{ ms: 0, formatted: "0.0s" },

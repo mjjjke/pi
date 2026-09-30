@@ -1355,14 +1355,32 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Offer a background bash call to handlers in load order until one claims it. Like `tool_call`,
-	 * a handler error propagates: it fails the tool call.
+	 * Offer a background bash call to handlers in load order until one claims it or the call is
+	 * aborted. Each handler gets its own view of the event whose `claim()` works only until that
+	 * handler returns or its promise settles. Like `tool_call`, a handler error propagates: it fails
+	 * the tool call.
 	 */
 	async emitBashBackground(event: BashBackgroundEvent): Promise<void> {
 		const ctx = this.createContext("bash_background");
 		for (const { handlers } of snapshotEventHandlers(this.extensions, "bash_background")) {
 			for (const handler of handlers) {
-				await handler(event, ctx);
+				if (event.signal.aborted) return;
+				let open = true;
+				const scoped: BashBackgroundEvent = {
+					...event,
+					get claimed() {
+						return event.claimed;
+					},
+					claim: (result) => {
+						if (!open) throw new Error("bash_background: handler already returned; claim before it returns");
+						event.claim(result);
+					},
+				};
+				try {
+					await handler(scoped, ctx);
+				} finally {
+					open = false;
+				}
 				if (event.claimed) return;
 			}
 		}

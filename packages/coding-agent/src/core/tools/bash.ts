@@ -497,29 +497,50 @@ export function createShellToolDefinition(
 				ctx,
 			);
 			if (background) {
+				const localShell = resolveLocalShell?.();
+				// Only the bash config emits: other shell tools share the schema but not the executor contract.
+				const handler = config.name === "bash" ? onBackground : undefined;
 				if (signal?.aborted) throw new Error("Command aborted");
+				if (localShell) {
+					// Same check and error as the local foreground path, before anything is offered.
+					try {
+						await fsAccess(spawnContext.cwd, constants.F_OK);
+					} catch {
+						throw new Error(
+							`Working directory does not exist: ${spawnContext.cwd}\nCannot execute ${config.shellName} commands.`,
+						);
+					}
+				}
 				let claimed: BashBackgroundResult | undefined;
 				let settled = false;
-				if (onBackground) {
-					await onBackground({
-						type: "bash_background",
-						toolCallId,
-						toolName: "bash",
-						command,
-						spawn: { ...spawnContext, shell: resolveLocalShell?.() },
-						notifyOn,
-						description: typeof params.description === "string" ? params.description : undefined,
-						get claimed() {
-							return claimed !== undefined;
-						},
-						claim: (result) => {
-							if (claimed) throw new Error("bash_background: call already claimed");
-							if (settled) throw new Error("bash_background: handlers already settled; claim before returning");
-							claimed = { content: [...result.content], details: result.details };
-						},
-					});
+				try {
+					if (handler) {
+						await handler({
+							type: "bash_background",
+							toolCallId,
+							toolName: "bash",
+							command,
+							spawn: { ...spawnContext, shell: localShell },
+							notifyOn,
+							description: typeof params.description === "string" ? params.description : undefined,
+							signal: signal ?? new AbortController().signal,
+							get claimed() {
+								return claimed !== undefined;
+							},
+							claim: (result) => {
+								if (claimed) throw new Error("bash_background: call already claimed");
+								if (settled) {
+									throw new Error("bash_background: handlers already settled; claim before returning");
+								}
+								claimed = { content: [...result.content], details: result.details };
+							},
+						});
+					}
+				} finally {
+					settled = true;
 				}
-				settled = true;
+				// A claim made after the call was aborted is not returned as a normal result.
+				if (signal?.aborted) throw new Error("Command aborted");
 				if (!claimed) {
 					throw new Error(
 						"Background execution is not available: nothing handles run_in_background here. Run the command without run_in_background.",
