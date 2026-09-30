@@ -49,6 +49,9 @@ export type StreamFn = (
  */
 export type ToolExecutionMode = "sequential" | "parallel" | "exclusive";
 
+/** Batch-wide execution mode for `toolExecution` config; `"exclusive"` is per-tool only. */
+export type BatchToolExecutionMode = Exclude<ToolExecutionMode, "exclusive">;
+
 /**
  * Controls how many queued user messages are injected when the agent loop reaches a queue drain point.
  *
@@ -329,7 +332,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Default: "parallel"
 	 */
-	toolExecution?: ToolExecutionMode;
+	toolExecution?: BatchToolExecutionMode;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.

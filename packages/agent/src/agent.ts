@@ -23,6 +23,7 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	BatchToolExecutionMode,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	FinishTurn,
@@ -30,7 +31,6 @@ import type {
 	PrepareRequest,
 	QueueMode,
 	StreamFn,
-	ToolExecutionMode,
 } from "./types.ts";
 
 export type { QueueMode } from "./types.ts";
@@ -139,7 +139,7 @@ export interface AgentOptions {
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	maxRetryDelayMs?: number;
-	toolExecution?: ToolExecutionMode;
+	toolExecution?: BatchToolExecutionMode;
 }
 
 class PendingMessageQueue {
@@ -241,7 +241,7 @@ export class Agent {
 	/** Optional cap for provider-requested retry delays. */
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
-	public toolExecution: ToolExecutionMode;
+	public toolExecution: BatchToolExecutionMode;
 
 	constructor(options: AgentOptions) {
 		// Older compiled consumers may omit options or streamFn even though the current API requires them.
