@@ -14,6 +14,8 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type {
+	BashBackgroundEvent,
+	BashBackgroundResult,
 	BashHandover,
 	BashHandoverResult,
 	BashTimeoutEvent,
@@ -46,6 +48,19 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	run_in_background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Start the command in the background and return at once instead of waiting for its output (default false). Fails when background execution is not available. timeout does not apply.",
+		}),
+	),
+	notify_on: Type.Optional(
+		Type.String({
+			description:
+				"Only with run_in_background: JavaScript regular expression source (no flags); matching output lines are reported while the command runs",
+		}),
+	),
+	description: Type.Optional(Type.String({ description: "Short label for the command, shown in the UI" })),
 });
 
 export const bashToolSystemPromptContribution = {
@@ -418,6 +433,13 @@ export interface BashToolOptions {
 	 * that unregisters the call; it is called when the execution ends.
 	 */
 	registerHandover?: (toolCallId: string, request: () => Promise<boolean>) => () => void;
+	/**
+	 * Called for a call with `run_in_background: true`, before anything is spawned. A handler that
+	 * calls `event.claim(result)` starts the command itself (with `event.spawn`, what a foreground
+	 * call would run); the call returns that result and core spawns nothing. Without a claim, or
+	 * without this option, the call fails. A throw fails the call with that error.
+	 */
+	onBackground?: (event: BashBackgroundEvent) => Promise<void> | void;
 }
 
 export type BashRenderState = {
@@ -447,6 +469,9 @@ export function createShellToolDefinition(
 	const spawnHook = options?.spawnHook;
 	const onTimeout = options?.onTimeout;
 	const registerHandover = options?.registerHandover;
+	const onBackground = options?.onBackground;
+	// Custom operations may run commands elsewhere (e.g. SSH): a local shell would not match them.
+	const resolveLocalShell = options?.operations ? undefined : () => getShellConfig(options?.shellPath);
 	return {
 		name: config.name,
 		label: config.label,
@@ -456,13 +481,13 @@ export function createShellToolDefinition(
 		parameters: bashSchema,
 		outputSchema: bashOutputSchema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
-		async execute(
-			toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
-			signal?: AbortSignal,
-			onUpdate?,
-			ctx?: ExtensionContext,
-		) {
+		async execute(toolCallId, params: BashToolInput, signal?: AbortSignal, onUpdate?, ctx?: ExtensionContext) {
+			const { command, timeout } = params;
+			const background = params.run_in_background === true;
+			const notifyOn = typeof params.notify_on === "string" ? params.notify_on : undefined;
+			if (!background && notifyOn !== undefined) {
+				throw new Error("notify_on requires run_in_background: true");
+			}
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(
 				resolvedCommand,
@@ -471,6 +496,37 @@ export function createShellToolDefinition(
 				exposeSessionEnvironment,
 				ctx,
 			);
+			if (background) {
+				if (signal?.aborted) throw new Error("Command aborted");
+				let claimed: BashBackgroundResult | undefined;
+				let settled = false;
+				if (onBackground) {
+					await onBackground({
+						type: "bash_background",
+						toolCallId,
+						toolName: "bash",
+						command,
+						spawn: { ...spawnContext, shell: resolveLocalShell?.() },
+						notifyOn,
+						description: typeof params.description === "string" ? params.description : undefined,
+						get claimed() {
+							return claimed !== undefined;
+						},
+						claim: (result) => {
+							if (claimed) throw new Error("bash_background: call already claimed");
+							if (settled) throw new Error("bash_background: handlers already settled; claim before returning");
+							claimed = { content: [...result.content], details: result.details };
+						},
+					});
+				}
+				settled = true;
+				if (!claimed) {
+					throw new Error(
+						"Background execution is not available: nothing handles run_in_background here. Run the command without run_in_background.",
+					);
+				}
+				return { content: claimed.content, details: claimed.details };
+			}
 			const output = new OutputAccumulator({ tempFilePrefix: config.tempFilePrefix });
 			let acceptingOutput = true;
 			let updateTimer: NodeJS.Timeout | undefined;

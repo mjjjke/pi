@@ -58,6 +58,7 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { ShellConfig } from "../../utils/shell.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
@@ -1281,6 +1282,59 @@ export interface RequestBashHandoverOptions {
 }
 
 // ============================================================================
+// Bash Background Events
+// ============================================================================
+
+/** Result that completes a `run_in_background` bash call. */
+export interface BashBackgroundResult {
+	content: (TextContent | ImageContent)[];
+	details?: BashToolDetails;
+}
+
+/** What a foreground call with the same arguments would spawn. */
+export interface BashBackgroundSpawn {
+	/** Command with the configured command prefix, after the spawn hook */
+	command: string;
+	/** Working directory, after the spawn hook */
+	cwd: string;
+	/** Environment with the session variables (`PI_SESSION_ID`, ...), after the spawn hook */
+	env: NodeJS.ProcessEnv;
+	/**
+	 * Shell executable, arguments and command transport (`[...args, command]`, or `args` with the
+	 * command on stdin). Undefined when custom `BashOperations` run commands (e.g. remotely), where a
+	 * local spawn would not match a foreground call.
+	 */
+	shell: ShellConfig | undefined;
+}
+
+/**
+ * Offers a model-invoked `bash` call with `run_in_background: true` to extensions, before anything
+ * is spawned. Handlers run in load order until one calls `claim()`; later handlers are not called.
+ * The claimed result completes the tool call and core spawns nothing: the claiming extension
+ * starts and owns the command. Unclaimed, the call fails ("Background execution is not
+ * available"). A handler that throws fails the call with its error. `timeout` does not apply.
+ */
+export interface BashBackgroundEvent {
+	type: "bash_background";
+	toolCallId: string;
+	toolName: "bash";
+	/** Command as the model wrote it, without the configured command prefix */
+	command: string;
+	spawn: BashBackgroundSpawn;
+	/** `notify_on` as the model wrote it (a JavaScript regular expression source, not validated by core) */
+	notifyOn: string | undefined;
+	/** `description`: a short UI label */
+	description: string | undefined;
+	/** True once a handler has claimed the call */
+	readonly claimed: boolean;
+	/**
+	 * Complete the tool call with `result` (a normal, non-error result). Call it before the handler
+	 * returns or its promise resolves. Single-shot: a second call throws, as does a late one.
+	 */
+	claim(result: BashBackgroundResult): void;
+}
+
+// ============================================================================
 // Input Events
 // ============================================================================
 
@@ -1553,6 +1607,7 @@ export type ExtensionEvent =
 	| ThinkingLevelSelectEvent
 	| UserBashEvent
 	| BashTimeoutEvent
+	| BashBackgroundEvent
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent;
@@ -1811,6 +1866,7 @@ export interface ExtensionAPI {
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): () => void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): () => void;
 	on(event: "bash_timeout", handler: ExtensionHandler<BashTimeoutEvent>): () => void;
+	on(event: "bash_background", handler: ExtensionHandler<BashBackgroundEvent>): () => void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): () => void;
 
 	// =========================================================================

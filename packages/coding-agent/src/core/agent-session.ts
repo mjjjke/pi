@@ -3955,6 +3955,11 @@ export class AgentSession {
 							return runner.emit(event);
 						},
 						registerHandover: (toolCallId, request) => this._registerBashHandover(toolCallId, request),
+						onBackground: (event) => {
+							const runner = this._extensionRunner;
+							if (!runner?.hasHandlers("bash_background")) return;
+							return runner.emitBashBackground(event);
+						},
 					},
 				});
 

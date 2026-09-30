@@ -34,6 +34,7 @@ import {
 import type {
 	AgentBeforeSettleEvent,
 	AssistantMessageDisplayPhase,
+	BashBackgroundEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderHeadersEvent,
@@ -190,6 +191,7 @@ type RunnerEmitEvent = Exclude<
 	| ProjectTrustEvent
 	| ToolResultEvent
 	| UserBashEvent
+	| BashBackgroundEvent
 	| ContextEvent
 	| ContextWithSystemEvent
 	| CacheWarmingDecisionEvent
@@ -1350,6 +1352,20 @@ export class ExtensionRunner {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Offer a background bash call to handlers in load order until one claims it. Like `tool_call`,
+	 * a handler error propagates: it fails the tool call.
+	 */
+	async emitBashBackground(event: BashBackgroundEvent): Promise<void> {
+		const ctx = this.createContext("bash_background");
+		for (const { handlers } of snapshotEventHandlers(this.extensions, "bash_background")) {
+			for (const handler of handlers) {
+				await handler(event, ctx);
+				if (event.claimed) return;
+			}
+		}
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {

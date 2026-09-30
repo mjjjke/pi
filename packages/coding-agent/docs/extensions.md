@@ -180,6 +180,30 @@ pi.on("bash_timeout", (event) => {
 });
 ```
 
+<a id="bash_background"></a>
+
+This fork adds `bash_background`. The built-in `bash` tool declares three optional parameters: `run_in_background` (boolean), `notify_on` (a JavaScript regular expression source) and `description` (a short UI label). A model-invoked call with `run_in_background: true` emits `bash_background` before anything is spawned. Core has no background executor of its own: an extension provides one by claiming the event.
+
+- The event carries `toolCallId`, `command` (as the model wrote it, without the configured command prefix), `notifyOn`, `description`, `claimed`, and `spawn`: what a foreground call with the same arguments would spawn. `spawn.command` includes the command prefix; `spawn.cwd` and `spawn.env` include the session variables (`PI_SESSION_ID`, ...); all three are taken after the configured spawn hook. `spawn.shell` is the shell config (`shell`, `args`, `commandTransport`) of the local backend, including the `shellPath` setting. Spawn `shell` with `[...args, spawn.command]`, or with `args` and the command on stdin when `commandTransport` is `"stdin"`, and the command sees the same shell, cwd and environment as a foreground call. `spawn.shell` is `undefined` when custom `BashOperations` run commands (for example over SSH), where a local spawn would not match.
+- `event.claim({ content, details? })` completes the tool call with that normal result; core spawns nothing and the extension owns the command. Handlers run in load order and the first claim ends the dispatch. Claim before the handler returns or its promise resolves; a second or late claim throws.
+- Unclaimed (no handler, or every handler returned without claiming), the call fails with `Background execution is not available: ...` and nothing is spawned. A handler that throws fails the call with its error message (for example an invalid `notify_on`), like a `tool_call` handler, and later handlers are not called.
+- `timeout` does not apply to a background call and is not passed on. `notify_on` without `run_in_background` fails the call before spawning; core does not validate its syntax. `description` is shown in the call row and has no other effect. Foreground calls are unchanged and never emit the event.
+- `powershell` shares the schema but never emits the event: `run_in_background` fails there with the same error. `!` user commands are not covered.
+
+```typescript
+pi.on("bash_background", (event) => {
+  const shell = event.spawn.shell;
+  if (!shell) return; // custom operations: decline, the call fails
+  const child = spawn(shell.shell, [...shell.args, event.spawn.command], {
+    cwd: event.spawn.cwd,
+    env: event.spawn.env,
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  event.claim({ content: [{ type: "text", text: `Started pid ${child.pid} in the background.` }] });
+});
+```
+
 <a id="custom-tools"></a>
 <a id="register-tools"></a>
 
