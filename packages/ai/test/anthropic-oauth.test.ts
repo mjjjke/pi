@@ -130,7 +130,14 @@ describe.sequential("Anthropic OAuth", () => {
 
 		expect(credentials.access).toBe("access-token");
 		expect(credentials.refresh).toBe("refresh-token");
-		expect(new URL(authUrl).searchParams.get("redirect_uri")).toBe("https://platform.claude.com/oauth/code/callback");
+		const url = new URL(authUrl);
+		expect(`${url.origin}${url.pathname}`).toBe("https://claude.com/cai/oauth/authorize");
+		const scopes = url.searchParams.get("scope")?.split(" ");
+		expect(scopes).toEqual(SUBSCRIPTION_SCOPES);
+		expect(scopes).not.toContain("org:create_api_key");
+		expect(scopes).not.toContain("user:session");
+		expect(scopes).not.toContain("user:session:claude_code");
+		expect(url.searchParams.get("redirect_uri")).toBe("https://platform.claude.com/oauth/code/callback");
 		expect(fetchMock).toHaveBeenCalledOnce();
 		expect(selectPrompts).toEqual([
 			{

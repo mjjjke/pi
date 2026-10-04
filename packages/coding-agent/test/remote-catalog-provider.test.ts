@@ -279,6 +279,37 @@ describe("remote catalog provider", () => {
 		expect((await store.read(provider.id))?.models.map((entry) => entry.id)).toEqual(["newer"]);
 	});
 
+	it.each(["baseline", "dynamic", "both"] as const)(
+		"keeps last-wins semantics for duplicates within the %s catalog",
+		async (source) => {
+			const first: Model<"openai-completions"> = {
+				...model("shared"),
+				inputLimits: { images: { resize: { maxWidth: 2000 } } },
+				capabilities: { progressUpdates: true },
+			};
+			const last = { ...model("shared"), name: "last", contextWindow: 2000 };
+			const baseline: Model<"openai-completions"> = {
+				...model("shared"),
+				capabilities: { midConversationInstructionMessages: true },
+			};
+			const baseProvider = testProvider();
+			const provider = withRemoteCatalog({
+				...baseProvider,
+				getModels: () => (source === "baseline" ? [first, last] : source === "both" ? [first, baseline] : []),
+				getAllModels: () => (source === "baseline" ? [first, last] : source === "both" ? [first, baseline] : []),
+			});
+			const store = new InMemoryModelsStore();
+			if (source !== "baseline") {
+				await store.write(provider.id, { models: [first, last] });
+			}
+			await refreshProvider(provider, store, { allowNetwork: false });
+
+			const expected = source === "both" ? { ...last, capabilities: baseline.capabilities } : last;
+			expect(provider.getModels()).toEqual([expected]);
+			expect(provider.getAllModels?.()).toEqual([expected]);
+		},
+	);
+
 	it.each([undefined, false])("preserves metadata and honors remote capability override %s", async (override) => {
 		const baseline: Model<"openai-completions"> = {
 			...model("shared"),

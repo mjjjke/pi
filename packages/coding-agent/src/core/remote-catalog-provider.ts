@@ -29,13 +29,16 @@ function isSupportedModelType(model: { type?: unknown }): boolean {
 }
 
 function mergeModels<TModel extends AnyModel>(baseline: readonly TModel[], dynamic: readonly TModel[]): TModel[] {
+	// Deduplicate each list with upstream's last-wins semantics before merging overlays.
 	const merged = new Map<string, TModel>();
-	for (const model of [...baseline, ...dynamic]) {
-		const key = `${getModelType(model)}\0${model.id}`;
+	for (const model of baseline) merged.set(`${getModelType(model)}\0${model.id}`, model);
+	const overlays = new Map<string, TModel>();
+	for (const model of dynamic) overlays.set(`${getModelType(model)}\0${model.id}`, model);
+	for (const [key, model] of overlays) {
 		const existing = merged.get(key);
 		if (existing) {
 			const capabilities = {
-				...(existing && "capabilities" in existing ? existing.capabilities : undefined),
+				...("capabilities" in existing ? existing.capabilities : undefined),
 				...("capabilities" in model ? model.capabilities : undefined),
 			};
 			merged.set(key, {
