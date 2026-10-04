@@ -957,20 +957,31 @@ describe("mid-conversation instruction messages", () => {
 				timestamp: 2,
 			},
 		];
-		const params = convertAnthropicMessagesRaw(
-			messages,
-			false,
-			{ type: "ephemeral" },
-			false,
-			undefined,
-			true,
+		const params = convertAnthropicMessagesRaw(messages, false, { type: "ephemeral" }, false, undefined, (tools) =>
+			tools.map((tool) => ({
+				name: tool.name,
+				description: tool.description,
+				input_schema: { type: "object", properties: {} },
+			})),
 		).messages;
 		expect(params[0]).toMatchObject({
 			role: "user",
 			content: [{ cache_control: { type: "ephemeral" } }],
 		});
 		expect(params[1]).toMatchObject({ role: "system", content: [{ type: "tool_addition" }] });
-		expect(params[1].content).toEqual([{ type: "tool_addition", tool: { type: "tool_reference", name: "read" } }]);
+		expect(params[1].content).toEqual([
+			{
+				type: "tool_addition",
+				tool: {
+					type: "tool_definition",
+					definition: {
+						name: "read",
+						description: "Read a file",
+						input_schema: { type: "object", properties: {} },
+					},
+				},
+			},
+		]);
 	});
 
 	it("does not move Anthropic prompt cache control to an earlier user when conversation ends with assistant", () => {

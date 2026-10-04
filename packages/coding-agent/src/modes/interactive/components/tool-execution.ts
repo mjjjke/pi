@@ -1,4 +1,3 @@
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	Box,
 	type Component,
@@ -11,30 +10,21 @@ import {
 	type TUI,
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
-import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.ts";
-import type { Theme } from "../theme/theme.ts";
+import type {
+	ToolRenderers as ResolvedToolRenderers,
+	ToolDefinition,
+	ToolRenderContext,
+} from "../../../core/extensions/types.ts";
 
-/**
- * What this component needs from a tool: how to draw it. It neither executes tools nor reads their
- * parameter schemas, so a definition and a bare renderer pair are equally acceptable.
- *
- * The renderer parameters are `any` on purpose: a `ToolDefinition` types them from its schema, and
- * narrowing them here would make those definitions unassignable. A renderer may return `undefined`
- * (for example a decorated renderer whose layers all defer) to use the fallback rendering.
- */
-export interface ToolRenderers {
-	renderShell?: "default" | "self";
-	renderCall?: (args: any, theme: Theme, context: ToolRenderContext<any, any>) => Component | undefined;
-	renderResult?: (
-		result: AgentToolResult<any>,
-		options: ToolRenderResultOptions,
-		theme: Theme,
-		context: ToolRenderContext<any, any>,
-	) => Component | undefined;
-}
+/** TUI renderers can defer to generic fallback after all decorator layers return undefined. */
+export type ToolRenderers = {
+	renderShell?: ResolvedToolRenderers["renderShell"];
+	renderCall?: (...args: Parameters<NonNullable<ResolvedToolRenderers["renderCall"]>>) => Component | undefined;
+	renderResult?: (...args: Parameters<NonNullable<ResolvedToolRenderers["renderResult"]>>) => Component | undefined;
+};
 
 import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
-import { convertToPng } from "../../../utils/image-convert.ts";
+import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
@@ -55,6 +45,8 @@ export class ToolExecutionComponent extends Container {
 	private resultRendererComponent?: Component;
 	private rendererState: any = {};
 	private imageComponents: Image[] = [];
+	/** Inputs of imageComponents, so updateDisplay can reuse images and keep their converted PNG data. */
+	private imageSources: Array<{ data: string; mimeType: string; widthCells: number }> = [];
 	private imageSpacers: Spacer[] = [];
 	private toolName: string;
 	private toolCallId: string;
@@ -73,10 +65,6 @@ export class ToolExecutionComponent extends Container {
 		isError: boolean;
 		details?: any;
 	};
-	private convertedImages: Map<
-		number,
-		{ sourceData: string; sourceMimeType: string; data: string; mimeType: string }
-	> = new Map();
 	private hideComponent = false;
 
 	constructor(
@@ -209,37 +197,6 @@ export class ToolExecutionComponent extends Container {
 		this.result = result;
 		this.isPartial = isPartial;
 		this.updateDisplay();
-		this.maybeConvertImagesForKitty();
-	}
-
-	private maybeConvertImagesForKitty(): void {
-		const caps = getCapabilities();
-		if (caps.images !== "kitty") return;
-		if (!this.result) return;
-
-		const imageBlocks = this.result.content.filter((c) => c.type === "image");
-		for (let i = 0; i < imageBlocks.length; i++) {
-			const img = imageBlocks[i];
-			if (!img.data || !img.mimeType) continue;
-			const sourceData = img.data;
-			const sourceMimeType = img.mimeType;
-			if (sourceMimeType === "image/png") continue;
-			const cached = this.convertedImages.get(i);
-			if (cached?.sourceData === sourceData && cached.sourceMimeType === sourceMimeType) continue;
-
-			const index = i;
-			convertToPng(sourceData, sourceMimeType).then((converted) => {
-				const currentImage = this.result?.content.filter((content) => content.type === "image")[index];
-				if (!converted || currentImage?.data !== sourceData || currentImage.mimeType !== sourceMimeType) return;
-				this.convertedImages.set(index, {
-					sourceData,
-					sourceMimeType,
-					...converted,
-				});
-				this.updateDisplay();
-				this.ui.requestRender();
-			});
-		}
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -376,10 +333,13 @@ export class ToolExecutionComponent extends Container {
 			hasContent = true;
 		}
 
+		const previousImages = this.imageComponents;
+		const previousSources = this.imageSources;
 		for (const img of this.imageComponents) {
 			this.removeChild(img);
 		}
 		this.imageComponents = [];
+		this.imageSources = [];
 		for (const spacer of this.imageSpacers) {
 			this.removeChild(spacer);
 		}
@@ -388,26 +348,33 @@ export class ToolExecutionComponent extends Container {
 		if (this.result) {
 			const imageBlocks = this.result.content.filter((c) => c.type === "image");
 			const caps = getCapabilities();
-			for (let i = 0; i < imageBlocks.length; i++) {
-				const img = imageBlocks[i];
+			for (const img of imageBlocks) {
 				if (caps.images && this.showImages && img.data && img.mimeType) {
-					const cached = this.convertedImages.get(i);
-					const converted =
-						cached?.sourceData === img.data && cached.sourceMimeType === img.mimeType ? cached : undefined;
-					const imageData = converted?.data ?? img.data;
-					const imageMimeType = converted?.mimeType ?? img.mimeType;
-					if (caps.images === "kitty" && imageMimeType !== "image/png") continue;
-
 					const spacer = new Spacer(1);
 					this.addChild(spacer);
 					this.imageSpacers.push(spacer);
-					const imageComponent = new Image(
-						imageData,
-						imageMimeType,
-						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ maxWidthCells: this.imageWidthCells },
-					);
+					const source = { data: img.data, mimeType: img.mimeType, widthCells: this.imageWidthCells };
+					const index = this.imageComponents.length;
+					const previous = previousSources[index];
+					const imageComponent =
+						previous?.data === source.data &&
+						previous.mimeType === source.mimeType &&
+						previous.widthCells === source.widthCells
+							? previousImages[index]
+							: new Image(
+									source.data,
+									source.mimeType,
+									{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
+									{ maxWidthCells: source.widthCells },
+								);
+					if (source.mimeType !== "image/png") {
+						ensurePngTranscoder(() => {
+							this.invalidate();
+							this.ui.requestRender();
+						});
+					}
 					this.imageComponents.push(imageComponent);
+					this.imageSources.push(source);
 					this.addChild(imageComponent);
 				}
 			}

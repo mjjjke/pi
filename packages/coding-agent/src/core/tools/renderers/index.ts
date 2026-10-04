@@ -6,7 +6,7 @@
  * graph out of a process that only renders.
  */
 
-import type { ToolDefinition } from "../../extensions/types.ts";
+import type { ToolRenderers } from "../../extensions/types.ts";
 import type { ToolName } from "../index.ts";
 import { createShellRenderers } from "./bash.ts";
 import { composeToolRenderers, decorateToolRenderers } from "./compose.ts";
@@ -17,7 +17,7 @@ import { lsRenderers } from "./ls.ts";
 import { readRenderers } from "./read.ts";
 import { writeRenderers } from "./write.ts";
 
-export type ToolRenderers = Pick<ToolDefinition<any, any>, "renderCall" | "renderResult">;
+export type { ToolRenderers };
 
 export type { ToolRendererErrorHandler } from "./compose.ts";
 export {

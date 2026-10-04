@@ -15,7 +15,7 @@ import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
-import { type McpServerConfig, McpServerRegistry, validateMcpServerConfig } from "../mcp-servers.ts";
+import { type McpServerConfig, McpServerRegistry, mcpNamespace, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
@@ -34,6 +34,7 @@ import type {
 	RegisteredCommand,
 	ToolDefinition,
 	ToolRendererDecorator,
+	ToolRendererResolver,
 } from "./types.ts";
 
 const require = createRequire(import.meta.url);
@@ -304,6 +305,14 @@ function createExtensionAPI(
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
 			assertActive();
+			if (typeof name !== "string" || name.length === 0) {
+				throw new Error(
+					`Command registered by extension "${extension.path}" must have a non-empty string name. Use pi.registerCommand("name", { description, handler }).`,
+				);
+			}
+			if (typeof options?.handler !== "function") {
+				throw new Error(`Command "/${name}" registered by extension "${extension.path}" must define handler().`);
+			}
 			extension.commands.set(name, {
 				name,
 				sourceInfo: extension.sourceInfo,
@@ -363,15 +372,39 @@ function createExtensionAPI(
 			extension.assistantMessageDisplayTransforms.set(id, transform);
 		},
 
-		registerToolRenderer<TArgs, TDetails, TState>(
-			toolName: string,
-			renderer: ToolRendererDecorator<TArgs, TDetails, TState>,
+		registerToolRenderer(
+			...args: [
+				toolNameOrResolver: string | ToolRendererResolver,
+				renderer?: ToolRendererDecorator,
+				...extra: unknown[],
+			]
 		): void {
 			assertActive();
+			const [toolNameOrResolver, renderer] = args;
+			if (typeof toolNameOrResolver === "function" && args.length === 1) {
+				extension.toolRendererResolvers ??= [];
+				extension.toolRendererResolvers.push(toolNameOrResolver);
+				return;
+			}
+			if (
+				args.length !== 2 ||
+				typeof toolNameOrResolver !== "string" ||
+				toolNameOrResolver.trim().length === 0 ||
+				typeof renderer !== "object" ||
+				renderer === null ||
+				Array.isArray(renderer) ||
+				(renderer.renderCall !== undefined && typeof renderer.renderCall !== "function") ||
+				(renderer.renderResult !== undefined && typeof renderer.renderResult !== "function") ||
+				(renderer.renderShell !== undefined &&
+					renderer.renderShell !== "default" &&
+					renderer.renderShell !== "self")
+			) {
+				throw new Error("registerToolRenderer expects (resolver) or (non-empty toolName, decorator).");
+			}
 			extension.toolRenderers ??= new Map();
-			const renderers = extension.toolRenderers.get(toolName) ?? [];
-			renderers.push(renderer as ToolRendererDecorator);
-			extension.toolRenderers.set(toolName, renderers);
+			const renderers = extension.toolRenderers.get(toolNameOrResolver) ?? [];
+			renderers.push(renderer);
+			extension.toolRenderers.set(toolNameOrResolver, renderers);
 		},
 
 		// Flag access - checks extension registered it, reads from runtime
@@ -492,6 +525,11 @@ function createExtensionAPI(
 			if (owner !== undefined && owner !== extension.path) {
 				throw new Error(`MCP server "${name}" is already registered by extension "${owner}"`);
 			}
+			// Names that differ only in `-` and `_` would share a namespace.
+			const clash = runtime.mcpServers
+				.list()
+				.find((server) => server.name !== name && mcpNamespace(server.name) === mcpNamespace(name));
+			if (clash) throw new Error(`MCP server "${name}" conflicts with registered server "${clash.name}"`);
 			const server = { name, config: structuredClone(validated), extensionPath: extension.path };
 			applyRuntimeChange(() => runtime.mcpServers.register(server));
 		},

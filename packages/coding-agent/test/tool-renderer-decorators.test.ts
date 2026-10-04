@@ -98,6 +98,80 @@ describe("tool renderer decorators", () => {
 		return new ExtensionRunner(extensions, runtime, tempDir, sessionManager, modelRegistry);
 	}
 
+	test("wraps resolver-provided renderers for an unregistered tool with isolated decorator state", async () => {
+		const baseStates: object[] = [];
+		const decoratorStates: object[] = [];
+		const baseRenders = vi.fn((_args, _theme, context) => {
+			baseStates.push(context.state);
+			return context.lastComponent ?? new Text("resolver call", 0, 0);
+		});
+		const runner = await createRunner((pi) => {
+			pi.registerToolRenderer((name, next) =>
+				name === "mcp_remote" ? { renderShell: "self", renderCall: baseRenders } : next(),
+			);
+			pi.registerToolRenderer<unknown, unknown, { calls?: number }>("mcp_remote", {
+				renderShell: "default",
+				renderCall: (_args, _theme, context, base) => {
+					context.state.calls = (context.state.calls ?? 0) + 1;
+					decoratorStates.push(context.state);
+					const inner = base();
+					expect(base()).toBe(inner);
+					const wrapper = new Container();
+					wrapper.addChild(new Text("decorator", 0, 0));
+					if (inner) wrapper.addChild(inner);
+					return wrapper;
+				},
+			});
+		});
+		const resolved = runner.resolveToolRenderers("mcp_remote", () => undefined);
+		const decorated = decorateToolRenderers("mcp_remote", resolved, runner);
+		expect(decorated?.renderShell).toBe("default");
+		const row = createRow("mcp_remote", {}, decorated);
+		row.updateArgs({ value: 1 });
+		expect(renderText(row)).toContain("decorator");
+		expect(renderText(row)).toContain("resolver call");
+		expect(baseRenders).toHaveBeenCalledTimes(2);
+		expect(baseStates[0]).toBe(baseStates[1]);
+		expect(decoratorStates[0]).toBe(decoratorStates[1]);
+		expect(baseStates[0]).not.toBe(decoratorStates[0]);
+	});
+
+	test("leaves resolver-only calls unchanged and excludes decorators from export resolution", async () => {
+		const renderers = { renderShell: "self" as const, renderCall: () => new Text("resolved", 0, 0) };
+		const runner = await createRunner((pi) => {
+			pi.registerToolRenderer((_name, next) => next() ?? renderers);
+			pi.registerToolRenderer("other", { renderCall: () => new Text("decorated", 0, 0) });
+		});
+		const resolved = runner.resolveToolRenderers("remote", () => undefined);
+		expect(resolved).toBe(renderers);
+		expect(decorateToolRenderers("remote", resolved, runner)).toBe(renderers);
+		// HTML export uses resolveToolRenderers directly, not decorateToolRenderers.
+		expect(runner.resolveToolRenderers("other", () => undefined)).toBe(renderers);
+	});
+
+	test("rejects invalid overload argument shapes without registering them", async () => {
+		await createRunner((pi) => {
+			const register = pi.registerToolRenderer as (...args: unknown[]) => void;
+			for (const args of [
+				[],
+				[null],
+				[{}],
+				["bash"],
+				["", {}],
+				["bash", null],
+				["bash", []],
+				["bash", () => {}],
+				[() => undefined, {}],
+				["bash", {}, "extra"],
+				["bash", { renderCall: "invalid" }],
+				["bash", { renderResult: 1 }],
+				["bash", { renderShell: "invalid" }],
+			]) {
+				expect(() => register(...args)).toThrow("registerToolRenderer");
+			}
+		});
+	});
+
 	test("returns the definition unchanged when there are no decorators", async () => {
 		const definition = createBaseToolDefinition();
 		expect(composeToolRenderers(definition, [], noError)).toBe(definition);

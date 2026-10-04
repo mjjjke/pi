@@ -29,25 +29,25 @@ function isSupportedModelType(model: { type?: unknown }): boolean {
 }
 
 function mergeModels<TModel extends AnyModel>(baseline: readonly TModel[], dynamic: readonly TModel[]): TModel[] {
-	const merged = [...baseline];
-	for (const model of dynamic) {
-		const index = merged.findIndex((entry) => getModelType(entry) === getModelType(model) && entry.id === model.id);
-		if (index >= 0) {
-			const existing = merged[index];
+	const merged = new Map<string, TModel>();
+	for (const model of [...baseline, ...dynamic]) {
+		const key = `${getModelType(model)}\0${model.id}`;
+		const existing = merged.get(key);
+		if (existing) {
 			const capabilities = {
 				...(existing && "capabilities" in existing ? existing.capabilities : undefined),
 				...("capabilities" in model ? model.capabilities : undefined),
 			};
-			merged[index] = {
+			merged.set(key, {
 				...existing,
 				...model,
 				...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
-			};
+			});
 		} else {
-			merged.push(model);
+			merged.set(key, model);
 		}
 	}
-	return merged;
+	return [...merged.values()];
 }
 
 function parseCatalog(providerId: string, value: unknown): AnyModel[] {
