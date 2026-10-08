@@ -1,7 +1,6 @@
 import {
 	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
+	createAssistantMessageEventStream,
 	type Message,
 	type Model,
 } from "@earendil-works/pi-ai";
@@ -9,19 +8,6 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { runAgentLoop } from "../src/agent-loop.ts";
 import type { AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
-
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 function createModel(): Model<"openai-responses"> {
 	return {
@@ -120,7 +106,7 @@ describe("exclusive tool execution", () => {
 			options.signal,
 			() => {
 				requests++;
-				const response = new MockAssistantStream();
+				const response = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					const message =
 						requests === 1

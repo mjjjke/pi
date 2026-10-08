@@ -106,7 +106,6 @@ type Request = {
 	readonly pollAt?: number;
 };
 
-const PARTIAL_THROTTLE_MS = 100;
 const DEFAULT_POLL_AFTER_MS = 5000;
 
 /**
@@ -193,7 +192,7 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 			}, context);
 			const model = runtime.models.getModel(ref.provider, ref.modelId);
 			if (model === undefined) return failNoModel(runtime, ref, context);
-			const view = await runtime.context(conversationId, context, cutoff);
+			const view = await runtime.context(conversationId, context, { at: cutoff });
 			let messages = view.messages;
 			await runtime.hooks.each("beforeRequest", async (hook) => {
 				const replaced = await hook({ messages }, runtime, context);
@@ -358,8 +357,9 @@ export async function convertPartial(tx: Tx, live: Draft<LiveState>, conversatio
 }
 
 /**
- * Stream one request and return the terminal message. Partials commit as trailing writes at most every 100 ms with one
- * commit in flight; `finally` stops the throttle and awaits that commit, so no stale partial lands after the outcome.
+ * Stream one request and return the terminal message. Partials commit as trailing writes at most every
+ * `progress.partialIntervalMs` (default 100 ms) with one commit in flight; `finally` stops the throttle and awaits that
+ * commit, so no stale partial lands after the outcome.
  */
 async function streamResponse(
 	runtime: Runtime,
@@ -369,6 +369,7 @@ async function streamResponse(
 	attempt: number,
 	context: Context,
 ): Promise<AssistantMessage> {
+	const interval = runtime.settings.progress.partialIntervalMs;
 	let pending: AssistantMessage | undefined;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let inFlight: Promise<void> | undefined;
@@ -394,7 +395,7 @@ async function streamResponse(
 			})
 			.finally(() => {
 				inFlight = undefined;
-				if (pending !== undefined && !stopped) timer = setTimeout(flush, PARTIAL_THROTTLE_MS);
+				if (pending !== undefined && !stopped) timer = setTimeout(flush, interval);
 			});
 	};
 	try {
@@ -404,7 +405,7 @@ async function streamResponse(
 			// never gets past it, so it never leaves a partial.
 			if (event.type === "done" || event.type === "error" || event.partial.content.length === 0) continue;
 			pending = event.partial;
-			if (timer === undefined && inFlight === undefined) timer = setTimeout(flush, PARTIAL_THROTTLE_MS);
+			if (timer === undefined && inFlight === undefined) timer = setTimeout(flush, interval);
 		}
 		return await events.result();
 	} finally {
@@ -459,7 +460,7 @@ async function classify(
 	const overflow = message.stopReason === "error" && isContextOverflow(message);
 	if (overflow && compacted === undefined && settings.compaction.enabled) {
 		const policy = settings.compaction;
-		const view = await runtime.context(conversationId, context, cutoff);
+		const view = await runtime.context(conversationId, context, { at: cutoff });
 		if (selectCut(view, policy.keepRecentTokens) !== undefined) {
 			const text = message.errorMessage ?? "Context overflow";
 			await runtime.commit(async (tx): Promise<Next> => {
@@ -549,7 +550,8 @@ async function startToolRound(
 	context: Context,
 ): Promise<void> {
 	const conversationId = runtime.conversationId;
-	const messages = request.messages ?? (await runtime.context(conversationId, context, request.cutoff)).messages;
+	const messages =
+		request.messages ?? (await runtime.context(conversationId, context, { at: request.cutoff })).messages;
 	const offered = new Set(getCurrentTools(messages).map((tool) => tool.name));
 	// Read as the round starts; a tool is resolved as its tool task resolves it.
 	const tools = (await runtime.agent(context)).tools;

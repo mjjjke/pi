@@ -222,7 +222,9 @@ const harness = await Harness.open(storage, {
 		stream: { timeoutMs: 120_000 },
 		retry: { maxRetries: 3 },
 		compaction: { reserveTokens: 16384 },
+		progress: { partialIntervalMs: 100, outputIntervalMs: 100 },
 		toolExecution: "parallel",
+		contextRetentionMs: 600_000, // idle conversations keep their context in memory this long (checked lazily where timers cannot be unreferenced)
 		get followUpMode() {
 			return userSettings.followUpMode;
 		},
@@ -245,6 +247,19 @@ const harness = await Harness.open(storage, {
 ```
 
 A throw from `env` becomes the call's error result. Without an environment, the built-in tools fail with an error result. A fresh environment object per call is fine: `edit` and `write` serialize changes to one file by the environment's `id` and path. A custom `ExecutionEnv` sets `id` so that equal ids see the same files at the same paths, for example one id per container.
+
+Hosts can use the environment directly too, for example to show a project's files. `openBinaryReader()` reads byte ranges of one opened file, `openDirReader()` pages a directory, and `exec()` with an argv array runs a program without a shell, reporting which stream each output chunk came from:
+
+```typescript
+const status = { stdout: "", stderr: "" };
+await env.exec(["git", "status", "--porcelain=v2", "-z"], {
+	onOutput: (text, _context, { stream }) => {
+		status[stream] += text;
+	},
+}, context);
+```
+
+Abort the context to stop one call; `cleanup()` is for shutting the environment down. A custom environment can check itself with `registerEnvConformance()` from `@earendil-works/pi-durable/testing`, like storage below.
 
 ## Reload
 
@@ -286,7 +301,7 @@ watch.start(async (value, ops) => {
 
 A slow watch keeps at most 100 undelivered frames. After that, the pending frames are replaced by one frame holding the whole newest view. A client that joins late or reconnects starts from the current view; nothing is replayed.
 
-Partial answers and tool output are committed at most every 100 ms, so a crash loses at most that window.
+Partial answers and tool output are committed at most every 100 ms by default, so a crash loses at most that window. `settings.progress` changes the intervals; a host whose storage is remote can commit less often, for example `{ partialIntervalMs: 500, outputIntervalMs: 500 }`.
 
 ## Busy Conversations
 
@@ -525,6 +540,7 @@ const usage = await harness.usage(context); // { models: { "openai/gpt-6-sol": U
 | Memory | `MemoryStorage` from the package root | Nothing is persisted. |
 | SQLite | `openNodeSqliteStorage(file)` from `@earendil-works/pi-durable/storage/sqlite/node` | One database file. WAL mode with `synchronous = NORMAL`: commits survive process crashes; the newest may be lost on power or host failure. |
 | JSONL | `openNodeJsonlStorage(directory, context)` from `@earendil-works/pi-durable/storage/jsonl/node` | Append-only files in one directory. Pass `{ fsync: true }` to flush before each commit marker. |
+| Cloudflare Durable Object | `openDurableObjectSqliteStorage(ctx.storage)` from `@earendil-works/pi-durable/storage/sqlite/cloudflare` | The SQLite storage of one SQLite-backed Durable Object; commits are its storage transactions. |
 
 One process owns a storage at a time; there is no cross-process locking. The portable SQLite and JSONL cores (`/storage/sqlite`, `/storage/jsonl`) run without Node APIs, for example on Bun or in Cloudflare Durable Objects, given an asynchronous `SqliteDatabase` facade or a `FileSystem` from `@earendil-works/pi-durable/env`.
 

@@ -5,9 +5,9 @@ This repository is the local Pi installation. `main` is the stable integration b
 ## Upstream base
 
 - Repository: [earendil-works/pi](https://github.com/earendil-works/pi)
-- Published stable release: [v1.0.2](https://github.com/earendil-works/pi/releases/tag/v1.0.2)
-- Commit: `cd32f7725fdbddbaecdff5b1e68491563394e0ca`
-- Release publication: `2026-10-04T00:56:36Z`; GitHub publication flags and the upstream tag were verified on 2026-10-04.
+- Published stable release: [v1.1.0](https://github.com/earendil-works/pi/releases/tag/v1.1.0)
+- Commit: `abe508e1b89912adde45528136c3221eb69acdd7`
+- Release publication: `2026-10-07T22:26:31Z`; GitHub publication flags (not draft, not prerelease), the upstream tag and `upstream/stable` were verified on 2026-10-07.
 
 Keep this base accurate; update it in the merge commit that integrates a new release.
 

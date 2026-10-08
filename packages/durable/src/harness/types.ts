@@ -14,7 +14,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
-import type { ExecutionEnv } from "../env/index.ts";
+import type { ExecutionEnv, ShellOutputSkip, ShellOutputWindow } from "../env/index.ts";
 import type {
 	ConversationId,
 	ConversationOwnership,
@@ -171,10 +171,21 @@ export interface ToolExecutionApi<TDetails extends JsonValue = JsonValue> extend
 	readonly registry: RegistrySnapshot;
 	/** The calling conversation's agent, as the tool task's phase resolved it. */
 	agent(context: Context): Promise<Agent>;
+	/** `HarnessOptions.models`: the catalog, credentials, and request transforms generation uses. */
+	readonly models: Models;
 	/** Built by `HarnessOptions.env` for this call; `undefined` without an environment. */
 	readonly env: ExecutionEnv | undefined;
-	/** Append running output; it becomes the result content when the result omits `content`. */
-	output(chunk: string | Uint8Array): void;
+	/**
+	 * Append running output; it becomes the result content when the result omits `content`. `skipped` counts output
+	 * omitted before the chunk, as reported by an environment given `outputWindow` (`ShellOutputInfo.skipped`).
+	 */
+	output(chunk: string | Uint8Array, skipped?: ShellOutputSkip): void;
+	/**
+	 * The tail this call's output keeps and the pace of its progress commits, for `ShellExecOptions.window`; `undefined`
+	 * when the tool keeps the head of its output, which cannot accept skips. A wrapper that replaces `output` and
+	 * transforms text must also replace this with `undefined`, so skipped text cannot bypass its transform.
+	 */
+	readonly outputWindow: ShellOutputWindow | undefined;
 	/** Record a model-visible remark about this call. */
 	diagnostic(diagnostic: ToolDiagnostic): void;
 	/** Replace running details; the last value becomes the result details when the result omits `details`. */
@@ -379,6 +390,17 @@ export type CompactionPolicy = {
 	backgroundTokens: number;
 };
 
+/**
+ * How often running progress is committed. Each progress commit is a storage write; a host whose storage is remote can
+ * commit less often, so live answers and tool output appear in larger steps.
+ */
+export type ProgressPolicy = {
+	/** Minimum pause between commits of the answer being generated. */
+	partialIntervalMs: number;
+	/** Minimum pause between commits of running tool output; large commits also pause in proportion to their size. */
+	outputIntervalMs: number;
+};
+
 /** Why a compaction runs: `compact()`, a threshold in generation preparation, or a context overflow. */
 export type CompactionReason = "manual" | "threshold" | "overflow";
 
@@ -395,9 +417,15 @@ export type HarnessSettings = {
 	readonly stream?: ConversationStreamOptions;
 	readonly retry?: Partial<ConversationRetryPolicy>;
 	readonly compaction?: Partial<CompactionPolicy>;
+	readonly progress?: Partial<ProgressPolicy>;
 	readonly toolExecution?: ToolExecutionMode;
 	readonly steeringMode?: QueueMode;
 	readonly followUpMode?: QueueMode;
+	/**
+	 * How long an idle conversation keeps its last context read in memory, so its next run reads only newer entries.
+	 * Busy conversations always keep it; `0` drops it once the conversation is idle.
+	 */
+	readonly contextRetentionMs?: number;
 };
 
 /** Resolved settings: every field over its built-in default, object fields merged. */
@@ -407,9 +435,11 @@ export type Settings = {
 	readonly stream: ConversationStreamOptions;
 	readonly retry: ConversationRetryPolicy;
 	readonly compaction: CompactionPolicy;
+	readonly progress: ProgressPolicy;
 	readonly toolExecution: ToolExecutionMode;
 	readonly steeringMode: QueueMode;
 	readonly followUpMode: QueueMode;
+	readonly contextRetentionMs: number;
 };
 
 /** What `HarnessOptions.env` builds an environment for. */
@@ -507,8 +537,12 @@ export interface Conversation {
 
 	/** Session commit whose `tx.createTask()` defaults to this conversation. */
 	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T>;
-	context(context: Context): Promise<ContextView>;
-	/** Newest-first fork-aware history of this conversation. */
+	/**
+	 * Committed raw active transcript and model context. With `at`, the context as of that visible entry: the same view
+	 * `fork(at)` would start with, without creating a conversation.
+	 */
+	context(context: Context, options?: { readonly at?: EntryId }): Promise<ContextView>;
+	/** Fork-aware history of this conversation, newest first unless `query.order` is `ascending`. */
 	entries(
 		query: Omit<EntryQuery, "conversationId">,
 		limit: number,
@@ -583,6 +617,8 @@ export interface Harness extends Session {
 export interface HookApi extends DocumentReader {
 	readonly taskId: TaskId;
 	readonly conversationId: ConversationId;
+	/** `HarnessOptions.models`. */
+	readonly models: Models;
 	memo<T extends JsonValue>(name: string, context: Context): Promise<T | undefined>;
 	memo<T extends JsonValue>(name: string, candidate: T, context: Context): Promise<T>;
 }

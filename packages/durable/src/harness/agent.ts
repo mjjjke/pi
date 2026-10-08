@@ -9,6 +9,7 @@ import type {
 	ConversationRetryPolicy,
 	Extension,
 	HarnessSettings,
+	ProgressPolicy,
 	PromptSection,
 	RegistrySnapshot,
 	Settings,
@@ -29,6 +30,11 @@ export const DEFAULT_COMPACTION_POLICY: CompactionPolicy = {
 	backgroundTokens: 32768,
 };
 
+export const DEFAULT_PROGRESS_POLICY: ProgressPolicy = {
+	partialIntervalMs: 100,
+	outputIntervalMs: 100,
+};
+
 /** The reserved section key of the agent's `instructions`. */
 export const INSTRUCTIONS_KEY = "instructions";
 
@@ -43,6 +49,9 @@ export const AgentDoc = defineDoc<AgentState>({
 	checkpointWhen: () => true,
 });
 
+/** Default `settings.contextRetentionMs`: ten minutes. */
+const DEFAULT_CONTEXT_RETENTION_MS = 600_000;
+
 /** Resolve the host settings: every field over its built-in default, object fields merged. */
 export function resolveSettings(settings: HarnessSettings | undefined): Settings {
 	const extensions = settings?.extensions;
@@ -51,9 +60,15 @@ export function resolveSettings(settings: HarnessSettings | undefined): Settings
 		stream: { ...settings?.stream },
 		retry: { ...DEFAULT_RETRY_POLICY, ...settings?.retry },
 		compaction: { ...DEFAULT_COMPACTION_POLICY, ...settings?.compaction },
+		// Field by field, so an explicitly undefined interval keeps its default.
+		progress: {
+			partialIntervalMs: settings?.progress?.partialIntervalMs ?? DEFAULT_PROGRESS_POLICY.partialIntervalMs,
+			outputIntervalMs: settings?.progress?.outputIntervalMs ?? DEFAULT_PROGRESS_POLICY.outputIntervalMs,
+		},
 		toolExecution: settings?.toolExecution ?? "parallel",
 		steeringMode: settings?.steeringMode ?? "one-at-a-time",
 		followUpMode: settings?.followUpMode ?? "one-at-a-time",
+		contextRetentionMs: settings?.contextRetentionMs ?? DEFAULT_CONTEXT_RETENTION_MS,
 	};
 }
 
