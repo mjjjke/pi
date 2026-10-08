@@ -116,6 +116,10 @@ Attribution:
 - Internal (from issues): `Fixed foo bar ([#123](https://github.com/earendil-works/pi/issues/123))`
 - External contributions: `Added feature X ([#456](https://github.com/earendil-works/pi/pull/456) by [@username](https://github.com/username))`
 
+## Updating the Fork from Upstream
+
+This checkout is a local fork. Before merging any upstream release, read `FORK.md` in full and follow its "Updating from upstream" checklist step by step. In particular: candidate worktree, pinned model data via `pin-release-model-data.ts` (never `generate-models` or plain `npm run build`, which pull live catalogs), `npm run build:offline`, consumer validation in pi-mjjjke, updating "Upstream base" in the merge commit, and `link:fork`. If a step fails, stop and ask.
+
 ## Releasing
 
 For release preparation, publishing, verification, or recovery, load and follow [.pi/skills/release.md](.pi/skills/release.md).
