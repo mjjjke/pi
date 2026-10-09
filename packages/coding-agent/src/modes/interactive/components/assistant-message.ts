@@ -105,27 +105,29 @@ export class AssistantMessageComponent extends Container {
 		}
 
 		const progressUpdates = getProgressUpdateIndices(message);
-		const hasVisibleContentAfter = (index: number) =>
-			message.content
-				.slice(index + 1)
-				.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 		// Render content in order
 		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" || (content.type === "thinking" && progressUpdates.has(i))) {
-				const text = (content.type === "text" ? content.text : content.thinking).trim();
+			if (content.type === "text" && content.text.trim()) {
+				// Assistant text messages with no background - trim the text
+				// Set paddingY=0 to avoid extra spacing before tool executions
+				this.contentContainer.addChild(
+					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
+						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+					}),
+				);
+			} else if (content.type === "thinking" && progressUpdates.has(i)) {
+				const text = content.thinking.trim();
 				if (!text) continue;
 				// Progress updates are ordinary assistant text, always visible even with thinking hidden.
-				// Set paddingY=0 to avoid extra spacing before tool executions.
 				this.contentContainer.addChild(
 					new Markdown(text, this.outputPad, 0, this.markdownTheme, undefined, {
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
 				);
 			} else if (content.type === "thinking") {
-				// Coalesce adjacent reasoning blocks up to the next progress update or non-thinking block.
 				const thinkingBlocks: string[] = [];
 				for (; i < message.content.length; i++) {
 					const thinkingContent = message.content[i];
@@ -139,10 +141,15 @@ export class AssistantMessageComponent extends Container {
 				}
 				i--;
 
-				// Empty reasoning (display "updates" or "omitted") renders nothing, not even the hidden label.
 				if (thinkingBlocks.length === 0) {
 					continue;
 				}
+
+				// Add spacing only when another visible assistant content block follows.
+				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
+				const hasVisibleContentAfter = message.content
+					.slice(i + 1)
+					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
@@ -173,9 +180,7 @@ export class AssistantMessageComponent extends Container {
 						return { handled: true };
 					}),
 				);
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				if (hasVisibleContentAfter(i)) {
+				if (hasVisibleContentAfter) {
 					this.contentContainer.addChild(new Spacer(1));
 				}
 			}

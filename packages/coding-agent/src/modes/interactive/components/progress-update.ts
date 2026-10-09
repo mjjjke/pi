@@ -1,9 +1,8 @@
-import { type AssistantMessage, anthropicSupportsProgressUpdates, parseTextSignature } from "@earendil-works/pi-ai";
+import { type AssistantMessage, anthropicSupportsProgressUpdates } from "@earendil-works/pi-ai";
 
 /**
  * Content indices of an assistant message that render as progress updates:
  * - thinking blocks marked `progressUpdate` (Anthropic display "updates");
- * - OpenAI text with phase "commentary" (known once the item is done);
  * - summarized Anthropic messages from models with progress updates: in a run of
  *   two or more thinking blocks directly followed by a tool call, the last block.
  *   The API does not mark updates under "summarized", so this is a render-time
@@ -23,8 +22,6 @@ export function getProgressUpdateIndices(message: AssistantMessage): Set<number>
 		if (block.type === "thinking" && block.progressUpdate) {
 			indices.add(i);
 			hasMarkedUpdates = true;
-		} else if (block.type === "text" && parseTextSignature(block.textSignature)?.phase === "commentary") {
-			indices.add(i);
 		}
 	}
 

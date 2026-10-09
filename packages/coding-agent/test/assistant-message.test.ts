@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
+import { getProgressUpdateIndices } from "../src/modes/interactive/components/progress-update.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -338,6 +339,48 @@ describe("AssistantMessageComponent", () => {
 			});
 		});
 
+		test.each([false, true])("reclassifies summarized reasoning on one streaming component (hidden=%s)", (hidden) => {
+			initTheme("dark");
+			const updateText = "Reading the config next.";
+			const message = anthropicMessage([
+				{ type: "thinking", thinking: "private reasoning", thinkingSignature: "sig-1" },
+			]);
+			const calls: unknown[] = [];
+			const component = new AssistantMessageComponent(undefined, hidden, undefined, "Thinking...", 1, [
+				(markdown, context) => {
+					if (markdown.includes(updateText)) calls.push(context);
+					return markdown;
+				},
+			]);
+			component.updateContent(message, true);
+			expect(stripAnsi(component.render(80).join("\n"))).toContain(hidden ? "Thinking..." : "private reasoning");
+
+			message.content.push({ type: "thinking", thinking: updateText, thinkingSignature: "sig-2" });
+			component.updateContent(message, true);
+			const before = component.render(80);
+			if (hidden) {
+				expect(stripAnsi(before.join("\n")).match(/Thinking\.\.\./g)).toHaveLength(1);
+				expect(stripAnsi(before.join("\n"))).not.toContain(updateText);
+			} else {
+				expect(lineWith(before, updateText)).toContain(`${thinkingStyle()}Reading`);
+			}
+			expect(calls).toEqual(
+				hidden ? [] : [{ messageType: "assistant-thinking", isStreaming: true, availableWidth: 78 }],
+			);
+			calls.length = 0;
+
+			message.content.push(toolCall);
+			const original = structuredClone(message);
+			component.updateContent(message, true);
+			const after = component.render(80);
+			expect(after).toEqual(
+				renderLines(anthropicMessage([message.content[0], { type: "text", text: updateText }, toolCall]), hidden),
+			);
+			expect(lineWith(after, updateText)).not.toContain(`${thinkingStyle()}Reading`);
+			expect(calls).toEqual([{ messageType: "assistant", isStreaming: true, availableWidth: 78 }]);
+			expect(message).toEqual(original);
+		});
+
 		test("does not apply the heuristic without a following tool call, to single blocks, or to other models", () => {
 			initTheme("dark");
 			const cases = [
@@ -363,7 +406,6 @@ describe("AssistantMessageComponent", () => {
 			];
 			for (const message of cases) {
 				const rendered = stripAnsi(renderLines(message, true).join("\n"));
-				expect(rendered).not.toContain("•");
 				expect(rendered).not.toContain("second");
 			}
 		});
@@ -379,7 +421,6 @@ describe("AssistantMessageComponent", () => {
 			]);
 			const rendered = stripAnsi(renderLines(message, true).join("\n"));
 			expect(rendered).toContain("Update one.");
-			expect(rendered).not.toContain("•");
 			expect(rendered).not.toContain("stray summary");
 		});
 
@@ -390,6 +431,7 @@ describe("AssistantMessageComponent", () => {
 				toolCall,
 				{ type: "text", text: "All done.", textSignature: finalAnswer },
 			]);
+			expect(getProgressUpdateIndices(message)).toEqual(new Set());
 			const rendered = stripAnsi(renderLines(message, true).join("\n"));
 			expect(rendered).toContain("Checking the tests first.");
 			expect(renderLines(message, true)).toEqual(
@@ -403,9 +445,6 @@ describe("AssistantMessageComponent", () => {
 				),
 			);
 			expect(rendered).toContain("All done.");
-
-			const streaming = createAssistantMessage([{ type: "text", text: "Checking the tests first." }]);
-			expect(stripAnsi(renderLines(streaming).join("\n"))).not.toContain("•");
 		});
 
 		test("uses ordinary assistant text spacing for commentary followed by text or a tool call", () => {

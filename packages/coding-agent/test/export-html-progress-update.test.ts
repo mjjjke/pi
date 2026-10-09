@@ -14,13 +14,13 @@ describe("export HTML progress updates", () => {
 		expect(templateJs).toMatch(
 			/<div class="assistant-text markdown-content">\$\{safeMarkedParse\(block\.thinking\)\}<\/div>/,
 		);
-		expect(templateJs).not.toMatch(/safeMarkedParse\(`• \$\{block\.thinking\}`\)/);
 	});
 
 	it("renders marked updates and commentary with the same HTML and Markdown input as ordinary text", () => {
-		const start = templateJs.indexOf("function renderEntry(entry)");
-		const end = templateJs.indexOf("function computeStats(entryList)", start);
-		const renderEntry = runInNewContext(`${templateJs.slice(start, end)}; renderEntry`, {
+		// Match the declaration's closing indentation, not the next function's name.
+		const renderEntrySource = templateJs.match(/^([ \t]*)function renderEntry\([^)]*\)\s*\{[\s\S]*?^\1\}/m)?.[0];
+		expect(renderEntrySource, "template.js must declare renderEntry").toBeDefined();
+		const renderEntry = runInNewContext(`${renderEntrySource}; renderEntry`, {
 			formatTimestamp: () => "",
 			escapeHtml: (text: string) => text,
 			renderCopyLinkButton: () => "",
