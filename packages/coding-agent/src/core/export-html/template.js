@@ -1269,7 +1269,7 @@
                 html += `<div class="assistant-text markdown-content">${safeMarkedParse(block.text)}</div>`;
               } else if (block.type === 'thinking' && block.progressUpdate && block.thinking.trim()) {
                 // Progress updates are written for the user: render as visible text, not collapsible thinking.
-                html += `<div class="assistant-text markdown-content">${safeMarkedParse(`• ${block.thinking}`)}</div>`;
+                html += `<div class="assistant-text markdown-content">${safeMarkedParse(block.thinking)}</div>`;
               } else if (block.type === 'thinking' && block.thinking.trim()) {
                 html += `<div class="thinking-block">
                   <div class="thinking-text">${escapeHtml(block.thinking)}</div>

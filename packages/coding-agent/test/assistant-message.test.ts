@@ -283,7 +283,7 @@ describe("AssistantMessageComponent", () => {
 			return lines.find((line) => stripAnsi(line).includes(text));
 		}
 
-		test("shows marked progress updates as bullets even when thinking is hidden", () => {
+		test("shows marked progress updates as assistant text even when thinking is hidden", () => {
 			initTheme("dark");
 			const message = anthropicMessage([
 				{ type: "thinking", thinking: "", thinkingSignature: "sig-reasoning" },
@@ -293,7 +293,10 @@ describe("AssistantMessageComponent", () => {
 			for (const hidden of [true, false]) {
 				const lines = renderLines(message, hidden);
 				const rendered = stripAnsi(lines.join("\n"));
-				expect(rendered).toContain("• Found the bug.");
+				expect(rendered).toContain("Found the bug.");
+				expect(lines).toEqual(
+					renderLines(anthropicMessage([{ type: "text", text: "Found the bug." }, toolCall]), hidden),
+				);
 				expect(rendered).not.toContain("Thinking...");
 				expect(lineWith(lines, "Found the bug.")).not.toContain(`${thinkingStyle()}Found`);
 			}
@@ -316,7 +319,13 @@ describe("AssistantMessageComponent", () => {
 			]);
 			const hiddenRendered = stripAnsi(renderLines(message, true).join("\n"));
 			expect(hiddenRendered).toContain("Thinking...");
-			expect(hiddenRendered).toContain("• Reading the config next.");
+			expect(hiddenRendered).toContain("Reading the config next.");
+			expect(renderLines(message, true)).toEqual(
+				renderLines(
+					anthropicMessage([message.content[0], { type: "text", text: "Reading the config next." }, toolCall]),
+					true,
+				),
+			);
 			expect(hiddenRendered).not.toContain("private reasoning");
 
 			const lines = renderLines(message);
@@ -369,11 +378,12 @@ describe("AssistantMessageComponent", () => {
 				toolCall,
 			]);
 			const rendered = stripAnsi(renderLines(message, true).join("\n"));
-			expect(rendered).toContain("• Update one.");
+			expect(rendered).toContain("Update one.");
+			expect(rendered).not.toContain("•");
 			expect(rendered).not.toContain("stray summary");
 		});
 
-		test("renders OpenAI commentary text as a progress update once its phase is known", () => {
+		test("keeps OpenAI commentary identical to ordinary text once its phase is known", () => {
 			initTheme("dark");
 			const message = createAssistantMessage([
 				{ type: "text", text: "Checking the tests first.", textSignature: commentary },
@@ -381,43 +391,124 @@ describe("AssistantMessageComponent", () => {
 				{ type: "text", text: "All done.", textSignature: finalAnswer },
 			]);
 			const rendered = stripAnsi(renderLines(message, true).join("\n"));
-			expect(rendered).toContain("• Checking the tests first.");
-			expect(rendered).not.toContain("• All done.");
+			expect(rendered).toContain("Checking the tests first.");
+			expect(renderLines(message, true)).toEqual(
+				renderLines(
+					createAssistantMessage([
+						{ type: "text", text: "Checking the tests first." },
+						toolCall,
+						{ type: "text", text: "All done." },
+					]),
+					true,
+				),
+			);
 			expect(rendered).toContain("All done.");
 
 			const streaming = createAssistantMessage([{ type: "text", text: "Checking the tests first." }]);
 			expect(stripAnsi(renderLines(streaming).join("\n"))).not.toContain("•");
 		});
 
-		test("separates commentary text from following text with a blank line", () => {
+		test("uses ordinary assistant text spacing for commentary followed by text or a tool call", () => {
 			initTheme("dark");
 			const message = createAssistantMessage([
 				{ type: "text", text: "Checking first.", textSignature: commentary },
 				{ type: "text", text: "All done.", textSignature: finalAnswer },
 			]);
 			const lines = renderLines(message).map((line) => stripAnsi(line).trimEnd());
-			const update = lines.findIndex((line) => line.includes("• Checking first."));
-			expect(lines[update + 1]).toBe("");
-			expect(lines[update + 2]).toContain("All done.");
+			const update = lines.findIndex((line) => line.includes("Checking first."));
+			expect(lines[update + 1]).toContain("All done.");
+			expect(renderLines(message)).toEqual(
+				renderLines(
+					createAssistantMessage([
+						{ type: "text", text: "Checking first." },
+						{ type: "text", text: "All done." },
+					]),
+				),
+			);
 
 			const trailing = createAssistantMessage([
 				{ type: "text", text: "Checking.", textSignature: commentary },
 				toolCall,
 			]);
 			const trailingLines = renderLines(trailing).map((line) => stripAnsi(line).trimEnd());
-			expect(trailingLines.at(-1)).toContain("• Checking.");
+			expect(trailingLines.at(-1)).toContain("Checking.");
 		});
 
-		test("indents wrapped progress update lines under the bullet", () => {
+		test.each(["marked", "commentary", "summarized"] as const)(
+			"renders %s updates exactly like ordinary Markdown, including padding, wrapping, color and spacing",
+			(kind) => {
+				const text = `  **Checking** \`config.ts\` next. ${"word ".repeat(30)}\n\n- First item\n- Second item\n  `;
+				const reasoning = { type: "thinking" as const, thinking: "private reasoning", thinkingSignature: "sig" };
+				const prefix = kind === "summarized" ? [reasoning] : [];
+				const update: AssistantMessage["content"][number] =
+					kind === "commentary"
+						? { type: "text", text, textSignature: commentary }
+						: { type: "thinking", thinking: text, progressUpdate: kind === "marked" ? true : undefined };
+				const message = anthropicMessage([...prefix, update, toolCall, { type: "text", text: "All done." }]);
+				const original = structuredClone(message);
+				const ordinary = anthropicMessage([
+					...prefix,
+					{ type: "text", text },
+					toolCall,
+					{ type: "text", text: "All done." },
+				]);
+				for (const themeName of ["dark", "light"]) {
+					initTheme(themeName);
+					for (const hidden of [false, true]) {
+						for (const padding of [0, 1, 3]) {
+							const component = new AssistantMessageComponent(
+								message,
+								hidden,
+								undefined,
+								"Thinking...",
+								padding,
+							);
+							const expected = new AssistantMessageComponent(
+								ordinary,
+								hidden,
+								undefined,
+								"Thinking...",
+								padding,
+							);
+							for (const width of [24, 40, 80]) {
+								// Compare raw ANSI lines as well as geometry, not just stripped text.
+								expect(component.render(width)).toEqual(expected.render(width));
+							}
+							component.setOutputPad(padding + 1);
+							expected.setOutputPad(padding + 1);
+							component.setHideThinkingBlock(!hidden);
+							expected.setHideThinkingBlock(!hidden);
+							component.invalidate();
+							expected.invalidate();
+							expect(component.render(40)).toEqual(expected.render(40));
+						}
+					}
+				}
+				expect(message).toEqual(original);
+			},
+		);
+
+		test("passes updates through assistant Markdown transformers with ordinary width and streaming state", () => {
 			initTheme("dark");
 			const message = anthropicMessage([
-				{ type: "thinking", thinking: "word ".repeat(30).trim(), thinkingSignature: "sig", progressUpdate: true },
+				{ type: "thinking", thinking: "Checking.", progressUpdate: true },
 				toolCall,
 			]);
-			const lines = new AssistantMessageComponent(message).render(40).map((line) => stripAnsi(line));
-			const first = lines.findIndex((line) => line.includes("•"));
-			expect(lines[first].startsWith(" • word")).toBe(true);
-			expect(lines[first + 1].startsWith("   word")).toBe(true);
+			const calls: unknown[] = [];
+			const component = new AssistantMessageComponent(undefined, true, undefined, "Thinking...", 3, [
+				(markdown, context) => {
+					calls.push(context);
+					return `${markdown} Transformed.`;
+				},
+			]);
+			for (const streaming of [true, false]) {
+				component.updateContent(message, streaming);
+				expect(stripAnsi(component.render(40).join("\n"))).toContain("Checking. Transformed.");
+			}
+			expect(calls).toEqual([
+				{ messageType: "assistant", isStreaming: true, availableWidth: 34 },
+				{ messageType: "assistant", isStreaming: false, availableWidth: 34 },
+			]);
 		});
 	});
 

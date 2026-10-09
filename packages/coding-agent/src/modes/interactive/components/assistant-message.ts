@@ -3,7 +3,7 @@ import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } fr
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
-import { getProgressUpdateIndices, ProgressUpdateComponent } from "./progress-update.ts";
+import { getProgressUpdateIndices } from "./progress-update.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -114,27 +114,16 @@ export class AssistantMessageComponent extends Container {
 		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" && content.text.trim() && progressUpdates.has(i)) {
-				this.contentContainer.addChild(this.createProgressUpdate(content.text.trim()));
-				if (hasVisibleContentAfter(i)) {
-					this.contentContainer.addChild(new Spacer(1));
-				}
-			} else if (content.type === "text" && content.text.trim()) {
-				// Assistant text messages with no background - trim the text
-				// Set paddingY=0 to avoid extra spacing before tool executions
+			if (content.type === "text" || (content.type === "thinking" && progressUpdates.has(i))) {
+				const text = (content.type === "text" ? content.text : content.thinking).trim();
+				if (!text) continue;
+				// Progress updates are ordinary assistant text, always visible even with thinking hidden.
+				// Set paddingY=0 to avoid extra spacing before tool executions.
 				this.contentContainer.addChild(
-					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
+					new Markdown(text, this.outputPad, 0, this.markdownTheme, undefined, {
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
 				);
-			} else if (content.type === "thinking" && progressUpdates.has(i)) {
-				const text = content.thinking.trim();
-				if (!text) continue;
-				// Progress updates are written for the user: always visible, even with thinking hidden.
-				this.contentContainer.addChild(this.createProgressUpdate(text));
-				if (hasVisibleContentAfter(i)) {
-					this.contentContainer.addChild(new Spacer(1));
-				}
 			} else if (content.type === "thinking") {
 				// Coalesce adjacent reasoning blocks up to the next progress update or non-thinking block.
 				const thinkingBlocks: string[] = [];
@@ -216,14 +205,5 @@ export class AssistantMessageComponent extends Container {
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}
 		}
-	}
-
-	private createProgressUpdate(text: string): ProgressUpdateComponent {
-		return new ProgressUpdateComponent(
-			text,
-			this.outputPad,
-			this.markdownTheme,
-			createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
-		);
 	}
 }
