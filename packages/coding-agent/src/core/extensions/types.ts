@@ -1002,12 +1002,12 @@ export interface ProviderStreamEvent {
 	data: unknown;
 }
 
-/** Fired after user submits prompt but before agent loop. */
+/** Fired before a new user-prompt or idle-triggered custom-message run (not in-run continuations). */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
-	/** The raw user prompt text (after expansion). */
+	/** Expanded user prompt, or triggering custom content with text blocks joined by newlines. */
 	prompt: string;
-	/** Images attached to the user prompt, if any. */
+	/** Images attached to the user prompt or triggering custom message, if any. */
 	images?: ImageContent[];
 	/** The current system prompt, rendered from systemPromptOptions and earlier handler changes. */
 	readonly systemPrompt: string;

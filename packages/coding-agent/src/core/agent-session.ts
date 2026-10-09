@@ -2104,6 +2104,43 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
+	/** Shared per-run preflight, before user image normalization or custom-message delivery. */
+	private async _prepareAgentStart(prompt: string, images: ImageContent[] | undefined) {
+		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
+		const result = await this._extensionRunner.emitBeforeAgentStart(prompt, images, this._baseSystemPromptOptions);
+		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
+		// which updates the live loadout instead. An explicit edit wins; otherwise the live
+		// loadout is authoritative, so a setActiveTools() call is not undone here.
+		const handlerEditedTools =
+			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
+			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
+		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+		return result;
+	}
+
+	private async _runPreparedAgentPrompt(
+		messages: AgentMessage[],
+		result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>,
+		preflightResult?: PromptOptions["preflightResult"],
+	): Promise<void> {
+		for (const msg of result.messages) {
+			messages.push({
+				role: "custom",
+				customType: msg.customType,
+				// Untyped extensions can pass null/missing content; normalize at ingestion.
+				content: msg.content ?? [],
+				display: msg.display,
+				details: msg.details,
+				timestamp: Date.now(),
+			});
+		}
+		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
+		this._runSystemPromptOptions = result.systemPromptOptions;
+		if (updateMessage) messages.unshift(updateMessage);
+		preflightResult?.("started");
+		await this._runAgentPrompt(messages);
+	}
+
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._agentRunAbortRequested = false;
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
@@ -2368,22 +2405,8 @@ export class AgentSession {
 			await this._checkCompaction(lastAssistant, false);
 		}
 
-		// Emit before_agent_start before normalizing images so extension-driven model
-		// selection determines the resize profile used for the request and history.
-		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
-		const result = await this._extensionRunner.emitBeforeAgentStart(
-			expandedText,
-			currentImages,
-			this._baseSystemPromptOptions,
-		);
-		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
-		// which updates the live loadout instead. An explicit edit wins; otherwise the live
-		// loadout is authoritative, so a setActiveTools() call is not undone here.
-		const handlerEditedTools =
-			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
-			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
-		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
-
+		// Run hooks before normalizing images so model selection determines the resize profile.
+		const result = await this._prepareAgentStart(expandedText, currentImages);
 		const normalized = await this._normalizePromptImages(currentImages);
 		// Last await before the run starts: closeAdmission()/dispose() during preflight cancel the prompt.
 		this._throwIfAdmissionChanged(admissionGen);
@@ -2405,23 +2428,7 @@ export class AgentSession {
 		}
 		this._pendingNextTurnMessages = [];
 
-		for (const msg of result.messages) {
-			messages.push({
-				role: "custom",
-				customType: msg.customType,
-				// Untyped extensions can pass null/missing content; normalize at ingestion.
-				content: msg.content ?? [],
-				display: msg.display,
-				details: msg.details,
-				timestamp: Date.now(),
-			});
-		}
-		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
-		this._runSystemPromptOptions = result.systemPromptOptions;
-		if (updateMessage) messages.unshift(updateMessage);
-
-		preflightResult?.("started");
-		await this._runAgentPrompt(messages);
+		await this._runPreparedAgentPrompt(messages, result, preflightResult);
 	}
 
 	private _isAdmissionChanged(admissionGen: number): boolean {
@@ -2672,11 +2679,15 @@ export class AgentSession {
 				this.agent.steer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
+			const admissionGen = this._admissionGen;
 			if (this._isEmittingAgentSettled) {
-				this._deferredSettledActions.push(async () => await this._runAgentPrompt(appMessage));
+				this._deferredSettledActions.push(async () => {
+					if (this._isAdmissionChanged(admissionGen)) return;
+					await this._promptCustomMessage(appMessage, admissionGen);
+				});
 				return;
 			}
-			await this._runAgentPrompt(appMessage);
+			await this._promptCustomMessage(appMessage, admissionGen);
 		} else if (this.isStreaming) {
 			// Appending now would put the message between an assistant tool call and its
 			// result, which providers that validate message order reject on replay. Defer
@@ -2686,6 +2697,24 @@ export class AgentSession {
 		} else {
 			this._appendCustomMessage(appMessage);
 		}
+	}
+
+	private async _promptCustomMessage(appMessage: CustomMessage, admissionGen: number): Promise<void> {
+		this._throwIfAdmissionChanged(admissionGen);
+		this._flushPendingBashMessages();
+		this._flushPendingCustomMessages();
+		// Expose content through the existing preflight fields without converting the custom envelope
+		// to user input or dispatching input handlers, commands, skills, or prompt templates.
+		const images =
+			typeof appMessage.content === "string"
+				? []
+				: appMessage.content.filter((part): part is ImageContent => part.type === "image");
+		const result = await this._prepareAgentStart(
+			contentText(appMessage.content),
+			images.length > 0 ? images : undefined,
+		);
+		this._throwIfAdmissionChanged(admissionGen);
+		await this._runPreparedAgentPrompt([appMessage], result);
 	}
 
 	private _appendCustomMessage(appMessage: CustomMessage): void {

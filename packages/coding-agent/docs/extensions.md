@@ -102,6 +102,8 @@ Events cover resource discovery, sessions, agent and message lifecycle, provider
 
 `before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`. Prefer changing prompt sections, selected tools, or guidelines so Pi can append a transcript delta. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for that run while the transcript continues recording the structured sections. Providers receive the forced text as their leading system prompt.
 
+In this fork, an idle custom message sent with `triggerTurn: true` runs the same preflight, including when deferred from `agent_settled`. Its `prompt` is the custom content (text blocks joined by newlines; empty for image-only content), and `images` holds any image blocks. The event does not expose `customType`, `display`, or `details`; message lifecycle events still carry the original custom envelope. Custom content does not pass through `input`, commands, skills, or prompt-template expansion and is not normalized as a user image attachment. Queued steer/follow-up delivery, retries, compaction recovery, and boundary continuations stay in the prepared session run and do not repeat this hook.
+
 `message_end` can replace a finalized message while preserving its role. `tool_call` can mutate input or block execution. `tool_result` handlers compose, with each handler seeing prior changes.
 
 <a id="provider_stream_event"></a>
