@@ -2125,6 +2125,11 @@ export class AgentSession {
 		result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>,
 		preflightResult?: PromptOptions["preflightResult"],
 	): Promise<void> {
+		if (this._isAgentRunActive) {
+			throw new Error(
+				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+			);
+		}
 		for (const msg of result.messages) {
 			messages.push({
 				role: "custom",
@@ -2144,6 +2149,11 @@ export class AgentSession {
 	}
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		if (this._isAgentRunActive) {
+			throw new Error(
+				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
+			);
+		}
 		this._agentRunAbortRequested = false;
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
@@ -2344,7 +2354,7 @@ export class AgentSession {
 			text,
 			options?.images,
 			options?.source ?? "interactive",
-			this.isStreaming ? options?.streamingBehavior : undefined,
+			this.isStreaming || this._isPreparingCustomPrompt ? options?.streamingBehavior : undefined,
 		);
 		if (!processedInput) {
 			preflightResult?.("handled");
@@ -2359,8 +2369,8 @@ export class AgentSession {
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}
 
-		// If streaming, queue via steer() or followUp() based on option
-		if (this.isStreaming) {
+		// If streaming or preparing a custom run, queue via steer() or followUp() based on option.
+		if (this.isStreaming || this._isPreparingCustomPrompt) {
 			if (!options?.streamingBehavior) {
 				throw new Error(
 					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -2690,10 +2700,10 @@ export class AgentSession {
 				return;
 			}
 			await this._promptCustomMessage(appMessage, admissionGen);
-		} else if (this.isStreaming) {
-			// Appending now would put the message between an assistant tool call and its
-			// result, which providers that validate message order reject on replay. Defer
-			// to the end of the turn. Nothing is emitted yet: message events must not
+		} else if (this.isStreaming || this._isPreparingCustomPrompt) {
+			// Appending now could precede its triggering message or split an assistant tool call
+			// from its result, which providers reject on replay. Defer until the turn ends.
+			// Nothing is emitted yet: message events must not
 			// describe messages the session tree does not contain.
 			this._pendingCustomMessages.push(appMessage);
 		} else {
