@@ -414,6 +414,8 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
+	/** Route notifications arriving during a triggered run's async preflight into its queues. */
+	private _isPreparingCustomPrompt = false;
 	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
@@ -2672,7 +2674,7 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.isStreaming && options?.triggerTurn !== false) {
+		} else if ((this.isStreaming || this._isPreparingCustomPrompt) && options?.triggerTurn !== false) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
@@ -2709,12 +2711,18 @@ export class AgentSession {
 			typeof appMessage.content === "string"
 				? []
 				: appMessage.content.filter((part): part is ImageContent => part.type === "image");
-		const result = await this._prepareAgentStart(
-			contentText(appMessage.content),
-			images.length > 0 ? images : undefined,
-		);
-		this._throwIfAdmissionChanged(admissionGen);
-		await this._runPreparedAgentPrompt([appMessage], result);
+		this._isPreparingCustomPrompt = true;
+		try {
+			const result = await this._prepareAgentStart(
+				contentText(appMessage.content),
+				images.length > 0 ? images : undefined,
+			);
+			this._throwIfAdmissionChanged(admissionGen);
+			// Starts synchronously. Release the preflight reservation before the run settles.
+			return this._runPreparedAgentPrompt([appMessage], result);
+		} finally {
+			this._isPreparingCustomPrompt = false;
+		}
 	}
 
 	private _appendCustomMessage(appMessage: CustomMessage): void {

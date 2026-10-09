@@ -182,6 +182,56 @@ describe("triggered custom-message prompt preflight", () => {
 		},
 	);
 
+	it.each(["steer", "followUp"] as const)(
+		"queues another custom %s while triggered preflight is awaiting a hook",
+		async (deliverAs) => {
+			let starts = 0;
+			let started = () => {};
+			const preflightStarted = new Promise<void>((resolve) => {
+				started = resolve;
+			});
+			let release = () => {};
+			const preflightReleased = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", async (event) => {
+							starts++;
+							started();
+							await preflightReleased;
+							event.systemPromptOptions.sections.handoff = "Concurrent goal.";
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses(
+				deliverAs === "steer"
+					? [fauxAssistantMessage("done")]
+					: [fauxAssistantMessage("first"), fauxAssistantMessage("done")],
+			);
+			const first = harness.session.sendCustomMessage(
+				{ customType: "notice", content: "first", display: false },
+				{ triggerTurn: true },
+			);
+			await preflightStarted;
+			const second = harness.session.sendCustomMessage(
+				{ customType: "notice", content: "second", display: false },
+				{ triggerTurn: true, deliverAs },
+			);
+			release();
+			await Promise.all([first, second]);
+			expect(starts).toBe(1);
+			expect(
+				harness.session.messages.filter((message) => message.role === "custom").map((message) => message.content),
+			).toEqual(["first", "second"]);
+			expect(harness.eventsOfType("agent_start")).toHaveLength(1);
+			expect(harness.getPendingResponseCount()).toBe(0);
+		},
+	);
+
 	it("rebuilds run-specific sections rather than retaining stale hook contributions", async () => {
 		const harness = await createHarness({
 			extensionFactories: [
