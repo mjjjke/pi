@@ -55,10 +55,11 @@ async function signed(
 	seed = CLAUDE_CODE_CCH_SEED,
 	url = "https://example.test/v1/messages",
 	method = "POST",
+	headers: RequestInit["headers"] = { "x-test": "untouched" },
 ) {
 	let received: RequestInit | undefined;
 	const response = new Response("ok");
-	const init: RequestInit = { method, body, headers: { "x-test": "untouched" } };
+	const init: RequestInit = { method, body, headers };
 	const transport: typeof fetch = async (_input, next) => {
 		received = next;
 		return response;
@@ -110,11 +111,24 @@ it("fails open on seed and serialization errors without logging payloads", async
 	expect(badSerialization.received).toBe(badSerialization.init);
 	expect(log).not.toHaveBeenCalled();
 });
-it("leaves other methods, endpoints and non-string bodies unchanged", async () => {
+it("drops stale content-length after signing noncanonical JSON, preserving other headers and the original init", async () => {
+	const body = JSON.stringify(JSON.parse(placeholder.replace("2.1.145.abc", "2.1.145.000")), null, 2);
+	const headers = { "Content-Length": String(body.length), "x-test": "untouched" };
+	const { received, init } = await signed(body, CLAUDE_CODE_CCH_SEED, undefined, undefined, headers);
+	expect(new Headers(received?.headers).has("content-length")).toBe(false);
+	expect(new Headers(received?.headers).get("x-test")).toBe("untouched");
+	expect(received?.body).toBe(placeholder.replace("2.1.145.abc", "2.1.145.b21").replace("cch=00000", "cch=4b925"));
+	expect(init.body).toBe(body);
+	expect(init.headers).toBe(headers);
+	expect(headers["Content-Length"]).toBe(String(body.length));
+});
+it("leaves other methods, endpoints, prefixed base URLs and non-string bodies unchanged", async () => {
+	const eligible = placeholder.replace("2.1.145.abc", "2.1.145.000");
 	for (const [body, url, method] of [
-		[placeholder, "https://example.test/v1/messages", "GET"],
-		[placeholder, "https://example.test/v1/oauth/token", "POST"],
-		[new Blob([placeholder]), "https://example.test/v1/messages", "POST"],
+		[eligible, "https://example.test/v1/messages", "GET"],
+		[eligible, "https://example.test/v1/oauth/token", "POST"],
+		[eligible, "https://example.test/proxy/v1/messages", "POST"],
+		[new Blob([eligible]), "https://example.test/v1/messages", "POST"],
 	] as const) {
 		const { received, init } = await signed(body, CLAUDE_CODE_CCH_SEED, url, method);
 		expect(received).toBe(init);

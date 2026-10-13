@@ -201,15 +201,19 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 			expect(payload.system?.[0]?.text).toContain(`cc_version=2.1.280.${await computeBillingVersionSuffix("")};`);
 		}
 	});
-	it("honors explicit OAuth UA and x-app overrides without changing billing version", async () => {
-		const { payload, headers } = await capture(
-			{ messages: [user] },
-			{ headers: { "user-agent": "custom-UA", "x-app": "custom-app" } },
-		);
-		expect(headers.get("user-agent")).toBe("custom-UA");
-		expect(headers.get("x-app")).toBe("custom-app");
-		expect(payload.system?.[0]?.text).toContain("cc_version=2.1.280.");
-	});
+	it.each(["user-agent", "User-Agent", "USER-AGENT"])(
+		"honors OAuth UA/x-app overrides regardless of header case: %s",
+		async (name) => {
+			const { payload, headers } = await capture(
+				{ messages: [user] },
+				{ headers: { [name]: "custom-UA", "X-App": "custom-app" } },
+				{ ...model, headers: { "UsEr-AgEnT": "model-UA", "x-app": "model-app" } },
+			);
+			expect(headers.get("user-agent")).toBe("custom-UA");
+			expect(headers.get("x-app")).toBe("custom-app");
+			expect(payload.system?.[0]?.text).toContain("cc_version=2.1.280.");
+		},
+	);
 	it("adds effort beta for managed effort and fast mode", async () => {
 		const { headers } = await capture(
 			{ messages: [user] },
@@ -263,10 +267,7 @@ it.each([false, true])("splits reachable text after tool_use; OAuth=%s, preserve
 		],
 	};
 	expect(convertMessages([user, valid], oauth).messages).toHaveLength(2);
-	expect([...converted.assistantLevels.entries()]).toEqual([
-		[1, "low"],
-		[2, "low"],
-	]);
+	expect([...converted.assistantLevels.entries()]).toEqual([[1, "low"]]);
 });
 
 it.each([undefined, null, 42, false, "", "   ", "rotated"])(

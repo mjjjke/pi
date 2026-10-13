@@ -1100,22 +1100,23 @@ function createClient(
 
 	// OAuth: subscription Bearer auth and provider-owned wire compatibility.
 	if (apiKey && isOAuthToken(apiKey)) {
+		const defaultHeaders: ProviderHeaders = {
+			accept: "application/json",
+			"anthropic-dangerous-direct-browser-access": "true",
+			"user-agent": `claude-cli/${getClaudeCodeVersion(env)}`,
+			"x-app": CLAUDE_CODE_ENTRYPOINT,
+		};
+		// Normalize before merging, so later explicit overrides win in any casing.
+		for (const headers of [model.headers, optionsHeaders]) {
+			for (const [name, value] of Object.entries(headers ?? {})) defaultHeaders[name.toLowerCase()] = value;
+		}
 		const client = new PiAnthropic({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
 			dangerouslyAllowBrowser: true,
 			fetch: signAnthropicOAuthFetch(fetch ?? globalThis.fetch, getClaudeCodeCchSeed(env)),
-			defaultHeaders: mergeClientHeaders(
-				{
-					accept: "application/json",
-					"anthropic-dangerous-direct-browser-access": "true",
-					"user-agent": `claude-cli/${getClaudeCodeVersion(env)}`,
-					"x-app": CLAUDE_CODE_ENTRYPOINT,
-				},
-				model.headers,
-				optionsHeaders,
-			),
+			defaultHeaders,
 		});
 
 		return { client, isOAuthToken: true };
@@ -1598,17 +1599,17 @@ export function convertMessages(
 							blocks.filter((block) => block.type === "tool_use"),
 						]
 					: [blocks];
-			for (const content of groups) {
-				const messageIndex = params.length;
-				params.push({ role: "assistant", content });
-				if (
-					managedProvider !== undefined &&
-					msg.api === "anthropic-messages" &&
-					msg.provider === managedProvider &&
-					isAnthropicEffort(msg.providerThinkingLevel)
-				) {
-					assistantLevels.set(messageIndex, msg.providerThinkingLevel);
-				}
+			const messageIndex = params.length;
+			for (const content of groups) params.push({ role: "assistant", content });
+			// A split still represents one source turn: retain the old extension's
+			// single effort marker before its first half, not between assistant halves.
+			if (
+				managedProvider !== undefined &&
+				msg.api === "anthropic-messages" &&
+				msg.provider === managedProvider &&
+				isAnthropicEffort(msg.providerThinkingLevel)
+			) {
+				assistantLevels.set(messageIndex, msg.providerThinkingLevel);
 			}
 			lastEmittedIsUser = false;
 		} else if (msg.role === "toolResult") {
