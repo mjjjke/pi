@@ -58,6 +58,15 @@ import {
 } from "../utils/transcript.ts";
 
 import {
+	ANTHROPIC_OAUTH_EFFORT_BETA,
+	anthropicModelIdentity,
+	buildBillingHeaderValue,
+	CLAUDE_CODE_ENTRYPOINT,
+	getClaudeCodeCchSeed,
+	getClaudeCodeVersion,
+	signAnthropicOAuthFetch,
+} from "./anthropic-oauth.ts";
+import {
 	getJsonSchemaToolParameters,
 	resolveJsonSchemaStrictSampling,
 	type UnsupportedStrictSchemaKeywordCheck,
@@ -95,9 +104,6 @@ function getCacheControl(
 		cacheControl: { type: "ephemeral", ...(ttl && { ttl }) },
 	};
 }
-
-// Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.280";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -693,6 +699,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
+					options?.env,
 				);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
@@ -701,6 +708,10 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
+			}
+			// Derive this from the final payload, including changes made by onPayload.
+			if (isOAuth && params.output_config?.effort !== undefined) {
+				params.betas = [...new Set([...(params.betas ?? []), ANTHROPIC_OAUTH_EFFORT_BETA])];
 			}
 			// Under display "updates", any thinking block with text is a progress update.
 			const marksProgressUpdates =
@@ -1063,6 +1074,7 @@ function createClient(
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
 	federation?: AnthropicFederationConfig,
+	env?: ProviderEnv,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Copilot: Bearer auth.
 	if (model.provider === "github-copilot") {
@@ -1086,20 +1098,20 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// OAuth: Bearer auth, Claude Code identity headers
+	// OAuth: subscription Bearer auth and provider-owned wire compatibility.
 	if (apiKey && isOAuthToken(apiKey)) {
 		const client = new PiAnthropic({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
 			dangerouslyAllowBrowser: true,
-			fetch,
+			fetch: signAnthropicOAuthFetch(fetch ?? globalThis.fetch, getClaudeCodeCchSeed(env)),
 			defaultHeaders: mergeClientHeaders(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
-					"user-agent": `claude-cli/${claudeCodeVersion}`,
-					"x-app": "cli",
+					"user-agent": `claude-cli/${getClaudeCodeVersion(env)}`,
+					"x-app": CLAUDE_CODE_ENTRYPOINT,
 				},
 				model.headers,
 				optionsHeaders,
@@ -1264,22 +1276,16 @@ function buildParams(
 		...(betaFeatures.length > 0 ? { betas: betaFeatures } : {}),
 	};
 
-	// For OAuth tokens, we MUST include Claude Code identity
 	if (isOAuthToken) {
+		const identity = anthropicModelIdentity(model);
 		params.system = [
+			{ type: "text", text: buildBillingHeaderValue(getClaudeCodeVersion(options?.env)) },
 			{
 				type: "text",
-				text: "You are Claude Code, Anthropic's official CLI for Claude.",
+				text: sanitizeSurrogates(initialSystemText ? `${identity}\n\n${initialSystemText}` : identity),
 				...(cacheControl ? { cache_control: cacheControl } : {}),
 			},
 		];
-		if (initialSystemText) {
-			params.system.push({
-				type: "text",
-				text: sanitizeSurrogates(initialSystemText),
-				...(cacheControl ? { cache_control: cacheControl } : {}),
-			});
-		}
 	} else if (initialSystemText) {
 		// Add cache control to system prompt for non-OAuth tokens
 		params.system = [
@@ -1581,18 +1587,28 @@ export function convertMessages(
 			// An assistant that emits nothing is transparent: no flush point, anchor unchanged.
 			if (blocks.length === 0) continue;
 			flushPendingSystemMessages();
-			const messageIndex = params.length;
-			params.push({
-				role: "assistant",
-				content: blocks,
-			});
-			if (
-				managedProvider !== undefined &&
-				msg.api === "anthropic-messages" &&
-				msg.provider === managedProvider &&
-				isAnthropicEffort(msg.providerThinkingLevel)
-			) {
-				assistantLevels.set(messageIndex, msg.providerThinkingLevel);
+			// Preserve the extension's transport normalization for trailing non-tool
+			// blocks, reachable in replay (including cross-provider turns). Keep text/thinking together
+			// before the tool-use turn, preserving block order within both groups.
+			const firstTool = blocks.findIndex((block) => block.type === "tool_use");
+			const groups =
+				firstTool !== -1 && blocks.slice(firstTool).some((block) => block.type !== "tool_use")
+					? [
+							blocks.filter((block) => block.type !== "tool_use"),
+							blocks.filter((block) => block.type === "tool_use"),
+						]
+					: [blocks];
+			for (const content of groups) {
+				const messageIndex = params.length;
+				params.push({ role: "assistant", content });
+				if (
+					managedProvider !== undefined &&
+					msg.api === "anthropic-messages" &&
+					msg.provider === managedProvider &&
+					isAnthropicEffort(msg.providerThinkingLevel)
+				) {
+					assistantLevels.set(messageIndex, msg.providerThinkingLevel);
+				}
 			}
 			lastEmittedIsUser = false;
 		} else if (msg.role === "toolResult") {

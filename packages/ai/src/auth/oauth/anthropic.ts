@@ -252,11 +252,11 @@ async function refreshAnthropicToken(refreshToken: string, signal: AbortSignal):
 		throw new Error(`Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`);
 	}
 
-	let data: { access_token: string; refresh_token: string; expires_in: number; scope?: string };
+	let data: { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
 	try {
 		data = JSON.parse(responseBody) as {
 			access_token: string;
-			refresh_token: string;
+			refresh_token?: string;
 			expires_in: number;
 			scope?: string;
 		};
@@ -268,7 +268,10 @@ async function refreshAnthropicToken(refreshToken: string, signal: AbortSignal):
 
 	return {
 		type: "oauth",
-		refresh: data.refresh_token,
+		refresh:
+			typeof data.refresh_token === "string" && data.refresh_token.trim().length > 0
+				? data.refresh_token
+				: refreshToken,
 		access: data.access_token,
 		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
 	};
