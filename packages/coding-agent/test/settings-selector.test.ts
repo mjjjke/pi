@@ -83,6 +83,28 @@ describe("SettingsSelectorComponent", () => {
 		expect(onThinkingDisplayChange.mock.calls.flat()).toEqual(["summarized", "updates"]);
 	});
 
+	it("cycles through share destinations", () => {
+		const onSessionShareDestinationChange = vi.fn();
+		const config = {
+			sessionShareDestination: "auto",
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			availableThinkingLevels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = {
+			onSessionShareDestinationChange,
+		} as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		list.selectItem("share-destination");
+
+		for (let i = 0; i < 3; i++) list.handleInput("\r");
+
+		expect(onSessionShareDestinationChange.mock.calls.flat()).toEqual(["gist", "radius", "auto"]);
+	});
+
 	it("keeps the configured fixed theme marked while browsing", () => {
 		const config = {
 			defaultModel: "not set",

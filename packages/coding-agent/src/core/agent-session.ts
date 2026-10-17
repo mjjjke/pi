@@ -119,7 +119,7 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { type BeforeAgentStartTrigger, emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -274,8 +274,9 @@ export interface AgentSessionConfig {
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
 	/**
-	 * Whether the initial tools come from the `defaultTools` setting. When true, reload activates
-	 * tools newly added to the setting. Tools removed from it stay active.
+	 * Whether the initial tools come from the `defaultTools` setting. When true, a resumed session
+	 * replaces them with the loadout its transcript records, with `defaultToolModifiers` applied, and
+	 * reload activates tools newly added to the setting. Tools removed from it stay active.
 	 */
 	usesDefaultTools?: boolean;
 	/**
@@ -414,8 +415,8 @@ export class AgentSession {
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
-	/** Route notifications arriving during a triggered run's async preflight into its queues. */
-	private _isPreparingCustomPrompt = false;
+	/** Only developer instructions may commit immediately while before_agent_start handlers run. */
+	private _isPreparingRun = false;
 	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
@@ -569,7 +570,7 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		if (this._initialActiveToolNames === undefined) this._restoreToolsFromTranscript();
+		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -1285,6 +1286,9 @@ export class AgentSession {
 		if (event.type === "tool_execution_start" && event.toolName === "bash") {
 			this._runningBashCalls.set(event.toolCallId, []);
 		}
+		// An abort requested while the run was starting, e.g. during before_agent_start, stops it
+		// here. agent_start is awaited before the first request.
+		if (event.type === "agent_start" && this._agentRunAbortRequested) this.agent.abort();
 		// Record the calls a tool made through ctx.executeTool() and their usage on its result message.
 		if (this._nestedToolCalls) {
 			if (event.type === "message_start" && event.message.role === "toolResult") {
@@ -1788,6 +1792,7 @@ export class AgentSession {
 			exposure: this._getToolExposure(definition.name),
 			...(definition.namespace ? { namespace: definition.namespace } : {}),
 			...(definition.annotations ? { annotations: { ...definition.annotations } } : {}),
+			...(definition.reachesTools ? { reachesTools: definition.reachesTools } : {}),
 			sourceInfo,
 		}));
 	}
@@ -2092,12 +2097,16 @@ export class AgentSession {
 	 * Restore the active tool loadout declared by the session transcript, if it declares one.
 	 * Tools reachable only from other tools are never declared, but they do not depend on the active
 	 * set, so the transcript's declarations are the whole loadout.
+	 * @param modifiers `+name`/`-name` entries applied to the restored loadout.
 	 */
-	private _restoreToolsFromTranscript(): void {
+	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
-		const names = (current.toolsAdded ?? []).map((tool) => tool.name);
+		const names = applyToolModifiers(
+			(current.toolsAdded ?? []).map((tool) => tool.name),
+			modifiers,
+		);
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
 		this._setActiveTools(names);
 	}
@@ -2106,62 +2115,54 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	/** Shared per-run preflight, before user image normalization or custom-message delivery. */
-	private async _prepareAgentStart(prompt: string, images: ImageContent[] | undefined) {
-		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
-		const result = await this._extensionRunner.emitBeforeAgentStart(prompt, images, this._baseSystemPromptOptions);
-		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
-		// which updates the live loadout instead. An explicit edit wins; otherwise the live
-		// loadout is authoritative, so a setActiveTools() call is not undone here.
-		const handlerEditedTools =
-			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
-			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
-		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
-		return result;
-	}
-
-	private async _runPreparedAgentPrompt(
-		messages: AgentMessage[],
-		result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>,
-		preflightResult?: PromptOptions["preflightResult"],
+	/**
+	 * Start a run from a user or custom message. The session counts as busy from here on, so
+	 * messages sent while before_agent_start handlers run are queued into this run instead of
+	 * starting another, and an abort requested meanwhile aborts the run as soon as it exists.
+	 * @param onStarted Called once the run's messages are prepared, before the first request.
+	 */
+	private async _startRun(
+		trigger: BeforeAgentStartTrigger,
+		onStarted?: () => void,
+		admissionGen = this._admissionGen,
 	): Promise<void> {
+		this._throwIfAdmissionChanged(admissionGen);
+		// Input/auth preflight does not reserve a run. A starter that lost that race must not
+		// reset abort state, consume queues, or apply its prompt/tool changes to the winner.
 		if (this._isAgentRunActive) {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
 		}
-		for (const msg of result.messages) {
-			messages.push({
-				role: "custom",
-				customType: msg.customType,
-				// Untyped extensions can pass null/missing content; normalize at ingestion.
-				content: msg.content ?? [],
-				display: msg.display,
-				details: msg.details,
-				timestamp: Date.now(),
-			});
-		}
-		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
-		this._runSystemPromptOptions = result.systemPromptOptions;
-		if (updateMessage) messages.unshift(updateMessage);
-		preflightResult?.("started");
-		await this._runAgentPrompt(messages);
-	}
-
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
-		if (this._isAgentRunActive) {
-			throw new Error(
-				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
-			);
-		}
+		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
+		let messages: AgentMessage[];
+		try {
+			messages = await this._prepareRun(trigger, admissionGen);
+			// Loadout hooks can schedule shutdown in a microtask before this await resumes.
+			this._throwIfAdmissionChanged(admissionGen);
+		} catch (error) {
+			this._isAgentRunActive = false;
+			if (!this._isAdmissionChanged(admissionGen)) {
+				this._flushPendingBashMessages();
+				this._flushPendingCustomMessages();
+			}
+			this._resolveIdleWaitIfIdle();
+			throw error;
+		}
+		// Bash output and user-run context held during startup precede its starting messages.
+		// Passive messages received during custom preflight instead wait for the turn boundary,
+		// so they cannot precede their triggering notification.
+		this._flushPendingBashMessages();
+		if (trigger.messageType === "user") this._flushPendingCustomMessages();
+		onStarted?.();
+
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
 		this._recordSelection();
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
-		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
 			while (!this._agentRunAbortRequested && !this._disposed) {
@@ -2191,6 +2192,74 @@ export class AgentSession {
 				await this._emitAgentSettled();
 			}
 		}
+	}
+
+	/**
+	 * Prepare a run and return its starting messages: compact first when needed, emit
+	 * before_agent_start, apply the run's prompt options and tool loadout, and build the starting
+	 * message followed by pending nextTurn messages (consumed here) and handler messages, with a
+	 * system patch first when the prompt changed.
+	 */
+	private async _prepareRun(trigger: BeforeAgentStartTrigger, admissionGen: number): Promise<AgentMessage[]> {
+		// Check if we need to compact before sending (catches aborted responses).
+		// The starting message is sent below, so do not call agent.continue() here.
+		const lastAssistant = this._findLastAssistantMessage();
+		if (lastAssistant) {
+			await this._checkCompaction(lastAssistant, false);
+		}
+
+		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
+		let result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>;
+		this._isPreparingRun = true;
+		try {
+			result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
+		} finally {
+			this._isPreparingRun = false;
+		}
+		this._throwIfAdmissionChanged(admissionGen);
+		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
+		// which updates the live loadout instead. An explicit edit wins; otherwise the live
+		// loadout is authoritative, so a setActiveTools() call is not undone here.
+		const handlerEditedTools =
+			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
+			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
+		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+
+		const messages: AgentMessage[] = [];
+		if (trigger.messageType === "custom") {
+			messages.push(trigger.message);
+		} else {
+			// Normalize images after before_agent_start so extension-driven model selection
+			// determines the resize profile used for the request and history.
+			const normalized = await this._normalizePromptImages(trigger.images);
+			// Last await before consuming nextTurn context or applying the run's loadout.
+			this._throwIfAdmissionChanged(admissionGen);
+			const text =
+				normalized.hints.length > 0 ? `${trigger.prompt}\n\n${normalized.hints.join("\n")}` : trigger.prompt;
+			messages.push({
+				role: "user",
+				content: [{ type: "text", text }, ...normalized.images],
+				timestamp: Date.now(),
+			});
+		}
+		// Inject any pending "nextTurn" messages as context alongside the starting message
+		messages.push(...this._pendingNextTurnMessages);
+		this._pendingNextTurnMessages = [];
+		for (const msg of result.messages) {
+			messages.push({
+				role: "custom",
+				customType: msg.customType,
+				// Untyped extensions can pass null/missing content; normalize at ingestion.
+				content: msg.content ?? [],
+				display: msg.display,
+				details: msg.details,
+				timestamp: Date.now(),
+			});
+		}
+		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
+		this._runSystemPromptOptions = result.systemPromptOptions;
+		if (updateMessage) messages.unshift(updateMessage);
+		return messages;
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
@@ -2354,7 +2423,7 @@ export class AgentSession {
 			text,
 			options?.images,
 			options?.source ?? "interactive",
-			this.isStreaming || this._isPreparingCustomPrompt ? options?.streamingBehavior : undefined,
+			this.isStreaming ? options?.streamingBehavior : undefined,
 		);
 		if (!processedInput) {
 			preflightResult?.("handled");
@@ -2369,8 +2438,8 @@ export class AgentSession {
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}
 
-		// If streaming or preparing a custom run, queue via steer() or followUp() based on option.
-		if (this.isStreaming || this._isPreparingCustomPrompt) {
+		// If streaming (including run preflight), queue via steer() or followUp().
+		if (this.isStreaming) {
 			if (!options?.streamingBehavior) {
 				throw new Error(
 					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -2385,10 +2454,6 @@ export class AgentSession {
 			preflightResult?.("queued");
 			return;
 		}
-
-		// Flush any pending bash and custom messages before the new prompt
-		this._flushPendingBashMessages();
-		this._flushPendingCustomMessages();
 
 		// Validate model
 		if (!this.model) {
@@ -2410,37 +2475,11 @@ export class AgentSession {
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		// Check if we need to compact before sending (catches aborted responses).
-		// The user's new prompt is sent below, so do not call agent.continue() here.
-		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) {
-			await this._checkCompaction(lastAssistant, false);
-		}
-
-		// Run hooks before normalizing images so model selection determines the resize profile.
-		const result = await this._prepareAgentStart(expandedText, currentImages);
-		const normalized = await this._normalizePromptImages(currentImages);
-		// Last await before the run starts: closeAdmission()/dispose() during preflight cancel the prompt.
-		this._throwIfAdmissionChanged(admissionGen);
-		const userText = normalized.hints.length > 0 ? `${expandedText}\n\n${normalized.hints.join("\n")}` : expandedText;
-
-		// Build messages only after hooks and image normalization have completed.
-		const messages: AgentMessage[] = [];
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: userText }];
-		userContent.push(...normalized.images);
-		messages.push({
-			role: "user",
-			content: userContent,
-			timestamp: Date.now(),
-		});
-
-		// Inject any pending "nextTurn" messages as context alongside the user message
-		for (const msg of this._pendingNextTurnMessages) {
-			messages.push(msg);
-		}
-		this._pendingNextTurnMessages = [];
-
-		await this._runPreparedAgentPrompt(messages, result, preflightResult);
+		await this._startRun(
+			{ messageType: "user", prompt: expandedText, images: currentImages },
+			() => preflightResult?.("started"),
+			admissionGen,
+		);
 	}
 
 	private _isAdmissionChanged(admissionGen: number): boolean {
@@ -2621,9 +2660,9 @@ export class AgentSession {
 	appendDeveloperMessage(content: string | TextContent[]): void {
 		if (isBlankInstruction(content)) return;
 
-		if (this.isStreaming && !this._isEmittingAgentEndExtensionEvent) {
+		if (this.isStreaming && !this._isPreparingRun && !this._isEmittingAgentEndExtensionEvent) {
 			throw new Error(
-				"appendDeveloperMessage() can only be called while idle or from an agent_end extension handler.",
+				"appendDeveloperMessage() can only be called while idle or from a before_agent_start or agent_end extension handler.",
 			);
 		}
 
@@ -2637,8 +2676,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Queue a passive developer instruction. Committed now while idle or from an agent_end handler;
-	 * during a run it is committed immediately before the next anchored provider request (after that
+	 * Queue a passive developer instruction. Committed now while idle or from before_agent_start or
+	 * agent_end handlers; during a run it is committed before the next anchored provider request (after that
 	 * turn's tool results and steering messages), otherwise at run end or dispose. clearQueue() and
 	 * abort() do not discard it. `onCommit` is called once with the entry id.
 	 */
@@ -2649,7 +2688,10 @@ export class AgentSession {
 		if (this._disposed) throw new Error("queueDeveloperMessage() cannot be called after the session is disposed.");
 		if (isBlankInstruction(content)) throw new Error("queueDeveloperMessage() requires non-blank content.");
 		const pending = this._createPendingInstruction(content, options?.onCommit);
-		if ((!this.isStreaming || this._isEmittingAgentEndExtensionEvent) && this._drainPendingInstructions()) {
+		if (
+			(!this.isStreaming || this._isPreparingRun || this._isEmittingAgentEndExtensionEvent) &&
+			this._drainPendingInstructions()
+		) {
 			return { status: "committed", entryId: this._commitInstruction(pending, { refresh: true }) };
 		}
 		this._pendingInstructions.push(pending);
@@ -2684,7 +2726,7 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if ((this.isStreaming || this._isPreparingCustomPrompt) && options?.triggerTurn !== false) {
+		} else if (this.isStreaming && options?.triggerTurn !== false) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {
@@ -2695,43 +2737,19 @@ export class AgentSession {
 			if (this._isEmittingAgentSettled) {
 				this._deferredSettledActions.push(async () => {
 					if (this._isAdmissionChanged(admissionGen)) return;
-					await this._promptCustomMessage(appMessage, admissionGen);
+					await this.sendCustomMessage(message, options);
 				});
 				return;
 			}
-			await this._promptCustomMessage(appMessage, admissionGen);
-		} else if (this.isStreaming || this._isPreparingCustomPrompt) {
-			// Appending now could precede its triggering message or split an assistant tool call
-			// from its result, which providers reject on replay. Defer until the turn ends.
-			// Nothing is emitted yet: message events must not
+			await this._startRun({ messageType: "custom", message: appMessage });
+		} else if (this.isStreaming) {
+			// Appending now would put the message between an assistant tool call and its
+			// result, which providers that validate message order reject on replay. Defer
+			// to the end of the turn. Nothing is emitted yet: message events must not
 			// describe messages the session tree does not contain.
 			this._pendingCustomMessages.push(appMessage);
 		} else {
 			this._appendCustomMessage(appMessage);
-		}
-	}
-
-	private async _promptCustomMessage(appMessage: CustomMessage, admissionGen: number): Promise<void> {
-		this._throwIfAdmissionChanged(admissionGen);
-		this._flushPendingBashMessages();
-		this._flushPendingCustomMessages();
-		// Expose content through the existing preflight fields without converting the custom envelope
-		// to user input or dispatching input handlers, commands, skills, or prompt templates.
-		const images =
-			typeof appMessage.content === "string"
-				? []
-				: appMessage.content.filter((part): part is ImageContent => part.type === "image");
-		this._isPreparingCustomPrompt = true;
-		try {
-			const result = await this._prepareAgentStart(
-				contentText(appMessage.content),
-				images.length > 0 ? images : undefined,
-			);
-			this._throwIfAdmissionChanged(admissionGen);
-			// Starts synchronously. Release the preflight reservation before the run settles.
-			return this._runPreparedAgentPrompt([appMessage], result);
-		} finally {
-			this._isPreparingCustomPrompt = false;
 		}
 	}
 
@@ -2836,9 +2854,6 @@ export class AgentSession {
 	}
 
 	/**
-	 * Abort current operation and wait for agent to become idle.
-	 */
-	/**
 	 * Offer running model-invoked bash calls (or only `options.toolCallId`) to `bash_timeout`
 	 * handlers with reason "steer". A call that started but has not spawned its process yet is
 	 * offered once it spawns. Resolves with the number of calls taken over and completed.
@@ -2882,6 +2897,9 @@ export class AgentSession {
 		for (const toolCallId of [...this._runningBashCalls.keys()]) this._settleBashHandoverWaiters(toolCallId);
 	}
 
+	/**
+	 * Abort current operation and wait for agent to become idle.
+	 */
 	async abort(): Promise<void> {
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;

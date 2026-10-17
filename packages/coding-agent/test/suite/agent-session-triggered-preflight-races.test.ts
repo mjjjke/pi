@@ -6,7 +6,7 @@ import {
 	renderSystemMessageUpdate,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InputEvent } from "../../src/core/extensions/index.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -134,10 +134,8 @@ describe("triggered preflight races", () => {
 			],
 			extensionFactories: [
 				(pi) => {
-					pi.on("before_agent_start", async (event) => {
-						if (event.prompt === "user") {
-							started();
-							await userPreflightReleased;
+					pi.on("before_agent_start", (event) => {
+						if (event.messageType === "user") {
 							event.systemPromptOptions.sections.handoff = "Losing user goal.";
 							event.systemPromptOptions.selectedTools = [];
 						} else event.systemPromptOptions.sections.handoff = "Winning custom goal.";
@@ -156,6 +154,15 @@ describe("triggered preflight races", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
+		// Upstream reserves the run before before_agent_start. Hold the earlier auth phase
+		// instead, after the user has already made its idle/queue decision.
+		const checkAuth = harness.session.modelRuntime.checkAuth.bind(harness.session.modelRuntime);
+		vi.spyOn(harness.session.modelRuntime, "hasConfiguredAuth").mockReturnValueOnce(false);
+		vi.spyOn(harness.session.modelRuntime, "checkAuth").mockImplementationOnce(async (provider, options) => {
+			started();
+			await userPreflightReleased;
+			return checkAuth(provider, options);
+		});
 		const userOutcome = harness.session.prompt("user").then(
 			() => "started",
 			(error: Error) => error.message,

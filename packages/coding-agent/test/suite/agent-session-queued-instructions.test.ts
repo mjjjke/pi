@@ -108,6 +108,79 @@ describe("AgentSession.queueDeveloperMessage", () => {
 		expect(harness.session.messages.map((message) => message.role)).toEqual(["developer"]);
 	});
 
+	for (const trigger of ["user", "custom"] as const) {
+		it.each(["append", "queue"] as const)(
+			`commits %s instructions from before_agent_start before the first system snapshot (${trigger})`,
+			async (api) => {
+				const onCommit = vi.fn();
+				const errors: string[] = [];
+				const busy: boolean[] = [];
+				const hookRoles: string[][] = [];
+				const commitCallsInHook: number[] = [];
+				const requests: string[][] = [];
+				const appendErrors: string[] = [];
+				let result: ReturnType<Harness["session"]["queueDeveloperMessage"]> | undefined;
+				const harness = await setup({
+					extensionFactories: [
+						(pi) => {
+							pi.on("before_agent_start", async (_event, ctx) => {
+								await Promise.resolve();
+								busy.push(!ctx.isIdle());
+								if (api === "append") pi.appendDeveloperMessage("Preflight instruction.");
+								else result = pi.queueDeveloperMessage("Preflight instruction.", { onCommit });
+								hookRoles.push(harness.session.messages.map((message) => message.role));
+								commitCallsInHook.push(onCommit.mock.calls.length);
+							});
+							pi.on("agent_start", () => {
+								try {
+									pi.appendDeveloperMessage("Must not commit during the run.");
+								} catch (error) {
+									appendErrors.push(String(error));
+								}
+							});
+						},
+					],
+				});
+				harness.session.extensionRunner.onError((error) => errors.push(error.error));
+				harness.setResponses([
+					(context) => {
+						requests.push(context.messages.map((message) => `${message.role}:${getMessageText(message)}`));
+						return fauxAssistantMessage("done");
+					},
+				]);
+
+				if (trigger === "user") await harness.session.prompt("start");
+				else
+					await harness.session.sendCustomMessage(
+						{ customType: "notice", content: "start", display: false },
+						{ triggerTurn: true },
+					);
+
+				expect(errors).toEqual([]);
+				expect(busy).toEqual([true]);
+				expect(hookRoles).toEqual([["developer"]]);
+				expect(commitCallsInHook).toEqual([api === "queue" ? 1 : 0]);
+				expect(appendErrors).toHaveLength(1);
+				expect(appendErrors[0]).toContain("appendDeveloperMessage() can only be called");
+				expect(harness.session.messages.map((message) => message.role)).toEqual([
+					"developer",
+					"system",
+					trigger,
+					"assistant",
+				]);
+				expect(requests).toHaveLength(1);
+				expect(requests[0]?.[0]).toBe("developer:Preflight instruction.");
+				expect(requests[0]?.[1]).toMatch(/^system:/);
+				const entries = developerEntries(harness);
+				expect(entries).toHaveLength(1);
+				if (api === "queue") {
+					expect(result).toEqual({ status: "committed", entryId: entries[0]!.id });
+					expect(onCommit).toHaveBeenCalledExactlyOnceWith(entries[0]!.id);
+				}
+			},
+		);
+	}
+
 	it("rejects blank content and calls after dispose", async () => {
 		const harness = await setup();
 		expect(() => harness.session.queueDeveloperMessage("   ")).toThrow(/non-blank/);

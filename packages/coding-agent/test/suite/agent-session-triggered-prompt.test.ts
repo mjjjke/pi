@@ -102,8 +102,10 @@ describe("triggered custom-message prompt preflight", () => {
 				expect(requests[0]?.prompt).toBe(requests[1]?.prompt);
 				expect(starts).toHaveLength(2);
 				if (deferred) expect(settlementAtStart).toEqual([false, true]);
-				expect(starts[1]?.prompt).toBe(typeof content === "string" ? content : "/literal\nnotification");
-				expect(starts[1]?.images).toEqual(typeof content === "string" ? undefined : [image]);
+				expect(starts[0]).toMatchObject({ messageType: "user", prompt: "work" });
+				expect(starts[1]).toMatchObject({ messageType: "custom", message: notification });
+				expect(starts[1]).not.toHaveProperty("prompt");
+				expect(starts[1]).not.toHaveProperty("images");
 				expect(errors).toEqual([]);
 				expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
 				expect(harness.session.messages.find((message) => message.role === "custom")).toMatchObject(notification);
@@ -237,7 +239,9 @@ describe("triggered custom-message prompt preflight", () => {
 			extensionFactories: [
 				(pi) => {
 					pi.on("before_agent_start", (event) => {
-						if (event.prompt === "work") event.systemPromptOptions.sections.temporary = "Only for user work.";
+						if (event.messageType === "user" && event.prompt === "work") {
+							event.systemPromptOptions.sections.temporary = "Only for user work.";
+						}
 					});
 				},
 			],
@@ -284,7 +288,12 @@ describe("triggered custom-message prompt preflight", () => {
 		expect(prompts).toEqual(["Exact forced prompt.", "Exact forced prompt."]);
 	});
 
-	it("cancels a triggered run when admission closes during its preflight", async () => {
+	it.each([
+		["custom", "closeAdmission"],
+		["custom", "dispose"],
+		["user", "closeAdmission"],
+		["user", "dispose"],
+	] as const)("cancels %s preflight on %s without committing queued messages", async (source, shutdown) => {
 		let started = () => {};
 		const preflightStarted = new Promise<void>((resolve) => {
 			started = resolve;
@@ -306,14 +315,25 @@ describe("triggered custom-message prompt preflight", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("must remain queued")]);
-		const run = harness.session.sendCustomMessage(
-			{ customType: "notice", content: "ready", display: false },
-			{ triggerTurn: true },
-		);
+		const run =
+			source === "custom"
+				? harness.session.sendCustomMessage(
+						{ customType: "notice", content: "ready", display: false },
+						{ triggerTurn: true },
+					)
+				: harness.session.prompt("ready");
 		await preflightStarted;
-		harness.session.closeAdmission();
+		await harness.session.prompt("queued user", { streamingBehavior: "followUp" });
+		await harness.session.sendCustomMessage(
+			{ customType: "passive", content: "keep pending", display: false },
+			{ triggerTurn: false },
+		);
+		const queued = harness.session.agent.peekQueuedMessages();
+		harness.session[shutdown]();
 		release();
 		await expect(run).rejects.toThrow("prompt cancelled: session shutting down");
+		expect(harness.session.agent.peekQueuedMessages()).toEqual(queued);
+		expect(harness.session.getFollowUpMessages()).toEqual(["queued user"]);
 		expect(harness.session.messages).toEqual([]);
 		expect(harness.eventsOfType("agent_start")).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -342,6 +362,153 @@ describe("triggered custom-message prompt preflight", () => {
 		expect(starts).toBe(1);
 		expect(harness.getPendingResponseCount()).toBe(1);
 		expect(harness.session.messages.filter((message) => message.role === "custom")).toEqual([]);
+	});
+
+	it.each(["user", "custom"] as const)(
+		"cancels %s startup when a loadout hook schedules shutdown after preparation",
+		async (source) => {
+			let closeOnLoadout = false;
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.registerTool({
+							...probe,
+							prepareLoadout: () => {
+								if (!closeOnLoadout) return;
+								closeOnLoadout = false;
+								// Runs after _prepareRun's final admission check, before _startRun resumes.
+								queueMicrotask(() => harness.session.closeAdmission());
+							},
+						});
+						pi.on("before_agent_start", () => {
+							closeOnLoadout = true;
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("must remain queued")]);
+
+			const run =
+				source === "user"
+					? harness.session.prompt("work")
+					: harness.session.sendCustomMessage(
+							{ customType: "notice", content: "work", display: false },
+							{ triggerTurn: true },
+						);
+
+			await expect(run).rejects.toThrow("prompt cancelled: session shutting down");
+			expect(harness.session.messages).toEqual([]);
+			expect(harness.eventsOfType("agent_start")).toEqual([]);
+			expect(harness.getPendingResponseCount()).toBe(1);
+		},
+	);
+
+	it.each(["steer", "followUp", "nextTurn"] as const)(
+		"keeps %s custom delivery non-admitting after admission closes during preflight",
+		async (deliverAs) => {
+			let started = () => {};
+			const preflightStarted = new Promise<void>((resolve) => {
+				started = resolve;
+			});
+			let release = () => {};
+			const preflightReleased = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", async () => {
+							started();
+							await preflightReleased;
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const run = harness.session.prompt("work");
+			await preflightStarted;
+			harness.session.closeAdmission();
+			try {
+				await harness.session.sendCustomMessage(
+					{ customType: "notice", content: "keep queued", display: false },
+					{ triggerTurn: true, deliverAs },
+				);
+				if (deliverAs !== "nextTurn")
+					expect(harness.session.agent.peekQueuedMessages()).toMatchObject([
+						{ role: "custom", content: "keep queued" },
+					]);
+			} finally {
+				release();
+				await expect(run).rejects.toThrow("prompt cancelled: session shutting down");
+			}
+			expect(harness.session.messages).toEqual([]);
+			expect(harness.eventsOfType("agent_start")).toEqual([]);
+		},
+	);
+
+	it.each(["user", "custom"] as const)(
+		"silently drops deferred %s work submitted after a settled handler closes admission",
+		async (source) => {
+			let starts = 0;
+			const errors: string[] = [];
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("before_agent_start", () => {
+							starts++;
+						});
+						pi.on("agent_settled", () => {
+							harness.session.closeAdmission();
+							if (source === "user") pi.sendUserMessage("must not start");
+							else
+								pi.sendMessage(
+									{ customType: "notice", content: "must not start", display: false },
+									{ triggerTurn: true },
+								);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.session.extensionRunner.onError((error) => errors.push(error.error));
+			harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("must remain queued")]);
+
+			await harness.session.prompt("work");
+
+			expect(starts).toBe(1);
+			expect(errors).toEqual([]);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
+		},
+	);
+
+	it("still dispatches extension commands and handled input after admission closes", async () => {
+		const handled: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("local", {
+						description: "Non-admitting command",
+						handler: async () => {
+							handled.push("command");
+						},
+					});
+					pi.on("input", () => {
+						handled.push("input");
+						return { action: "handled" };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.closeAdmission();
+
+		await harness.session.prompt("/local");
+		await harness.session.prompt("handled input");
+
+		expect(handled).toEqual(["command", "input"]);
+		expect(harness.eventsOfType("agent_start")).toEqual([]);
 	});
 
 	for (const deliverAs of ["steer", "followUp"] as const) {

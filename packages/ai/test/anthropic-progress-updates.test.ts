@@ -231,11 +231,12 @@ describe("Anthropic thinking display updates", () => {
 		expect(beta?.split(",")).toContain(THINKING_DISPLAY_UPDATES_BETA);
 	});
 
-	it("sends updates on managed-effort models even with reasoning off", async () => {
+	// #10753: off now disables thinking on managed-effort models instead of requesting adaptive thinking.
+	it("omits updates on managed-effort models when thinking is explicitly off", async () => {
 		const model = anthropicModel({ compat: { forceAdaptiveThinking: true, supportsMidConvoEffort: true } });
 		const { payload, beta } = await capturePayload(model, { thinkingEnabled: false, thinkingDisplay: "updates" });
-		expect(payload.thinking?.display).toBe("updates");
-		expect(beta?.split(",")).toContain(THINKING_DISPLAY_UPDATES_BETA);
+		expect(payload.thinking).toEqual({ type: "disabled" });
+		expect(beta ?? "").not.toContain(THINKING_DISPLAY_UPDATES_BETA);
 	});
 
 	it("keeps summarized as the library default", async () => {

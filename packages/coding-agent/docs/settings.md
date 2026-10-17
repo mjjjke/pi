@@ -2,6 +2,8 @@
 
 This reference lists user-configurable settings, their types, defaults, and purposes. Project settings override agent-directory settings. Resource lists are combined. See [Configuration](configuration.md) for file locations and trust behavior.
 
+Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json` for editor validation and completion.
+
 ## Model and thinking
 
 <a id="model-cycling"></a>
@@ -15,7 +17,7 @@ This reference lists user-configurable settings, their types, defaults, and purp
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
 | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
-| `thinkingDisplay` | `"updates" \| "summarized"` | `"updates"` | How Anthropic models with progress updates (Claude Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5, Fable 5) return thinking. `"updates"` hides reasoning and returns only the short progress notes written before tool calls (beta `thinking-display-updates-2026-08-18`); `"summarized"` returns reasoning summaries. Other models always use summaries. Progress updates render as bullets and stay visible when thinking blocks are hidden. Changes apply to the next request; switching mid-session costs one message-cache miss (system prompt and tools stay cached). |
+| `thinkingDisplay` | `"updates" \| "summarized"` | `"updates"` | How Anthropic models with progress updates (Claude Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5, Fable 5) return thinking. `"updates"` hides reasoning and returns only the short progress notes written before tool calls (beta `thinking-display-updates-2026-08-18`); `"summarized"` returns reasoning summaries. Other models always use summaries. Progress updates render as plain assistant Markdown and stay visible when thinking blocks are hidden. Changes apply to the next request; switching mid-session costs one message-cache miss (system prompt and tools stay cached). |
 | `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"streaming"` | Keep eligible provider prompt caches warm during active runs or, with `"idle"`, between runs. Global setting only. |
 
@@ -63,6 +65,7 @@ CLI tool options override this setting for one invocation. `--tools` with only `
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `sessionDir` | string | Agent session directory | Session storage directory. Relative paths resolve from the working directory. `PI_CODING_AGENT_SESSION_DIR` and `--session-dir` override this setting. |
+| `sessionShareDestination` | `"auto" \| "gist" \| "radius"` | `"auto"` | Destination used by `/share`. `auto` uses Radius when authenticated and otherwise creates a GitHub gist. `gist` always uses a gist. `radius` requires Radius authentication and never falls back to a gist. |
 
 ### Compaction
 
@@ -100,7 +103,7 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 | `editorPaddingX` | number | `0` | Horizontal editor padding from 0 to 3 cells. |
 | `outputPad` | `0 \| 1` | `1` | Horizontal transcript padding for messages, tool output, `!` command output, and summary blocks. |
 | `autocompleteMaxVisible` | number | `5` | Visible autocomplete entries, from 3 to 20. |
-| `showHardwareCursor` | boolean | `false` | Show the terminal cursor while Pi positions it for input methods. |
+| `showHardwareCursor` | boolean | `false` | Use the terminal cursor instead of Pi's drawn cursor. Pi still positions it for input methods. |
 | `terminal.showImages` | boolean | `true` | Display inline images when supported. |
 | `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells. |
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when rendered content shrinks. |

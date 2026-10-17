@@ -19,7 +19,7 @@ describe("serializeConversation", () => {
 		expect(result).toContain("[Developer]: developer instruction");
 	});
 
-	it("skips empty signed thinking blocks", () => {
+	it("omits progress updates and empty signed thinking blocks", () => {
 		const messages: Message[] = [
 			{
 				role: "assistant",
@@ -47,9 +47,7 @@ describe("serializeConversation", () => {
 
 		const result = serializeConversation(messages);
 
-		expect(result).toContain("[Assistant thinking]: Found it.\n");
-		expect(result).not.toMatch(/\[Assistant thinking\]: \s*\n/);
-		expect(result).toContain('[Assistant tool calls]: read(path="a")');
+		expect(result).toBe('[Assistant tool calls]: read(path="a")');
 	});
 
 	it("should truncate long tool results", () => {
@@ -124,5 +122,35 @@ describe("serializeConversation", () => {
 
 		expect(result).not.toContain("truncated");
 		expect(result).toContain(longText);
+	});
+
+	it("should omit thinking", () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "private reasoning", thinkingSignature: "sig" },
+					{ type: "text", text: "visible reply" },
+					{ type: "toolCall", id: "tc1", name: "read", arguments: { path: "a.ts" } },
+				],
+				api: "anthropic",
+				provider: "anthropic",
+				model: "test",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+		];
+
+		const result = serializeConversation(messages);
+
+		expect(result).toBe('[Assistant]: visible reply\n\n[Assistant tool calls]: read(path="a.ts")');
 	});
 });
