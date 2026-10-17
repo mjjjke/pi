@@ -35,6 +35,21 @@ if [ $RUN_BROWSER_SMOKE -eq 1 ]; then
   fi
 fi
 
+# Fork: cached-prefix invariant (2026-10-13 cache-write incident). Under 1 s.
+for file in $STAGED_FILES; do
+  case "$file" in
+    packages/ai/*)
+      echo "Running prompt-prefix stability tests..."
+      (cd packages/ai && npx vitest --run test/prompt-prefix-stability.test.ts)
+      if [ $? -ne 0 ]; then
+        echo "❌ Prompt-prefix stability tests failed."
+        exit 1
+      fi
+      break
+      ;;
+  esac
+done
+
 # Restage files that were previously staged and may have been modified by formatting
 for file in $STAGED_FILES; do
   if [ -f "$file" ]; then
