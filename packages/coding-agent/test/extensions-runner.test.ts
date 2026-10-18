@@ -84,6 +84,7 @@ describe("ExtensionRunner", () => {
 		sendUserMessage: () => {},
 		appendDeveloperMessage: () => {},
 		queueDeveloperMessage: () => ({ status: "committed", entryId: "entry" }),
+		cancelQueuedDeveloperMessage: () => false,
 		appendEntry: () => {},
 		setSessionName: () => {},
 		getSessionName: () => undefined,
@@ -1373,6 +1374,32 @@ describe("ExtensionRunner", () => {
 
 			runtime.unregisterProvider("instant-provider");
 			expect(modelRegistry.find("instant-provider", "instant-model")).toBeUndefined();
+		});
+	});
+
+	describe("queued developer instruction cancellation", () => {
+		it("delegates pi and command ctx cancellation to the runtime and guards stale instances", async () => {
+			const runtime = createExtensionRuntime();
+			let api: Parameters<ExtensionFactory>[0] | undefined;
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					api = pi;
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const cancelQueuedDeveloperMessage = vi.fn((pendingId: string) => pendingId === "pending");
+			runner.bindCore({ ...extensionActions, cancelQueuedDeveloperMessage }, extensionContextActions);
+			const ctx = runner.createCommandContext();
+			expect(api?.cancelQueuedDeveloperMessage("pending")).toBe(true);
+			expect(ctx.cancelQueuedDeveloperMessage("unknown")).toBe(false);
+			expect(cancelQueuedDeveloperMessage.mock.calls).toEqual([["pending"], ["unknown"]]);
+			runner.invalidate();
+			expect(() => api?.cancelQueuedDeveloperMessage("pending")).toThrow(/stale/);
+			expect(() => ctx.cancelQueuedDeveloperMessage("pending")).toThrow(/stale/);
+			expect(cancelQueuedDeveloperMessage).toHaveBeenCalledTimes(2);
 		});
 	});
 
