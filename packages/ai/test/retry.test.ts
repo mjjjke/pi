@@ -22,6 +22,13 @@ describe("provider retry classification", () => {
 		}
 	});
 
+	it.each(['"status":429', '429: {"message":"request failed"}', "status 503", "HTTP 502:", "error code: 524"])(
+		"matches adapter status formatting: %s",
+		(errorMessage) => {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+		},
+	);
+
 	it.each([429, 500, 502, 503, 504, 520, 524])("does not match status substrings in IDs: %s", (status) => {
 		for (const id of [`17${status}880000`, `request${status}`, `${status}model`]) {
 			const errorMessage = `No API provider registered for api: faux:${id}:test`;
