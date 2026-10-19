@@ -16,6 +16,19 @@ const azurePeakLoadError =
 	"The system is currently experiencing high demand and cannot process your request. Your request exceeds the maximum usage size allowed during peak load. For improved capacity reliability, consider switching to Provisioned Throughput.";
 
 describe("provider retry classification", () => {
+	it.each([429, 500, 502, 503, 504, 520, 524])("matches HTTP status tokens: %s", (status) => {
+		for (const errorMessage of [String(status), `HTTP ${status}`, `API error (${status}): request failed`]) {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+		}
+	});
+
+	it.each([429, 500, 502, 503, 504, 520, 524])("does not match status substrings in IDs: %s", (status) => {
+		for (const id of [`17${status}880000`, `request${status}`, `${status}model`]) {
+			const errorMessage = `No API provider registered for api: faux:${id}:test`;
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+		}
+	});
+
 	it("matches explicit provider retry guidance", () => {
 		expect(
 			isRetryableAssistantError(
@@ -174,6 +187,17 @@ describe("retryAssistantCall", () => {
 		expect(produce).toHaveBeenCalledTimes(1);
 		expect(onRetryScheduled).not.toHaveBeenCalled();
 		expect(onRetryFinished).not.toHaveBeenCalled();
+	});
+
+	it("does not retry a missing provider whose ID contains a status substring", async () => {
+		const errorMessage = "No API provider registered for api: faux:1792429880000:abc";
+		const response = fauxAssistantMessage("", { stopReason: "error", errorMessage });
+		const produce = vi.fn(async () => response);
+		const onRetryScheduled = vi.fn();
+
+		expect(await retryAssistantCall(produce, enabled, undefined, { onRetryScheduled })).toBe(response);
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryScheduled).not.toHaveBeenCalled();
 	});
 
 	it("retries a transient error up to maxRetries then returns the final error", async () => {

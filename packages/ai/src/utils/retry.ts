@@ -36,13 +36,9 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"model is at capacity",
 	"rate.?limit",
 	"too many requests",
-	"429",
-	"500",
-	"502",
-	"503",
-	"504",
-	"520",
-	"524",
+	// Assistant messages retain error text, not structured HTTP status. Match whole
+	// status tokens so timestamps and request/model IDs cannot trigger backoff.
+	"\\b(?:429|500|502|503|504|520|524)\\b",
 	// Also matches "The service is temporarily unavailable" (#10965).
 	"service.?(?:is.?)?(?:temporarily.?)?unavailable",
 	"server.?error",
