@@ -463,9 +463,6 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		content: string | TextContent[],
 		options?: QueueDeveloperMessageOptions,
 	): QueueDeveloperMessageResult;
-
-	/** Cancel a pending developer instruction; see {@link ExtensionAPI.cancelQueuedDeveloperMessage}. */
-	cancelQueuedDeveloperMessage(pendingId: string): boolean;
 }
 
 /** Options for `queueDeveloperMessage()`. */
@@ -2052,13 +2049,6 @@ export interface ExtensionAPI {
 		options?: QueueDeveloperMessageOptions,
 	): QueueDeveloperMessageResult;
 
-	/**
-	 * Cancel a developer instruction still pending in the queue. Returns true only when removed;
-	 * it will never commit or call onCommit. Unknown, committing or committed ids return false.
-	 * Stale extension APIs throw, like queueDeveloperMessage().
-	 */
-	cancelQueuedDeveloperMessage(pendingId: string): boolean;
-
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -2435,8 +2425,6 @@ export type QueueDeveloperMessageHandler = (
 	options?: QueueDeveloperMessageOptions,
 ) => QueueDeveloperMessageResult;
 
-export type CancelQueuedDeveloperMessageHandler = (pendingId: string) => boolean;
-
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -2518,7 +2506,6 @@ export interface ExtensionActions {
 	sendUserMessage: SendUserMessageHandler;
 	appendDeveloperMessage: AppendDeveloperMessageHandler;
 	queueDeveloperMessage: QueueDeveloperMessageHandler;
-	cancelQueuedDeveloperMessage: CancelQueuedDeveloperMessageHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

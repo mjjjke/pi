@@ -907,8 +907,6 @@ export class AgentSession {
 			if (anchor !== "user" && anchor !== "toolResult") return previous;
 			const committed: AgentMessage[] = [];
 			for (const pending of this._pendingInstructions.slice()) {
-				// A previous item's onCommit may have cancelled this snapshot item.
-				if (!this._pendingInstructions.includes(pending)) continue;
 				try {
 					this._commitInstruction(pending);
 				} catch (error) {
@@ -1004,8 +1002,6 @@ export class AgentSession {
 	 */
 	private _drainPendingInstructions(): boolean {
 		for (const pending of this._pendingInstructions.slice()) {
-			// A previous item's onCommit may have cancelled this snapshot item.
-			if (!this._pendingInstructions.includes(pending)) continue;
 			try {
 				this._commitInstruction(pending, { refresh: true });
 			} catch (error) {
@@ -2703,20 +2699,6 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel an instruction that is still pending. A cancelled instruction is never committed and
-	 * its onCommit callback is never called. Unknown, committing, committed or disposed returns false.
-	 */
-	cancelQueuedDeveloperMessage(pendingId: string): boolean {
-		if (this._disposed) return false;
-		const index = this._pendingInstructions.findIndex(
-			(item) => item.pendingId === pendingId && item.state === "pending",
-		);
-		if (index === -1) return false;
-		this._pendingInstructions.splice(index, 1);
-		return true;
-	}
-
-	/**
 	 * Send a custom message to the session. Creates a CustomMessageEntry.
 	 *
 	 * Handles four cases:
@@ -3894,7 +3876,6 @@ export class AgentSession {
 					this.appendDeveloperMessage(content);
 				},
 				queueDeveloperMessage: (content, options) => this.queueDeveloperMessage(content, options),
-				cancelQueuedDeveloperMessage: (pendingId) => this.cancelQueuedDeveloperMessage(pendingId),
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);

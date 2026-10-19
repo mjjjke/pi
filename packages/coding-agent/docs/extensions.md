@@ -415,20 +415,6 @@ const result = pi.queueDeveloperMessage("Research only; do not edit files.", {
 - If the session is disposed during a tool batch, pending instructions are committed after the assistant's tool call, whose result is never persisted. On the next request the provider layer adds a synthetic tool result for the orphaned call; models that support mid-conversation instructions receive the instruction after that result and the next user message (Anthropic: `tool_use`, `tool_result`, user, system), never between a tool call and its result.
 - Blank content, or a call after the session is disposed, throws.
 
-### pi.cancelQueuedDeveloperMessage(pendingId)
-
-Cancel an instruction that `queueDeveloperMessage()` returned as pending. Command contexts expose the same method as `ctx.cancelQueuedDeveloperMessage(pendingId)`:
-
-```typescript
-if (result.status === "pending") {
-  const cancelled = pi.cancelQueuedDeveloperMessage(result.pendingId);
-}
-```
-
-Returns `true` only if the instruction was still pending and was removed. It will never be committed (including at run end or disposal), and its `onCommit` callback will not run. Other pending instructions keep their FIFO order. This also works for an instruction left pending by a failed append.
-
-Unknown ids, instructions already committing or committed, and direct `AgentSession` calls after disposal return `false` without throwing. Cancellation cannot retract a committed instruction, even if the provider request has not yet been sent. Like queueing, calls on a stale `pi` or command context throw; use the current runtime.
-
 <a id="custom-ui"></a>
 <a id="mode-behavior"></a>
 <a id="interact-with-the-user"></a>

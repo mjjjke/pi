@@ -172,7 +172,6 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		sendUserMessage: notInitialized,
 		appendDeveloperMessage: notInitialized,
 		queueDeveloperMessage: notInitialized,
-		cancelQueuedDeveloperMessage: notInitialized,
 		appendEntry: notInitialized,
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
@@ -434,11 +433,6 @@ function createExtensionAPI(
 		queueDeveloperMessage(content, options) {
 			assertActive();
 			return runtime.queueDeveloperMessage(content, options);
-		},
-
-		cancelQueuedDeveloperMessage(pendingId) {
-			assertActive();
-			return runtime.cancelQueuedDeveloperMessage(pendingId);
 		},
 
 		appendEntry(customType: string, data?: unknown): void {
