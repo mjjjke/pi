@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type FauxProviderRegistration, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { type FauxProviderRegistration, getApiProvider, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
@@ -26,13 +26,23 @@ export interface RuntimeHarness {
 	cleanup: () => Promise<void>;
 }
 
-export async function createRuntimeHarness(extensionFactory: ExtensionFactory = () => {}): Promise<RuntimeHarness> {
+export interface RuntimeHarnessOptions {
+	/** Bind the first session's extensions before returning (default true). */
+	bind?: boolean;
+}
+
+export async function createRuntimeHarness(
+	extensionFactory: ExtensionFactory = () => {},
+	options: RuntimeHarnessOptions = {},
+): Promise<RuntimeHarness> {
 	const tempDir = join(tmpdir(), `pi-runtime-harness-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	const sessionDir = join(tempDir, "sessions");
 	mkdirSync(sessionDir, { recursive: true });
 	const faux = registerFauxProvider();
 	faux.setResponses([]);
 	const model = faux.getModel();
+	// Registered through the extension too, so a reload (which resets API providers) keeps the faux stream.
+	const fauxStream = getApiProvider(faux.api)?.streamSimple;
 
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 		const services = await createAgentSessionServices({
@@ -45,6 +55,7 @@ export async function createRuntimeHarness(extensionFactory: ExtensionFactory = 
 							baseUrl: model.baseUrl,
 							apiKey: "faux-key",
 							api: faux.api,
+							streamSimple: fauxStream as never,
 							models: faux.models.map((registered) => ({
 								id: registered.id,
 								name: registered.name,
@@ -76,7 +87,7 @@ export async function createRuntimeHarness(extensionFactory: ExtensionFactory = 
 		sessionManager: SessionManager.create(tempDir, sessionDir),
 	});
 	runtime.setRebindSession((session) => session.bindExtensions({}));
-	await runtime.session.bindExtensions({});
+	if (options.bind !== false) await runtime.session.bindExtensions({});
 
 	return {
 		runtime,

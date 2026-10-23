@@ -1,8 +1,42 @@
-import { type FauxResponseFactory, fauxAssistantMessage, getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	type Context,
+	type FauxResponseFactory,
+	fauxAssistantMessage,
+	getCurrentSystemMessage,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
+import { runPrintMode } from "../../src/modes/print-mode.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createRpcHarness, type RpcHarness } from "./rpc-harness.ts";
+import { createRuntimeHarness, type RuntimeHarness } from "./runtime-harness.ts";
+
+const rpcIo = vi.hoisted(() => ({
+	outputLines: [] as string[],
+	lineHandler: undefined as ((line: string) => void) | undefined,
+}));
+
+vi.mock("../../src/core/output-guard.ts", () => ({
+	flushRawStdout: vi.fn(async () => {}),
+	onRawStdoutBroken: vi.fn(() => () => {}),
+	takeOverStdout: vi.fn(),
+	waitForRawStdoutBackpressure: vi.fn(async () => {}),
+	writeRawStdout: (line: string) => {
+		rpcIo.outputLines.push(line);
+	},
+}));
+
+vi.mock("../../src/modes/rpc/jsonl.ts", () => ({
+	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
+		rpcIo.lineHandler = onLine;
+		return () => {};
+	}),
+	serializeJsonLine: (value: unknown) => `${JSON.stringify(value)}\n`,
+}));
 
 interface Deferred {
 	promise: Promise<void>;
@@ -255,5 +289,269 @@ describe("AgentSession readiness barrier", () => {
 		});
 		await harness.session.prompt("plain");
 		expect(started).toBe(true);
+	});
+
+	describe("with real resources and modes", () => {
+		const cleanups: Array<() => Promise<void> | void> = [];
+
+		afterEach(async () => {
+			vi.restoreAllMocks();
+			while (cleanups.length > 0) await cleanups.pop()?.();
+		});
+
+		function createSkillDir(): string {
+			const root = mkdtempSync(join(tmpdir(), "pi-readiness-skills-"));
+			mkdirSync(join(root, "demo"), { recursive: true });
+			writeFileSync(join(root, "demo", "SKILL.md"), "---\nname: demo\ndescription: Demo skill\n---\nSKILL BODY\n");
+			cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+			return root;
+		}
+
+		/**
+		 * Sol's trace: an early session_start starts a run (a `/skill:` prompt), a later one blocks and then
+		 * registers a tool, and resources_discover adds the skill. `reason` selects the startup or reload pass.
+		 */
+		function solTrace(gate: Deferred, skillsDir: string, reason: "startup" | "reload") {
+			return (pi: ExtensionAPI) => {
+				pi.on("session_start", (event) => {
+					if (event.reason === reason) pi.sendUserMessage("/skill:demo please", { expandPromptTemplates: true });
+				});
+				pi.on("session_start", async (event) => {
+					if (event.reason !== reason) return;
+					await gate.promise;
+					pi.registerTool(lateTool(`late_${reason}`));
+				});
+				pi.on("resources_discover", (event) => (event.reason === reason ? { skillPaths: [skillsDir] } : {}));
+			};
+		}
+
+		interface WireRequest {
+			tools: string[];
+			systemText: string;
+			userTexts: string[];
+		}
+
+		function recordWire(): { requests: WireRequest[]; factory: () => FauxResponseFactory } {
+			const requests: WireRequest[] = [];
+			const factory = (): FauxResponseFactory => (context: Context) => {
+				const systems = context.messages.filter((message) => message.role === "system");
+				requests.push({
+					tools: (getCurrentSystemMessage(context.messages)?.toolsAdded ?? []).map((tool) => tool.name),
+					systemText: JSON.stringify(systems),
+					userTexts: context.messages.filter((m) => m.role === "user").map((m) => getMessageText(m)),
+				});
+				return fauxAssistantMessage("ok");
+			};
+			return { requests, factory };
+		}
+
+		function expectReadyRequest(request: WireRequest | undefined, tool: string) {
+			expect(request?.tools).toContain(tool);
+			expect(request?.systemText).toContain("Demo skill");
+			// The skill discovered after the sender expanded the startup-triggered prompt.
+			expect(request?.userTexts.at(-1)).toContain("SKILL BODY");
+		}
+
+		it("SDK: the startup run waits for the late tool and the skill discovered later in binding", async () => {
+			const gate = deferred();
+			const skillsDir = createSkillDir();
+			const harness: RuntimeHarness = await createRuntimeHarness(solTrace(gate, skillsDir, "startup"), {
+				bind: false,
+			});
+			cleanups.push(() => harness.cleanup());
+			const { requests, factory } = recordWire();
+			harness.faux.setResponses([factory()]);
+
+			const binding = harness.runtime.session.bindExtensions({});
+			await tick();
+			expect(requests).toHaveLength(0);
+			gate.resolve();
+			await binding;
+			await vi.waitFor(() => expect(requests).toHaveLength(1));
+			await harness.runtime.session.waitForIdle();
+
+			expectReadyRequest(requests[0], "late_startup");
+			const snapshot = harness.runtime.session.sessionManager.buildSessionProjection().messages[0];
+			expect(snapshot?.role === "system" && snapshot.toolsAdded?.map((tool) => tool.name)).toContain("late_startup");
+		});
+
+		it("SDK reload: a run started by session_start(reload) waits for the reload's tool and skill", async () => {
+			const gate = deferred();
+			const skillsDir = createSkillDir();
+			const harness: RuntimeHarness = await createRuntimeHarness(solTrace(gate, skillsDir, "reload"));
+			cleanups.push(() => harness.cleanup());
+			const { requests, factory } = recordWire();
+			harness.faux.setResponses([fauxAssistantMessage("first"), factory()]);
+			await harness.runtime.session.prompt("first");
+
+			const reload = harness.runtime.session.reload();
+			await tick();
+			expect(requests).toHaveLength(0);
+			gate.resolve();
+			await reload;
+			await vi.waitFor(() => expect(requests).toHaveLength(1));
+			await harness.runtime.session.waitForIdle();
+
+			expectReadyRequest(requests[0], "late_reload");
+		});
+
+		it("print mode: the startup run waits for binding to finish", async () => {
+			const gate = deferred();
+			const skillsDir = createSkillDir();
+			const harness: RuntimeHarness = await createRuntimeHarness(solTrace(gate, skillsDir, "startup"), {
+				bind: false,
+			});
+			cleanups.push(() => harness.cleanup());
+			const { requests, factory } = recordWire();
+			harness.faux.setResponses([factory()]);
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			const runtime = harness.runtime;
+			// The host keeps the runtime for cleanup; disposing waits for the startup run to settle.
+			const host = {
+				get session() {
+					return runtime.session;
+				},
+				newSession: vi.fn(async () => ({ cancelled: true })),
+				fork: vi.fn(async () => ({ cancelled: true })),
+				switchSession: vi.fn(async () => ({ cancelled: true })),
+				dispose: vi.fn(async () => {
+					await runtime.session.waitForIdle();
+				}),
+				setRebindSession: vi.fn(),
+			};
+
+			const printing = runPrintMode(host as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				messages: [],
+			});
+			await tick();
+			expect(requests).toHaveLength(0);
+			gate.resolve();
+			expect(await printing).toBe(0);
+			await runtime.session.waitForIdle();
+
+			expect(requests).toHaveLength(1);
+			expectReadyRequest(requests[0], "late_startup");
+		});
+
+		async function rpcSetup(
+			extensionFactory: (pi: ExtensionAPI) => void,
+			initialResponses?: FauxResponseFactory[],
+		): Promise<RpcHarness> {
+			const harness = await createRpcHarness(rpcIo, { extensionFactory, initialResponses });
+			cleanups.push(() => harness.cleanup());
+			return harness;
+		}
+
+		it("RPC: the startup run waits for binding to finish", async () => {
+			const gate = deferred();
+			const skillsDir = createSkillDir();
+			const { requests, factory } = recordWire();
+			const created = rpcSetup(solTrace(gate, skillsDir, "startup"), [factory()]);
+			await tick();
+			expect(requests).toHaveLength(0);
+			gate.resolve();
+			const harness = await created;
+			await vi.waitFor(() => expect(requests).toHaveLength(1));
+			await harness.runtime.session.waitForIdle();
+
+			expectReadyRequest(requests[0], "late_startup");
+		});
+
+		it("RPC reload from a command: the reload's startup run waits for the reload to finish", async () => {
+			const gate = deferred();
+			const skillsDir = createSkillDir();
+			const { requests, factory } = recordWire();
+			const harness = await rpcSetup((pi) => {
+				solTrace(gate, skillsDir, "reload")(pi);
+				pi.registerCommand("reload-now", {
+					description: "reload",
+					handler: async (_args, ctx) => {
+						await ctx.reload();
+					},
+				});
+			});
+			harness.faux.setResponses([factory()]);
+
+			harness.send({ id: "r1", type: "prompt", message: "/reload-now" });
+			await tick();
+			expect(requests).toHaveLength(0);
+			gate.resolve();
+			await harness.waitForResponse("r1");
+			await vi.waitFor(() => expect(requests).toHaveLength(1));
+			await harness.runtime.session.waitForIdle();
+
+			expectReadyRequest(requests[0], "late_reload");
+		});
+
+		it("RPC command context: reload rejects while the first run is blocked in preflight", async () => {
+			const gate = deferred();
+			const harness = await rpcSetup((pi) => {
+				pi.on("before_agent_start", async () => {
+					await gate.promise;
+				});
+				pi.registerCommand("reload-now", {
+					description: "reload",
+					handler: async (_args, ctx) => {
+						await ctx.reload();
+					},
+				});
+			});
+			harness.faux.setResponses([fauxAssistantMessage("ok")]);
+
+			harness.send({ id: "p1", type: "prompt", message: "hello" });
+			await tick();
+			harness.send({ id: "r1", type: "prompt", message: "/reload-now" });
+			await harness.waitForResponse("r1");
+			await vi.waitFor(() =>
+				expect(
+					harness
+						.records()
+						.some(
+							(record) =>
+								record.type === "extension_error" &&
+								String(record.error).includes(
+									"Cannot reload while a run is active, compaction is running, or extensions are binding",
+								),
+						),
+				).toBe(true),
+			);
+			gate.resolve();
+			await harness.waitForResponse("p1");
+			await harness.runtime.session.waitForIdle();
+			expect(harness.faux.state.callCount).toBe(1);
+		});
+	});
+
+	it("reload rejects while compacting", async () => {
+		const gate = deferred();
+		let compacting = false;
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => {
+						compacting = true;
+						await gate.promise;
+						return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		recordRequests(harness, 2);
+		await harness.session.prompt("hello");
+		await harness.session.prompt("again");
+
+		const compaction = harness.session.compact().catch(() => {});
+		await vi.waitFor(() => expect(compacting).toBe(true));
+		expect(harness.session.isCompacting).toBe(true);
+		await expect(harness.session.reload()).rejects.toThrow(
+			"Cannot reload while a run is active, compaction is running, or extensions are binding",
+		);
+		gate.resolve();
+		await compaction;
+		await expect(harness.session.reload()).resolves.toBeUndefined();
 	});
 });

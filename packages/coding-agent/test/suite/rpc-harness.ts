@@ -10,7 +10,12 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type FauxProviderRegistration, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import {
+	type FauxProviderRegistration,
+	type FauxResponseStep,
+	getApiProvider,
+	registerFauxProvider,
+} from "@earendil-works/pi-ai/compat";
 import { expect, vi } from "vitest";
 import {
 	type AgentSessionRuntime,
@@ -46,6 +51,8 @@ export interface RpcHarnessOptions {
 	extensionFactory?: ExtensionFactory;
 	additionalSkillPaths?: string[];
 	additionalPromptTemplatePaths?: string[];
+	/** Faux responses queued before RPC mode binds, for runs started during startup. */
+	initialResponses?: FauxResponseStep[];
 }
 
 function parseRecords(lines: string[]): RpcRecord[] {
@@ -62,7 +69,9 @@ export async function createRpcHarness(io: RpcIo, options: RpcHarnessOptions = {
 	mkdirSync(tempDir, { recursive: true });
 
 	const faux = registerFauxProvider();
-	faux.setResponses([]);
+	faux.setResponses(options.initialResponses ?? []);
+	// Registered through the extension too, so a reload (which resets API providers) keeps the faux stream.
+	const fauxStream = getApiProvider(faux.api)?.streamSimple;
 	const authStorage = AuthStorage.inMemory();
 	await authStorage.modify(faux.getModel().provider, async () => ({ type: "api_key", key: "faux-key" }));
 
@@ -77,6 +86,7 @@ export async function createRpcHarness(io: RpcIo, options: RpcHarnessOptions = {
 						baseUrl: faux.getModel().baseUrl,
 						apiKey: "faux-key",
 						api: faux.api,
+						streamSimple: fauxStream as never,
 						models: faux.models.map((model) => ({
 							id: model.id,
 							name: model.name,
