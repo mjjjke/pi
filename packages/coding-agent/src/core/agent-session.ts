@@ -417,6 +417,16 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	/** Only developer instructions may commit immediately while before_agent_start handlers run. */
 	private _isPreparingRun = false;
+	/** Set while bindExtensions() or reload() runs startup; runs wait for it (readiness barrier). */
+	private _readiness: Promise<void> | undefined = undefined;
+	/**
+	 * Prompts that waited for the barrier, released once they reserve a run or settle, so the
+	 * binder returns after a startup-triggered run is reserved (as before the barrier).
+	 */
+	private _barrierStarters = new Set<() => void>();
+	private _barrierStarterPromises = new Set<Promise<void>>();
+	/** bindExtensions() ran at least once, so reload() re-runs startup. */
+	private _extensionsBound = false;
 	private _agentRunAbortRequested = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
@@ -2130,6 +2140,8 @@ export class AgentSession {
 		onStarted?: () => void,
 		admissionGen = this._admissionGen,
 	): Promise<void> {
+		// Readiness barrier: a run requested during binding or reload starts after it.
+		while (this._readiness) await this._readiness;
 		this._throwIfAdmissionChanged(admissionGen);
 		// Input/auth preflight does not reserve a run. A starter that lost that race must not
 		// reset abort state, consume queues, or apply its prompt/tool changes to the winner.
@@ -2140,6 +2152,7 @@ export class AgentSession {
 		}
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
+		for (const settle of [...this._barrierStarters]) settle();
 		let messages: AgentMessage[];
 		try {
 			messages = await this._prepareRun(trigger, admissionGen);
@@ -2403,6 +2416,31 @@ export class AgentSession {
 			});
 			return;
 		}
+		if (!this._readiness) return this._promptWhenReady(text, options, admissionGen);
+		// Readiness barrier: commands, input hooks and expansion see the ready resources.
+		let settle = () => {};
+		const settled = new Promise<void>((resolve) => {
+			settle = () => {
+				this._barrierStarters.delete(settle);
+				this._barrierStarterPromises.delete(settled);
+				resolve();
+			};
+		});
+		this._barrierStarters.add(settle);
+		this._barrierStarterPromises.add(settled);
+		try {
+			while (this._readiness) await this._readiness;
+			await this._promptWhenReady(text, options, admissionGen);
+		} finally {
+			settle();
+		}
+	}
+
+	private async _promptWhenReady(
+		text: string,
+		options: PromptOptions | undefined,
+		admissionGen: number,
+	): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		// Handle extension commands first (execute immediately, even during streaming)
@@ -3743,6 +3781,40 @@ export class AgentSession {
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		if (this._readiness) {
+			throw new Error("Cannot bind extensions while extensions are binding or reloading");
+		}
+		const release = this._beginReadiness();
+		try {
+			await this._bindExtensions(bindings);
+		} finally {
+			release();
+		}
+		await this._awaitBarrierStarters();
+	}
+
+	/** Install the readiness barrier; the returned function always releases it. */
+	private _beginReadiness(): () => void {
+		let resolve = () => {};
+		const promise = new Promise<void>((r) => {
+			resolve = r;
+		});
+		this._readiness = promise;
+		return () => {
+			if (this._readiness === promise) this._readiness = undefined;
+			resolve();
+		};
+	}
+
+	/** Wait until prompts deferred by the barrier have reserved their run or settled. */
+	private async _awaitBarrierStarters(): Promise<void> {
+		while (!this._readiness && this._barrierStarterPromises.size > 0) {
+			await Promise.all([...this._barrierStarterPromises]);
+		}
+	}
+
+	private async _bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		this._extensionsBound = true;
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -4167,6 +4239,19 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		if (this._isAgentRunActive || this.isCompacting || this._readiness) {
+			throw new Error("Cannot reload while a run is active, compaction is running, or extensions are binding");
+		}
+		const release = this._beginReadiness();
+		try {
+			await this._reload(options);
+		} finally {
+			release();
+		}
+		await this._awaitBarrierStarters();
+	}
+
+	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
@@ -4194,12 +4279,8 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 
-		const hasBindings =
-			this._extensionUIContext ||
-			this._extensionCommandContextActions ||
-			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
-		if (hasBindings) {
+		// Every bound session re-runs startup (recheck N2); a never-bound SDK session does not.
+		if (this._extensionsBound) {
 			await options?.beforeSessionStart?.();
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			this._extensionRunner.reportUnhandledMcpServers();
