@@ -895,6 +895,9 @@ export class AgentSession {
 		this.agent.getTools = () => this.agent.state.tools.slice();
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
+			// No request goes out on a session whose file may hold a partial entry (§3.6).
+			const persistenceError = this.sessionManager.getPersistenceError();
+			if (persistenceError) throw persistenceError;
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
@@ -2491,6 +2494,9 @@ export class AgentSession {
 		// Readiness barrier: a run requested during binding or reload starts after it.
 		while (this._readiness) await this._readiness;
 		this._throwIfAdmissionChanged(admissionGen);
+		// After an ambiguous append the session refuses runs until it is reopened (§3.6).
+		const persistenceError = this.sessionManager.getPersistenceError();
+		if (persistenceError) throw persistenceError;
 		// Input/auth preflight does not reserve a run. A starter that lost that race must not
 		// reset abort state, consume queues, or apply its prompt/tool changes to the winner.
 		if (this._isAgentRunActive) {

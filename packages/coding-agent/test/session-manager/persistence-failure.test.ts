@@ -1,8 +1,12 @@
 import * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager, SessionPersistenceError } from "../../src/core/session-manager.ts";
+import { createHarness } from "../suite/harness.ts";
 
 // Pass-through fs with fault hooks (§3.6, Astra M4).
 const faults = vi.hoisted(() => ({
@@ -145,5 +149,57 @@ describe("session persistence failures (§3.6)", () => {
 		manager.setSessionFile(file);
 		expect(manager.getPersistenceError()).toBeUndefined();
 		manager.appendMessage(user("resumed"));
+	});
+
+	it("AgentSession refuses to start a run while persistenceError is set, with the documented text", async () => {
+		const manager = SessionManager.create(dir, dir);
+		const harness = await createHarness({ sessionManager: manager });
+		try {
+			harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+			await harness.session.prompt("first");
+			faults.shortAppend = true;
+			expect(() => manager.appendCustomEntry("state")).toThrow(EXPECTED_TEXT);
+
+			await expect(harness.session.prompt("second")).rejects.toThrow(EXPECTED_TEXT);
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.session.isStreaming).toBe(false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("AgentSession's request boundary refuses to send while persistenceError is set", async () => {
+		let failing = false;
+		const tool: AgentTool = {
+			name: "fail_disk",
+			label: "fail_disk",
+			description: "fail_disk",
+			parameters: Type.Object({}),
+			execute: async () => {
+				failing = true;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const harness = await createHarness({ tools: [tool] });
+		try {
+			const error = new SessionPersistenceError(Object.assign(new Error("EIO"), { code: "EIO" }));
+			vi.spyOn(harness.sessionManager, "getPersistenceError").mockImplementation(() =>
+				failing ? error : undefined,
+			);
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("fail_disk", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage("never"),
+			]);
+
+			await harness.session.prompt("go");
+
+			expect(harness.faux.state.callCount).toBe(1);
+			const last = harness.session.messages.at(-1);
+			expect(last).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect((last as { errorMessage?: string }).errorMessage).toBe(EXPECTED_TEXT);
+		} finally {
+			vi.restoreAllMocks();
+			harness.cleanup();
+		}
 	});
 });
