@@ -271,6 +271,50 @@ describe("AgentSession readiness barrier", () => {
 		},
 	);
 
+	it("after bindExtensions({}) an extension re-stages the instruction the reload dropped (recheck N2)", async () => {
+		const commits: string[] = [];
+		const runtime = await createRuntimeHarness((pi) => {
+			pi.on("session_start", (event) => {
+				pi.queueDeveloperMessage(`policy:${event.reason}`, { onCommit: () => commits.push(event.reason) });
+			});
+		});
+		try {
+			const requests: string[][] = [];
+			runtime.faux.setResponses([
+				(context) => {
+					requests.push(context.messages.map((message) => `${message.role}:${getMessageText(message)}`));
+					return fauxAssistantMessage("ok");
+				},
+			]);
+			await runtime.runtime.session.reload();
+			await runtime.runtime.session.prompt("go");
+			expect(requests[0]?.filter((line) => line.startsWith("developer:"))).toEqual(["developer:policy:reload"]);
+			expect(commits).toEqual(["reload"]);
+		} finally {
+			await runtime.cleanup();
+		}
+	});
+
+	it("a never-bound SDK session keeps its staged extension instruction across reload, without onCommit", async () => {
+		let api: ExtensionAPI | undefined;
+		const harness = await setup([
+			(pi) => {
+				api = pi;
+			},
+		]);
+		const onCommit = vi.fn();
+		const staged = api!.queueDeveloperMessage("kept", { onCommit });
+		expect(staged.status).toBe("staged");
+		await harness.session.reload();
+		await harness.session.prompt("go").catch(() => {});
+		const developers = harness.sessionManager
+			.buildSessionProjection()
+			.messages.filter((message) => message.role === "developer")
+			.map((message) => getMessageText(message));
+		expect(developers).toEqual(["kept"]);
+		expect(onCommit).not.toHaveBeenCalled();
+	});
+
 	it("a never-bound SDK session reloads without session_start and has no barrier", async () => {
 		const events: string[] = [];
 		const harness = await setup([
