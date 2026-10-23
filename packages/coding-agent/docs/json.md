@@ -23,7 +23,7 @@ Read stdout continuously. A reader that stops consuming records can stall Pi whe
 The first JSON-mode record is the current [session header](session-format.md#sessionheader):
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path"}
+{"type":"session","version":4,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path"}
 ```
 
 RPC mode does not emit this record. Use [`get_state`](rpc-commands.md#get_state) for its current session ID and file.

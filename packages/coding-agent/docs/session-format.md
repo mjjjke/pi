@@ -26,8 +26,36 @@ Sessions have a version field in the header:
 - **Version 1**: Linear entry sequence (legacy, auto-migrated on load)
 - **Version 2**: Tree structure with `id`/`parentId` linking
 - **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
+- **Version 4** (this fork): canonical startup prefix. The initial system snapshot is the first context entry of every branch, followed by developer instructions, then content. Every compaction has a `systemMessage` checkpoint. Adds the `standing_instruction` entry, `SessionMessageEntry.standingKey`, `CompactionEntry.standing` and `BranchSummaryEntry.systemMessage`.
 
-Existing sessions are automatically migrated to the current version (v3) when loaded.
+Versions 1 and 2 are migrated on load as before. Version 3 files are migrated to v4 once, by a batch command, while no pi process runs (below).
+
+### Migrating to v4
+
+```bash
+pi sessions migrate --dry-run --dir ~/.pi/agent/subagent-sessions   # report only
+pi sessions migrate --dir ~/.pi/agent/subagent-sessions
+```
+
+`pi sessions migrate [--dry-run] [--dir <path>]...` walks every `*.jsonl` below its roots (deduplicated by real path): `<agentDir>/sessions`, the `sessionDir` setting (global settings only; pass a project-level `sessionDir` with `--dir`), `PI_CODING_AGENT_SESSION_DIR`, and every `--dir`. Files without a session header are reported `invalid` and left untouched; v4 files are `current`; v3 and older files are migrated and rewritten atomically (temp file in the same directory, `fsync`, `rename`). An I/O error leaves the original untouched and counts as `failed`. The report lists the roots with their source, scanned, current, migrated (prefixes permuted, `firstKeptEntryId` remapped, checkpoints backfilled, header-only bumps), skipped with reason and path, invalid and failed. A second run reports `migrated 0`.
+
+The migration of one file:
+
+1. **Startup prefix.** For each system entry that is the first system message on its path, the context entries before it and the system entry itself are reordered within their own file positions: system first, then developers, then content, each in the old order. Non-context entries (model and thinking changes, custom state, labels) keep their positions; parent ids are recomputed along the chain; entry ids never change. It skips (and warns once per file) a prefix that contains an assistant, tool result, compaction or branch summary, a branch inside the prefix, and a system entry that is the file's last entry. A skipped file is still bumped to v4 and stays noncanonical.
+2. **Compaction targets.** A `firstKeptEntryId` that points into a reordered block moves to the block's first context entry, which keeps a superset of the old range.
+3. **Checkpoints.** A compaction without `systemMessage` gets the replayed system state of its path.
+
+Exit codes: 0 done, 1 usage error or a failed file, 2 refused. Before writing, the command lists other live pi processes (Linux: `/proc/<pid>/comm` is `pi` or `pi-rpc` and the executable is node or bun; elsewhere `ps`), including a parent pi, so running it from a pi bash tool is refused. If any is live and at least one file to rewrite lies inside `<agentDir>` or inside the `sessionDir` / `PI_CODING_AGENT_SESSION_DIR` roots, it prints the pids and exits 2 without writing. Files only under other `--dir` roots produce a warning. `--dry-run` never refuses. The probe does not detect SDK hosts named `node` or renamed binaries; confirm with `pgrep -ax 'pi|pi-rpc'`.
+
+**Stray v3 files.** A v3 file opened later (written by an older build, copied in, or outside the migrated roots) is migrated in memory and rewritten atomically: temp file, `fsync`, a re-check that size and mtime still match what was read, then `rename`. If the re-check differs or anything fails, the file stays untouched, the session uses the migrated view in memory (the raw entries if migrating threw) and Pi prints a warning (at startup, and after `/resume`, fork and import). Leftover temp files are deleted on the next attempt. Another process that appends to the same file between the re-check and the rename loses that append; two pi processes writing one session file are unsupported anyway.
+
+`forkFrom` (CLI `--fork`) migrates the copied source entries in memory and publishes the fork atomically; the source file is never rewritten.
+
+Older builds still open v4 files: they ignore the new entry type and fields, so after a rollback a compaction's carried standing values are missing, hidden keyed developers show again, and a branch-summary checkpoint is not projected.
+
+### Write failures
+
+The first write of a new session file and every whole-file write (migration rewrites, branched-session files, forks) go through a temp file in the same directory (`.<name>.<pid>.tmp`), `fsync`, and a hard link (new files) or `rename` (rewrites), so a failure leaves no visible partial file and can be retried. If appending an entry fails, the entry is removed from memory and the leaf restored. Because some bytes may have reached the file, the manager records a sticky persistence error (`getPersistenceError()`): later appends throw at once, and `AgentSession` refuses to start runs or send requests with `Session file write failed (<code>): the last entry may be missing or partial. Resume the session (/resume, or restart with pi -c) to continue.` Reopening the file clears it: the loader skips malformed lines and terminates a torn last line, so a fragment never merges with the next entry.
 
 ## Source Files
 
@@ -66,13 +94,13 @@ interface SessionEntryBase {
 First line of the file. Metadata only, not part of the tree (no `id`/`parentId`).
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
+{"type":"session","version":4,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
 ```
 
 For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ parentSession })`):
 
 ```json
-{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
+{"type":"session","version":4,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
 ```
 
 ### SessionMessageEntry
@@ -84,7 +112,7 @@ A message in the conversation. The `message` field contains an `AgentMessage`. S
 {"type":"message","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:04:00.000Z","message":{"role":"system","content":"","sections":{"skills":"<skills>...</skills>"},"toolsRemoved":[{"name":"write"}],"timestamp":1733234640000}}
 ```
 
-Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message, which replays the same way.
+In v4 the first system message is the first context entry of every branch: the first run of a branch writes it before any staged developer instruction or content (see [Extensions: before the first run](extensions.md#before-the-first-run)). Providers treat only the message at index 0 as the initial snapshot; any later system message is an update. Sessions created before system messages existed have no leading system message; the first request declares the current prompt as a later system message, which replays the same way.
 
 ```json
 {"type":"message","id":"a1b2c3d4","parentId":"prev1234","timestamp":"2024-12-03T14:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1733234401000}}
@@ -101,6 +129,12 @@ This fork also persists text-only developer instructions as ordinary message ent
 ```
 
 Extensions can inject developer instructions ephemerally through `context`, or persist them without starting a turn through `pi.appendDeveloperMessage()`. Unsupported developer messages are dropped during provider serialization; system messages retain their prompt/tool replay semantics. See [DeveloperMessage](message-types.md#developermessage) for the shared type.
+
+A developer message that delivers a [standing instruction](#standing-instructions) has `standingKey` on the entry (not on the message):
+
+```json
+{"type":"message","id":"dev23456","parentId":"a1b2c3d4","timestamp":"2024-12-03T14:00:05.000Z","standingKey":"collaboration-mode","message":{"role":"developer","content":"<collaboration_mode>...</collaboration_mode>","timestamp":1733234405000}}
+```
 
 ### ModelChangeEntry
 
@@ -139,7 +173,8 @@ Created when context is compacted. Stores a summary of earlier messages and a co
 `firstKeptEntryId` is required. It identifies the first entry retained from before the compaction entry. When rebuilding context, Pi replaces older summarized entries with the compaction summary and keeps the range beginning at this entry. A retain-none compaction stores its own ID in this field, so no preceding entries are retained.
 
 Optional fields:
-- `systemMessage`: The replayed prompt sections and tool declarations at the compaction boundary; it becomes the leading system message of the compacted context, and system messages among the kept entries are dropped in its favor. It is absent on older session entries.
+- `systemMessage`: The replayed prompt sections and tool declarations at the compaction boundary; it becomes the leading system message of the compacted context, and system messages among the kept entries are dropped in its favor. Written by every compaction; the v4 migration backfills it on older entries.
+- `standing`: `Array<{ key, message: DeveloperMessage }>`, the [standing values](#standing-instructions) carried into the new epoch, in key order, with the compaction's timestamp. Present (possibly `[]`) on every compaction written by this fork; its presence makes the compaction standing-aware. Never backfilled.
 - `usage`: LLM usage from generating the summary; included in session token and cost totals
 - `details`: Implementation-specific data (e.g., `{ readFiles: string[], modifiedFiles: string[] }` for default, or custom data for extensions)
 - `fromHook`: `true` if generated by an extension, `false`/`undefined` if pi-generated (legacy field name)
@@ -165,6 +200,7 @@ Created when switching branches via `/tree` with an LLM generated summary of the
 `parentId` is the entry from which the new branch continues. `fromId` is the previous leaf whose abandoned path was summarized.
 
 Optional fields:
+- `systemMessage` (this fork): a checkpoint of the source branch's replayed system state, written only when the target path has no system message (for example a summary at the root). It is projected before the summary only when no compaction precedes the summary; in a compaction's kept range only the summary text is projected.
 - `usage`: LLM usage from generating the summary; included in session token and cost totals
 - `details`: File tracking data (`{ readFiles: string[], modifiedFiles: string[] }`) for default, or custom data for extensions
 - `fromHook`: `true` if generated by an extension, `false`/`undefined` if pi-generated (legacy field name)
@@ -193,6 +229,26 @@ Fields:
 - `content`: String or `(TextContent | ImageContent)[]` (same as UserMessage)
 - `display`: `true` = show in TUI with distinct styling, `false` = hidden
 - `details`: Optional extension-specific metadata (not sent to LLM)
+
+<a id="standing-instructions"></a>
+
+### StandingInstructionEntry
+
+This fork's desired value of a standing instruction (see [Extensions: standing instructions](extensions.md#standing-instructions)). Non-context: it projects nothing. The tree shows it as `[standing: <key>]`.
+
+```json
+{"type":"standing_instruction","id":"l1m2n3o4","parentId":"k1l2m3n4","timestamp":"2024-12-03T14:36:00.000Z","key":"collaboration-mode","content":"<collaboration_mode>...</collaboration_mode>","apply":"next-request"}
+```
+
+- `content`: string or `TextContent[]`; absent means the key was cleared.
+- `apply`: `"next-input"` or `"next-request"`; absent means `"next-input"`.
+
+State is derived from the active branch (`getStandingState()`, root to leaf) and never cached:
+
+- **Desired:** the latest state entry for the key (cleared: none). A key with no state entry on the branch takes the latest keyed value (keyed developer or carried item) instead; this covers legacy messages tagged with `standingKey` after the fact.
+- **Delivered:** a keyed developer sets it. A standing-aware compaction resets every key to its `standing` items (absent key: none). An older compaction (no `standing` field) resets every key to the latest keyed developer its kept range retains, or none.
+- **Pending:** a desired value whose content differs from the delivered content (canonical JSON comparison).
+- **Key order:** first appearance of the key on the branch. Bootstrap, request-boundary delivery and the compaction carry use it.
 
 ### LabelEntry
 
@@ -247,13 +303,14 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 1. Extracts current model and thinking level settings from the full path
 2. Converts selected entries to messages:
    - `message` -> stored `AgentMessage`
-   - `compaction` -> complete system checkpoint followed by `compactionSummary`
-   - `branch_summary` -> `branchSummary`
+   - `compaction` -> complete system checkpoint, then the carried `standing` messages, then `compactionSummary`
+   - `branch_summary` -> `branchSummary`, preceded by its `systemMessage` checkpoint when it has one and no compaction precedes it
+   - `standing_instruction` -> no context message
    - `custom_message` -> `CustomMessage`
    - `context_edit` -> no context message of its own
    - `usage` and `custom` -> no context message
 
-The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the complete checkpoint rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM.
+The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the complete checkpoint rather than replayed from the retained range. In the kept range of a standing-aware compaction, keyed developers (any `standingKey`) are also skipped, because the carried values replace them; they stay in the journal and in `getBranch()`. Unkeyed developers stay. Retained non-system entries and all entries after the compaction remain available to the LLM. A compacted context therefore starts like a new session: `checkpoint system · carried standing values · summary · kept entries · later entries`.
 
 ## Parsing Example
 
