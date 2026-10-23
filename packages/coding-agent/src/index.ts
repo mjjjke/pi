@@ -321,6 +321,8 @@ export {
 	type SessionInfoEntry,
 	SessionManager,
 	type SessionMessageEntry,
+	type SessionMigrationReport,
+	SessionPersistenceError,
 	type SessionProjection,
 	type SessionTreeNode,
 	sessionEntryToContextMessages,

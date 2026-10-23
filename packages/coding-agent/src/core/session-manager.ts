@@ -1240,6 +1240,21 @@ async function listSessionsFromDir(
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
  */
+/** An append to an existing session file failed; the file may end with a partial entry (§3.6). */
+export class SessionPersistenceError extends Error {
+	readonly code: string;
+
+	constructor(cause: unknown) {
+		const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? "unknown";
+		super(
+			`Session file write failed (${code}): the last entry may be missing or partial. Resume the session (/resume, or restart with pi -c) to continue.`,
+			{ cause },
+		);
+		this.name = "SessionPersistenceError";
+		this.code = code;
+	}
+}
+
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
@@ -1253,6 +1268,7 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private loadWarnings: string[] = [];
+	private persistenceError: SessionPersistenceError | undefined;
 
 	private constructor(
 		cwd: string,
@@ -1286,6 +1302,7 @@ export class SessionManager {
 	private _setSessionFile(sessionFile: string, preloaded?: LoadedSessionFile): void {
 		this.sessionFile = resolvePath(sessionFile);
 		this.loadWarnings = [];
+		this.persistenceError = undefined;
 		if (existsSync(this.sessionFile)) {
 			const loaded = preloaded ?? loadSessionFile(this.sessionFile);
 			const entries = loaded.entries;
@@ -1334,6 +1351,7 @@ export class SessionManager {
 		this.leafId = null;
 		this.flushed = false;
 		this.loadWarnings = [];
+		this.persistenceError = undefined;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1470,25 +1488,44 @@ export class SessionManager {
 
 		if (!this.flushed) {
 			if (!this._hasConversation()) return;
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
-			}
+			// Atomic creation: a failure leaves no visible file, so a retry is safe.
+			this._writeWholeFile("create");
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			try {
+				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			} catch (error) {
+				// Some bytes may be on disk: refuse further writes until the session is reopened.
+				this.persistenceError = new SessionPersistenceError(error);
+				throw this.persistenceError;
+			}
 		}
 	}
 
+	/**
+	 * Set after an append to an existing session file failed (the last entry may be missing or partial).
+	 * Sticky until the session is reopened (`setSessionFile`) or replaced (`newSession`).
+	 */
+	getPersistenceError(): SessionPersistenceError | undefined {
+		return this.persistenceError;
+	}
+
 	private _appendEntry(entry: SessionEntry): void {
+		if (this.persistenceError) throw this.persistenceError;
+		const previousLeafId = this.leafId;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
-		this._persist(entry);
+		try {
+			this._persist(entry);
+		} catch (error) {
+			// Memory never claims more than the last known-good state.
+			const index = this.fileEntries.lastIndexOf(entry);
+			if (index >= 0) this.fileEntries.splice(index, 1);
+			this.byId.delete(entry.id);
+			this.leafId = previousLeafId;
+			throw error;
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1903,6 +1940,7 @@ export class SessionManager {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		const previousLeafId = this.leafId;
 		const fromId = this.leafId ?? "root";
 		this.leafId = branchFromId;
 		const entry: BranchSummaryEntry = {
@@ -1916,7 +1954,12 @@ export class SessionManager {
 			usage,
 			fromHook,
 		};
-		this._appendEntry(entry);
+		try {
+			this._appendEntry(entry);
+		} catch (error) {
+			this.leafId = previousLeafId;
+			throw error;
+		}
 		return entry.id;
 	}
 
