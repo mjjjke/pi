@@ -182,9 +182,11 @@ async function runLoop(
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			let preparedMessages: AgentMessage[] = [];
+			let replacedContext = false;
 			if (lastCompletedTurn) {
 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
 				if (nextTurnSnapshot) {
+					replacedContext = nextTurnSnapshot.context !== undefined;
 					currentContext = nextTurnSnapshot.context ?? currentContext;
 					preparedMessages = nextTurnSnapshot.messages ?? [];
 					config = {
@@ -205,6 +207,13 @@ async function runLoop(
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 				}
 				await emit({ type: "turn_start" });
+			}
+
+			// Refresh the declared loadout from the live tools, unless this boundary's turn update
+			// replaced the context (its tools are authoritative here; later changes are declared at
+			// the next boundary).
+			if (config.getTools && !replacedContext) {
+				currentContext = { ...currentContext, tools: config.getTools() };
 			}
 
 			// Process prepared and queued messages before the next assistant response.

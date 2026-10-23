@@ -280,6 +280,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getInstructionMessages?: (context: AgentContext) => AgentMessage[] | Promise<AgentMessage[]>;
 
 	/**
+	 * Optional live tool loadout. When set, the loop refreshes `context.tools` from it immediately
+	 * before declaring tool changes at every request boundary (the first one too), unless that
+	 * boundary's `prepareNextTurn` returned a replacement `context`, which stays authoritative there.
+	 * A tool registered after the run started (for example in `agent_start`) is then declared
+	 * before the request that can call it. Unset: the run's context snapshot is used, as before.
+	 */
+	getTools?: () => AgentTool<any>[];
+
+	/**
 	 * Called immediately before every conversational provider request, including the first.
 	 * Pending messages have already been appended. The returned context, model, and thinking level
 	 * replace the runtime values for this and later requests in the run. This hook does not poll queues.
