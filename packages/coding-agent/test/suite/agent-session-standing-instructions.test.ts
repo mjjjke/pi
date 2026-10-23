@@ -1,9 +1,47 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type FauxResponseFactory,
+	fauxAssistantMessage,
+	fauxToolCall,
+	lazyApi,
+	type Message,
+	type Model,
+	type ProviderStreams,
+} from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { transformMessages } from "../../../ai/src/api/transform-messages.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
+import { SessionPersistenceError } from "../../src/core/session-manager.ts";
 import { createBootstrappedSessionManager, createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createRpcHarness } from "./rpc-harness.ts";
+import { createRuntimeHarness, type RuntimeHarness } from "./runtime-harness.ts";
+
+const rpcIo = vi.hoisted(() => ({
+	outputLines: [] as string[],
+	lineHandler: undefined as ((line: string) => void) | undefined,
+}));
+
+vi.mock("../../src/core/output-guard.ts", () => ({
+	flushRawStdout: vi.fn(async () => {}),
+	onRawStdoutBroken: vi.fn(() => () => {}),
+	takeOverStdout: vi.fn(),
+	waitForRawStdoutBackpressure: vi.fn(async () => {}),
+	writeRawStdout: (line: string) => {
+		rpcIo.outputLines.push(line);
+	},
+}));
+
+vi.mock("../../src/modes/rpc/jsonl.ts", () => ({
+	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
+		rpcIo.lineHandler = onLine;
+		return () => {};
+	}),
+	serializeJsonLine: (value: unknown) => `${JSON.stringify(value)}\n`,
+}));
 
 function describeMessage(message: { role: string }): string {
 	return message.role === "system" || message.role === "assistant" || message.role === "toolResult"
@@ -43,6 +81,7 @@ describe("AgentSession standing instructions", () => {
 		const harness = await createHarness({
 			extensionFactories: options.factories,
 			tools: options.tools,
+			initialActiveToolNames: options.tools?.map((tool) => tool.name),
 			sessionManager: options.bootstrapped ? createBootstrappedSessionManager() : undefined,
 		});
 		harnesses.push(harness);
@@ -199,6 +238,615 @@ describe("AgentSession standing instructions", () => {
 		expect(requests[0]?.at(-1)).toBe("developer:Plan");
 	});
 
+	/** A tool that runs `onRun` while the agent is streaming. */
+	function sideTool(name: string, onRun: () => unknown): AgentTool {
+		return {
+			name,
+			label: name,
+			description: name,
+			parameters: Type.Object({}),
+			execute: async () => {
+				await onRun();
+				return { content: [{ type: "text", text: name }], details: {} };
+			},
+		};
+	}
+
+	const toolCall = (name: string) => () => fauxAssistantMessage([fauxToolCall(name, {})], { stopReason: "toolUse" });
+
+	/** Make appendMessage throw for keyed developers whose key `fails(key)` selects. */
+	function failStandingAppend(harness: Harness, fails: (key: string) => boolean) {
+		const original = harness.sessionManager.appendMessage.bind(harness.sessionManager);
+		return vi.spyOn(harness.sessionManager, "appendMessage").mockImplementation((message, options) => {
+			if (options?.standingKey && fails(options.standingKey))
+				throw new Error(`append ${options.standingKey} failed`);
+			return original(message, options);
+		});
+	}
+
+	const lastError = (harness: Harness) =>
+		(harness.session.messages.findLast((message) => message.role === "assistant") as { errorMessage?: string })
+			?.errorMessage;
+
+	/**
+	 * An extension whose agent_before_settle continues once, context-only (a boundary custom message, no
+	 * queued input), at the first settle where `armed()` is true.
+	 */
+	function contextOnlyContinuation(armed: () => boolean) {
+		return (pi: ExtensionAPI) => {
+			let used = false;
+			pi.on("agent_before_settle", () => {
+				if (used || !armed()) return;
+				used = true;
+				return {
+					entries: [{ type: "custom_message", customType: "cont", content: "continue now", display: false }],
+					continue: true,
+				};
+			});
+		};
+	}
+
+	describe("next-input", () => {
+		it("is delivered after a custom-triggered start", async () => {
+			const harness = await setup({ bootstrapped: true });
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests)]);
+			harness.session.setStandingInstruction("mode", "Plan");
+
+			await harness.session.sendCustomMessage(
+				{ customType: "kick", content: "kickoff", display: false },
+				{ triggerTurn: true },
+			);
+
+			expect(requests[0]?.slice(-2)).toEqual(["user:kickoff", "developer:Plan"]);
+			expect(keyedDevelopers(harness)).toEqual(["mode:Plan"]);
+		});
+
+		it("is delivered after a steer drained mid-run, not at the preceding tool-result boundary", async () => {
+			let session: Harness["session"] | undefined;
+			const harness = await setup({
+				bootstrapped: true,
+				tools: [
+					sideTool("first", () => session!.setStandingInstruction("mode", "Plan")),
+					sideTool("second", () => session!.steer("redirect")),
+				],
+			});
+			session = harness.session;
+			const requests: string[][] = [];
+			harness.setResponses([
+				respond(requests, toolCall("first")),
+				respond(requests, toolCall("second")),
+				respond(requests),
+			]);
+
+			await harness.session.prompt("go");
+
+			expect(requests[1]?.filter((line) => line === "developer:Plan")).toEqual([]);
+			expect(requests[2]?.slice(-3)).toEqual(["toolResult", "user:redirect", "developer:Plan"]);
+			expect(keyedDevelopers(harness)).toEqual(["mode:Plan"]);
+		});
+
+		it("is delivered after a follow-up continued by agent.continue() after the run", async () => {
+			let session: Harness["session"] | undefined;
+			let queued = false;
+			const harness = await setup({
+				bootstrapped: true,
+				factories: [
+					(pi) => {
+						pi.on("agent_before_settle", () => {
+							if (queued) return;
+							queued = true;
+							session!.setStandingInstruction("mode", "Plan");
+							void session!.followUp("later");
+						});
+					},
+				],
+			});
+			session = harness.session;
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests), respond(requests)]);
+
+			await harness.session.prompt("go");
+
+			expect(requests).toHaveLength(2);
+			expect(requests[0]?.filter((line) => line === "developer:Plan")).toEqual([]);
+			expect(requests[1]?.slice(-2)).toEqual(["user:later", "developer:Plan"]);
+		});
+
+		it("is not delivered on a context-only agent_before_settle continuation", async () => {
+			let continued = false;
+			let session: Harness["session"] | undefined;
+			const harness = await setup({
+				bootstrapped: true,
+				factories: [
+					(pi) => {
+						pi.on("agent_before_settle", () => {
+							if (continued) return;
+							continued = true;
+							session!.setStandingInstruction("mode", "Plan");
+							return {
+								entries: [
+									{ type: "custom_message", customType: "cont", content: "continue now", display: false },
+								],
+								continue: true,
+							};
+						});
+					},
+				],
+			});
+			session = harness.session;
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests), respond(requests), respond(requests)]);
+
+			await harness.session.prompt("go");
+			expect(requests).toHaveLength(2);
+			expect(requests[1]?.at(-1)).toBe("user:continue now");
+			expect(keyedDevelopers(harness)).toEqual([]);
+
+			await harness.session.prompt("next");
+			expect(requests[2]?.slice(-2)).toEqual(["user:next", "developer:Plan"]);
+		});
+
+		it("is not delivered for passive custom messages or bash results that arrive mid-run", async () => {
+			let session: Harness["session"] | undefined;
+			const harness = await setup({
+				bootstrapped: true,
+				tools: [
+					sideTool("side", async () => {
+						session!.setStandingInstruction("mode", "Plan");
+						await session!.sendCustomMessage(
+							{ customType: "note", content: "passive", display: false },
+							{ triggerTurn: false },
+						);
+						session!.recordBashResult("ls", { output: "files", exitCode: 0, cancelled: false, truncated: false });
+					}),
+				],
+			});
+			session = harness.session;
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests, toolCall("side")), respond(requests), respond(requests)]);
+
+			await harness.session.prompt("go");
+			expect(requests[1]).toContain("user:passive");
+			expect(requests[1]?.filter((line) => line === "developer:Plan")).toEqual([]);
+			expect(keyedDevelopers(harness)).toEqual([]);
+
+			await harness.session.prompt("next");
+			expect(requests[2]?.slice(-2)).toEqual(["user:next", "developer:Plan"]);
+		});
+	});
+
+	it("reload and resume rebuild nothing: a pending next-request value survives and is delivered at the next request", async () => {
+		const runtime = await createRuntimeHarness();
+		try {
+			const requests: string[][] = [];
+			runtime.faux.setResponses([respond(requests), respond(requests), respond(requests)]);
+			const session = () => runtime.runtime.session;
+			await session().prompt("first");
+			session().setStandingInstruction("mode", "Plan", { apply: "next-request" });
+			const entryCount = () => session().sessionManager.getEntries().length;
+			const before = entryCount();
+
+			await session().reload();
+			expect(entryCount()).toBe(before);
+			expect(session().getStandingInstruction("mode")).toMatchObject({ apply: "next-request", delivered: false });
+
+			const file = session().sessionFile!;
+			await runtime.runtime.switchSession(file);
+			expect(entryCount()).toBe(before);
+			expect(session().getStandingInstruction("mode")).toMatchObject({ apply: "next-request", delivered: false });
+
+			await session().prompt("second");
+			expect(requests[1]?.slice(-2)).toEqual(["user:second", "developer:Plan"]);
+			expect(session().getStandingInstruction("mode")?.delivered).toBe(true);
+		} finally {
+			await runtime.cleanup();
+		}
+	});
+
+	describe("fail closed (Astra recheck 3 F3)", () => {
+		it.each([
+			["delivers before its request once the append works", true],
+			["fails closed again while the append still throws", false],
+		])("an inputless retry finds the key due: it %s", async (_label, worksOnRetry) => {
+			let armed = false;
+			const harness = await setup({ bootstrapped: true, factories: [contextOnlyContinuation(() => armed)] });
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests), respond(requests)]);
+			harness.session.setStandingInstruction("mode", "Plan");
+			let failing = true;
+			failStandingAppend(harness, () => failing);
+			// The failed boundary ends the run; the settle boundary then continues without a new input.
+			const spy = vi.spyOn(harness.session.agent, "continue");
+			harness.session.subscribe((event) => {
+				if (event.type === "agent_end" && !armed) {
+					armed = true;
+					failing = !worksOnRetry;
+				}
+			});
+
+			await harness.session.prompt("first");
+
+			expect(spy).toHaveBeenCalled();
+			if (worksOnRetry) {
+				expect(requests).toHaveLength(1);
+				expect(requests[0]?.filter((line) => line === "developer:Plan")).toHaveLength(1);
+				expect(requests[0]?.slice(-2)).toEqual(["user:continue now", "developer:Plan"]);
+				expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(true);
+			} else {
+				expect(requests).toHaveLength(0);
+				expect(lastError(harness)).toContain('Standing instruction "mode" could not be delivered');
+				expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(false);
+			}
+		});
+
+		it("already-acknowledged child: a next-request value set and acked at once; the task's boundary append throws", async () => {
+			let acked = false;
+			const harness = await setup({
+				bootstrapped: true,
+				factories: [
+					(pi) => {
+						pi.on("session_start", () => {
+							pi.setStandingInstruction("subagent-profile", "profile", { apply: "next-request" });
+							acked = true;
+						});
+					},
+				],
+			});
+			await harness.session.bindExtensions({});
+			expect(acked).toBe(true);
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests)]);
+			let failing = true;
+			failStandingAppend(harness, () => failing);
+
+			await harness.session.prompt("task");
+			expect(requests).toHaveLength(0);
+			expect(lastError(harness)).toContain('Standing instruction "subagent-profile" could not be delivered');
+
+			failing = false;
+			await harness.session.prompt("again");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.slice(-2)).toEqual(["user:again", "developer:profile"]);
+		});
+
+		it("failed-B remainder: B fails on the second value; the next boundary also throws; a third prompt sends it", async () => {
+			const harness = await setup();
+			harness.session.setStandingInstruction("a", "A");
+			harness.session.setStandingInstruction("b", "B");
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests)]);
+			let failing = true;
+			failStandingAppend(harness, (key) => failing && key === "b");
+
+			await expect(harness.session.prompt("first")).rejects.toThrow("append b failed");
+			expect(requests).toHaveLength(0);
+
+			await harness.session.prompt("second");
+			expect(requests).toHaveLength(0);
+			expect(lastError(harness)).toContain('Standing instruction "b" could not be delivered');
+
+			failing = false;
+			await harness.session.prompt("third");
+			expect(requests).toHaveLength(1);
+			expect(requests[0]?.slice(0, 2)).toEqual(["system", "developer:A"]);
+			expect(requests[0]?.slice(-2)).toEqual(["user:third", "developer:B"]);
+			expect(keyedDevelopers(harness)).toEqual(["a:A", "b:B"]);
+		});
+
+		it.each([
+			["the first key fails", "a"],
+			["the middle key fails after A commits", "b"],
+		])(
+			"batch latch (recheck 4 N1): %s; an inputless retry delivers every remaining key",
+			async (_label, failingKey) => {
+				let armed = false;
+				const harness = await setup({ bootstrapped: true, factories: [contextOnlyContinuation(() => armed)] });
+				const requests: string[][] = [];
+				harness.setResponses([respond(requests)]);
+				harness.session.setStandingInstruction("a", "A");
+				harness.session.setStandingInstruction("b", "B");
+				let failing = true;
+				failStandingAppend(harness, (key) => failing && key === failingKey);
+				harness.session.subscribe((event) => {
+					if (event.type === "agent_end" && !armed) {
+						expect(requests).toHaveLength(0);
+						expect(lastError(harness)).toContain(`Standing instruction "${failingKey}" could not be delivered`);
+						armed = true;
+						failing = false;
+					}
+				});
+
+				await harness.session.prompt("first");
+
+				expect(requests).toHaveLength(1);
+				expect(requests[0]?.filter((line) => line.startsWith("developer:"))).toEqual([
+					"developer:A",
+					"developer:B",
+				]);
+				expect(keyedDevelopers(harness)).toEqual(["a:A", "b:B"]);
+				expect(harness.session.getStandingInstruction("a")?.delivered).toBe(true);
+				expect(harness.session.getStandingInstruction("b")?.delivered).toBe(true);
+			},
+		);
+
+		it("a one-shot whose append throws is reported and the request proceeds with the standing value", async () => {
+			let session: Harness["session"] | undefined;
+			const harness = await setup({
+				bootstrapped: true,
+				tools: [
+					sideTool("side", () => {
+						session!.setStandingInstruction("mode", "Plan", { apply: "next-request" });
+						session!.queueDeveloperMessage("notice");
+					}),
+				],
+			});
+			session = harness.session;
+			const errors: string[] = [];
+			harness.session.extensionRunner.onError((error) => errors.push(error.error));
+			const original = harness.sessionManager.appendMessage.bind(harness.sessionManager);
+			vi.spyOn(harness.sessionManager, "appendMessage").mockImplementation((message, options) => {
+				if (message.role === "developer" && getMessageText(message) === "notice") throw new Error("notice failed");
+				return original(message, options);
+			});
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests, toolCall("side")), respond(requests)]);
+
+			await harness.session.prompt("go");
+
+			expect(requests).toHaveLength(2);
+			expect(requests[1]?.slice(-2)).toEqual(["toolResult", "developer:Plan"]);
+			expect(errors).toContain("notice failed");
+		});
+
+		it("with persistenceError set the request at a standing boundary is refused", async () => {
+			let failed = false;
+			let session: Harness["session"] | undefined;
+			const harness = await setup({
+				bootstrapped: true,
+				tools: [
+					sideTool("side", () => {
+						session!.setStandingInstruction("mode", "Plan", { apply: "next-request" });
+						failed = true;
+					}),
+				],
+			});
+			session = harness.session;
+			const error = new SessionPersistenceError(Object.assign(new Error("io"), { code: "EIO" }));
+			vi.spyOn(harness.sessionManager, "getPersistenceError").mockImplementation(() => (failed ? error : undefined));
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests, toolCall("side")), respond(requests)]);
+
+			await harness.session.prompt("go");
+
+			expect(requests).toHaveLength(1);
+			expect(lastError(harness)).toContain("Session file write failed (EIO)");
+		});
+	});
+
+	describe("legacy F2: a tagged v4 file with an old compaction C", () => {
+		/** system → Plan mask[keyed] → user → assistant → old compaction C → user → assistant. */
+		function writeLegacyFile(
+			dir: string,
+			retained: boolean,
+			leafAtC = false,
+		): { file: string; compactionId: string } {
+			// Fixed ids, so the test can target C.
+			const ts = new Date(0).toISOString();
+			const assistant = fauxAssistantMessage("answer");
+			const raw = [
+				{ type: "message", id: "s1", message: { role: "system", content: "", sections: {}, timestamp: 0 } },
+				{
+					type: "message",
+					id: "m1",
+					standingKey: "collaboration-mode",
+					message: { role: "developer", content: "Plan", timestamp: 0 },
+				},
+				{ type: "message", id: "u1", message: { role: "user", content: "task", timestamp: 0 } },
+				{ type: "message", id: "a1", message: assistant },
+				{
+					type: "compaction",
+					id: "c1",
+					summary: "old summary",
+					firstKeptEntryId: retained ? "m1" : "u1",
+					tokensBefore: 100,
+					// Migrated files carry a checkpoint on every compaction (§4.2 step 3); no `standing` field.
+					systemMessage: { role: "system", content: "", sections: {}, timestamp: 0 },
+				},
+				{ type: "message", id: "u2", message: { role: "user", content: "after", timestamp: 0 } },
+				{ type: "message", id: "a2", message: assistant },
+			];
+			const entries = (leafAtC ? raw.slice(0, 5) : raw).map((entry, index, all) => ({
+				...entry,
+				parentId: index === 0 ? null : all[index - 1]!.id,
+				timestamp: ts,
+			}));
+			const header = { type: "session", version: 4, id: `legacy-${retained}-${leafAtC}`, timestamp: ts, cwd: dir };
+			const file = join(dir, `legacy-${retained ? "retained" : "omitted"}-${leafAtC ? "c" : "leaf"}.jsonl`);
+			writeFileSync(file, `${[header, ...entries].map((line) => JSON.stringify(line)).join("\n")}\n`);
+			return { file, compactionId: "c1" };
+		}
+
+		const runtimes: RuntimeHarness[] = [];
+		afterEach(async () => {
+			while (runtimes.length > 0) await runtimes.pop()?.cleanup();
+		});
+
+		it.each([
+			["navigate", false],
+			["navigate", true],
+			["fork", false],
+			["fork", true],
+			["resume", false],
+			["resume", true],
+		] as const)("%s to C (mask retained: %s)", async (how, retained) => {
+			const runtime = await createRuntimeHarness();
+			runtimes.push(runtime);
+			const { file, compactionId } = writeLegacyFile(runtime.tempDir, retained, how === "resume");
+			await runtime.runtime.switchSession(file);
+			if (how === "navigate") await runtime.runtime.session.navigateTree(compactionId, { summarize: false });
+			if (how === "fork") await runtime.runtime.fork(compactionId, { position: "at" });
+			const session = runtime.runtime.session;
+			if (how === "fork") expect(session.sessionFile).not.toBe(file);
+			// The last context entry of the branch is C (fork and resume may add non-context entries).
+			const branch = session.sessionManager.getBranch();
+			const cIndex = branch.findIndex((entry) => entry.type === "compaction");
+			expect(cIndex).toBeGreaterThan(0);
+			expect(branch.slice(cIndex + 1).filter((entry) => entry.type === "message")).toEqual([]);
+			// Writes beyond the file's one tagged mask: state entries or keyed developers.
+			const written = () =>
+				session.sessionManager
+					.getEntries()
+					.filter(
+						(entry) =>
+							entry.type === "standing_instruction" ||
+							(entry.type === "message" && entry.standingKey !== undefined),
+					).length - 1;
+			expect(written()).toBe(0);
+			expect(session.getStandingInstruction("collaboration-mode")).toMatchObject({
+				content: "Plan",
+				delivered: retained,
+			});
+			const requests: string[][] = [];
+			runtime.faux.setResponses([respond(requests)]);
+
+			await session.prompt("next");
+
+			expect(requests[0]?.filter((line) => line === "developer:Plan")).toHaveLength(1);
+			if (retained) {
+				expect(written()).toBe(0);
+			} else {
+				expect(requests[0]?.slice(-2)).toEqual(["user:next", "developer:Plan"]);
+				expect(written()).toBe(1);
+			}
+		});
+	});
+
+	it("delivered event: once per delivery (B, boundary, carry of a pending value), none on a re-carry; a throwing handler does not stop the others", async () => {
+		const delivered: string[] = [];
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("standing_instruction_delivered", () => {
+						throw new Error("handler failed");
+					});
+				},
+				(pi) => {
+					pi.on("standing_instruction_delivered", (event) => {
+						delivered.push(`${event.key}:${event.content}`);
+					});
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		const errors: string[] = [];
+		harness.session.extensionRunner.onError((error) => errors.push(error.error));
+		harness.setResponses([respond([]), respond([]), respond([]), respond([])]);
+
+		harness.session.setStandingInstruction("mode", "Default");
+		await harness.session.prompt("one");
+		expect(delivered).toEqual(["mode:Default"]);
+		harness.session.setStandingInstruction("mode", "Plan");
+		await harness.session.prompt("two");
+		expect(delivered).toEqual(["mode:Default", "mode:Plan"]);
+		await harness.session.compact();
+		expect(delivered).toEqual(["mode:Default", "mode:Plan"]);
+		harness.session.setStandingInstruction("mode", "Default");
+		await harness.session.prompt("three");
+		harness.session.setStandingInstruction("mode", "Plan");
+		await harness.session.compact();
+
+		expect(delivered).toEqual(["mode:Default", "mode:Plan", "mode:Default", "mode:Plan"]);
+		expect(errors.filter((error) => error === "handler failed")).toHaveLength(4);
+	});
+
+	it("a model without developer capability: values reach the journal, are dropped on the wire, no refusal; a capable model gets them", async () => {
+		const harness = await createHarness({ models: [{ id: "plain" }, { id: "capable" }] });
+		harnesses.push(harness);
+		const wire: string[][] = [];
+		const original = harness.session.agent.streamFunction as unknown as ProviderStreams["streamSimple"];
+		const recording: ProviderStreams["streamSimple"] = (model, context, options) => {
+			wire.push(transformMessages(context.messages as Message[], model).map(describeMessage));
+			return original(model, context, options);
+		};
+		const api = lazyApi(async () => ({ stream: recording, streamSimple: recording }) as ProviderStreams);
+		harness.session.agent.streamFunction = (model, context, options) => {
+			const capable = model.id === "capable";
+			return api.streamSimple(
+				{
+					...(model as Model<Api>),
+					capabilities: { ...model.capabilities, midConversationInstructionMessages: capable },
+					compat: { supportsMidConvoSystemMessages: capable },
+				},
+				context,
+				options,
+			);
+		};
+		harness.setResponses([respond([]), respond([]), respond([])]);
+		await harness.session.setModel(harness.getModel("plain")!);
+
+		await harness.session.prompt("first");
+		harness.session.setStandingInstruction("mode", "Plan");
+		await harness.session.prompt("second");
+
+		expect(keyedDevelopers(harness)).toEqual(["mode:Plan"]);
+		expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(true);
+		expect(wire[1]?.some((line) => line.startsWith("developer:"))).toBe(false);
+		expect(lastError(harness)).toBeUndefined();
+
+		await harness.session.setModel(harness.getModel("capable")!);
+		await harness.session.prompt("third");
+		expect(wire[2]?.filter((line) => line === "developer:Plan")).toHaveLength(1);
+		expect(lastError(harness)).toBeUndefined();
+	});
+
+	it("RPC: a value set by an extension is delivered after the RPC prompt; get_state.pendingMessageCount stays 0", async () => {
+		const requests: string[][] = [];
+		const harness = await createRpcHarness(rpcIo, {
+			extensionFactory: (pi) => {
+				pi.registerCommand("plan", {
+					description: "plan",
+					handler: async () => {
+						pi.setStandingInstruction("collaboration-mode", "Plan");
+					},
+				});
+			},
+		});
+		try {
+			harness.faux.setResponses([respond(requests), respond(requests)]);
+			harness.send({ id: "p1", type: "prompt", message: "first" });
+			await harness.waitForResponse("p1");
+			await harness.runtime.session.waitForIdle();
+			harness.send({ id: "c1", type: "prompt", message: "/plan" });
+			await harness.waitForResponse("c1");
+			harness.send({ id: "s1", type: "get_state" });
+			const state = await harness.waitForResponse("s1");
+			expect((state.data as { pendingMessageCount: number }).pendingMessageCount).toBe(0);
+			expect(harness.runtime.session.getStandingInstruction("collaboration-mode")?.delivered).toBe(false);
+
+			harness.send({ id: "p2", type: "prompt", message: "second" });
+			await harness.waitForResponse("p2");
+			await harness.runtime.session.waitForIdle();
+
+			expect(requests[1]?.slice(-2)).toEqual(["user:second", "developer:Plan"]);
+			harness.send({ id: "s2", type: "get_state" });
+			const after = await harness.waitForResponse("s2");
+			expect((after.data as { pendingMessageCount: number }).pendingMessageCount).toBe(0);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	describe("compaction", () => {
 		type Compactor = (pi: ExtensionAPI, summary: () => string) => void;
 		const summaryCompactor =
@@ -325,6 +973,51 @@ describe("AgentSession standing instructions", () => {
 			expect(compaction.standing?.map((item) => getMessageText(item.message))).toEqual(["Plan"]);
 			expect(delivered).toEqual([{ key: "mode", content: "Plan", entryId: compaction.id }]);
 			expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(true);
+		});
+
+		it("boundary compaction drafts carry the delivered values; the pending one follows the next input", async () => {
+			let draft = false;
+			let api: ExtensionAPI | undefined;
+			const delivered: string[] = [];
+			const harness = await createHarness({
+				sessionManager: createBootstrappedSessionManager(),
+				extensionFactories: [
+					(pi) => {
+						api = pi;
+						pi.on("standing_instruction_delivered", (event) => {
+							delivered.push(`${event.key}:${event.content}`);
+						});
+						pi.on("turn_end", () => {
+							if (!draft) return;
+							draft = false;
+							pi.setStandingInstruction("mode", "Plan");
+							return { entries: [{ type: "compaction", summary: "handoff", firstKeptEntryId: null }] };
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+			const requests: string[][] = [];
+			harness.setResponses([respond(requests), respond(requests), respond(requests)]);
+			api!.setStandingInstruction("mode", "Default");
+			await harness.session.prompt("one");
+			draft = true;
+			delivered.length = 0;
+			await harness.session.prompt("two");
+
+			const compaction = latestCompaction(harness);
+			expect(compaction.standing?.map((item) => `${item.key}:${getMessageText(item.message)}`)).toEqual([
+				"mode:Default",
+			]);
+			expect(delivered).toEqual([]);
+			expect(harness.session.getStandingInstruction("mode")).toMatchObject({ content: "Plan", delivered: false });
+
+			await harness.session.prompt("three");
+			const request = requests.at(-1) ?? [];
+			expect(request.slice(0, 2)).toEqual(["system", "developer:Default"]);
+			expect(request.slice(-2)).toEqual(["user:three", "developer:Plan"]);
+			expect(delivered).toEqual(["mode:Plan"]);
 		});
 
 		it("two compactions with identical summaries: session_compact receives the new entry", async () => {
