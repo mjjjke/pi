@@ -352,6 +352,29 @@ describe("pi sessions migrate data safety (review A)", () => {
 			expect(readFileSync(file, "utf8")).toBe(content);
 		},
 	);
+
+	it.skipIf(process.platform !== "linux")(
+		"recheck R2: without getfacl the file is reported failed and left untouched",
+		async () => {
+			const root = tempDir();
+			const store = join(root, "copies");
+			const file = writeV3(join(store, "a.jsonl"));
+			const content = readFileSync(file, "utf8");
+			const emptyBin = tempDir();
+			const path = process.env.PATH;
+			process.env.PATH = emptyBin;
+			let result: Awaited<ReturnType<typeof run>>;
+			try {
+				result = await run(["migrate", "--dir", store], { agentDir: join(root, "agent") });
+			} finally {
+				process.env.PATH = path;
+			}
+			expect(result.code).toBe(1);
+			expect(result.out).toContain(`Failed: 1\n  ${file}: cannot check ACLs`);
+			expect(result.out).toContain("getfacl");
+			expect(readFileSync(file, "utf8")).toBe(content);
+		},
+	);
 });
 
 describe("live pi process probe", () => {

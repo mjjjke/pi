@@ -1124,7 +1124,9 @@ export interface AtomicSessionWriteOptions {
 /**
  * Refuse a replacement whose temp could get access the original lacks (Linux, POSIX ACLs): the temp
  * inherits the directory's default ACL, and restoring the original's group bits would enable its named
- * grants; an extended ACL on the original would be lost. Without `getfacl` installed nothing is checked.
+ * grants; an extended ACL on the original would be lost. The check fails closed: when `getfacl` is
+ * missing or fails, the replacement is refused too (Node cannot read the `system.posix_acl_*` xattrs
+ * without a native module, so there is no fallback).
  */
 function assertNoExtendedAcls(target: string, targetExists: boolean): void {
 	if (process.platform !== "linux") return;
@@ -1137,8 +1139,11 @@ function assertNoExtendedAcls(target: string, targetExists: boolean): void {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-		throw new Error(`cannot check ACLs before rewriting ${target}, left unchanged: ${errorMessage(error)}`);
+		const reason =
+			(error as NodeJS.ErrnoException).code === "ENOENT"
+				? "getfacl is not installed (install the acl package)"
+				: `getfacl failed: ${errorMessage(error)}`;
+		throw new Error(`cannot check ACLs before rewriting ${target}, left unchanged: ${reason}`);
 	}
 	if (listing.trim()) {
 		throw new Error(
@@ -1155,7 +1160,8 @@ function assertNoExtendedAcls(target: string, targetExists: boolean): void {
  * owner-only, then copies the target's permission bits, (best effort) its owner and group, and with
  * `preserveTimes` its atime/mtime at full precision before publishing. ACLs and extended attributes are
  * not copied, so on Linux `replace` refuses (throws, target untouched) when the directory has a default
- * ACL or the target an extended ACL: the temp would inherit grants the original lacks.
+ * ACL or the target an extended ACL (the temp would inherit grants the original lacks), or when this
+ * cannot be checked because `getfacl` is missing or fails.
  */
 export function writeSessionFileAtomic(
 	target: string,

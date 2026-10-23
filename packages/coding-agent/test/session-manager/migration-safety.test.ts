@@ -265,6 +265,63 @@ describe.skipIf(!aclsSupported())("recheck N1: a rewrite never lets inherited AC
 	});
 });
 
+/** Run `fn` with PATH pointing at an empty directory, so `getfacl` cannot be found. */
+function withoutAclTools<T>(fn: () => T): T {
+	const emptyBin = realFs.mkdtempSync(join(tmpdir(), "pi-empty-bin-"));
+	const path = process.env.PATH;
+	process.env.PATH = emptyBin;
+	try {
+		return fn();
+	} finally {
+		process.env.PATH = path;
+		realFs.rmSync(emptyBin, { recursive: true, force: true });
+	}
+}
+
+describe.skipIf(process.platform !== "linux")(
+	"recheck R2: without getfacl a replacement is refused (fail closed)",
+	() => {
+		it("the writer throws, the file is byte-identical and no temp is left", () => {
+			const file = join(dir, "s.jsonl");
+			realFs.writeFileSync(file, line(header()));
+			realFs.chmodSync(file, 0o640);
+			const before = realFs.readFileSync(file, "utf8");
+			withoutAclTools(() => {
+				expect(() => writeSessionFileAtomic(file, [header(4)], { mode: "replace" })).toThrow(
+					/cannot check ACLs .*getfacl/,
+				);
+			});
+			expect(realFs.readFileSync(file, "utf8")).toBe(before);
+			expect(realFs.statSync(file).mode & 0o777).toBe(0o640);
+			expect(realFs.readdirSync(dir)).toEqual(["s.jsonl"]);
+		});
+
+		it("a stray v3 open warns and keeps the file; an empty explicit file is refused like under an ACL", () => {
+			const file = join(dir, "stray.jsonl");
+			realFs.writeFileSync(
+				file,
+				[header(), ...chain(msg("s", "system", "p"), msg("u", "user", "u"))].map(line).join(""),
+			);
+			const before = realFs.readFileSync(file, "utf8");
+			const empty = join(dir, "empty.jsonl");
+			realFs.writeFileSync(empty, "");
+			withoutAclTools(() => {
+				const manager = SessionManager.open(file);
+				expect(manager.getLoadWarnings()).toEqual([expect.stringContaining("getfacl")]);
+				expect(() => SessionManager.open(empty)).toThrow(/getfacl/);
+			});
+			expect(realFs.readFileSync(file, "utf8")).toBe(before);
+			expect(realFs.readFileSync(empty, "utf8")).toBe("");
+		});
+
+		it("create mode (new files, no original to protect) is not affected", () => {
+			const file = join(dir, "new.jsonl");
+			withoutAclTools(() => writeSessionFileAtomic(file, [header(4)], { mode: "create" }));
+			expect(JSON.parse(realFs.readFileSync(file, "utf8").split("\n")[0]!).version).toBe(4);
+		});
+	},
+);
+
 describe("recheck N2: rewrites keep sub-millisecond mtimes", () => {
 	it("two files whose mtimes differ within 1 ms keep their order after migration", () => {
 		const older = join(dir, "a-older.jsonl");
