@@ -198,4 +198,245 @@ describe("AgentSession standing instructions", () => {
 		expect(requests[0]?.filter((line) => line === "developer:Plan")).toHaveLength(1);
 		expect(requests[0]?.at(-1)).toBe("developer:Plan");
 	});
+
+	describe("compaction", () => {
+		type Compactor = (pi: ExtensionAPI, summary: () => string) => void;
+		const summaryCompactor =
+			(onBefore?: () => void, firstKept?: () => string | undefined, maxCompactions = Infinity): Compactor =>
+			(pi, summary) => {
+				let count = 0;
+				pi.on("session_before_compact", async (event) => {
+					if (++count > maxCompactions) return { cancel: true };
+					onBefore?.();
+					return {
+						compaction: {
+							summary: summary(),
+							firstKeptEntryId: firstKept?.() ?? event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					};
+				});
+			};
+
+		async function compactionSetup(options: {
+			onBefore?: (api: ExtensionAPI) => void;
+			firstKept?: () => string | undefined;
+			maxCompactions?: number;
+			summary?: () => string;
+			models?: Array<{ id: string; contextWindow: number; maxTokens: number }>;
+			settings?: Record<string, unknown>;
+			tools?: AgentTool[];
+			bootstrapped?: boolean;
+		}) {
+			const delivered: Array<{ key: string; content: unknown; entryId: string }> = [];
+			const compacted: string[] = [];
+			let api: ExtensionAPI | undefined;
+			const harness = await createHarness({
+				models: options.models,
+				settings: options.settings ?? { compaction: { keepRecentTokens: 1 } },
+				tools: options.tools,
+				sessionManager: options.bootstrapped === false ? undefined : createBootstrappedSessionManager(),
+				extensionFactories: [
+					(pi) => {
+						api = pi;
+						summaryCompactor(
+							() => options.onBefore?.(pi),
+							options.firstKept,
+							options.maxCompactions,
+						)(pi, options.summary ?? (() => "summary"));
+						pi.on("standing_instruction_delivered", (event) => {
+							delivered.push({ key: event.key, content: event.content, entryId: event.entryId });
+						});
+						pi.on("session_compact", (event) => {
+							compacted.push(event.compactionEntry.id);
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+			return { harness, delivered, compacted, api: () => api! };
+		}
+
+		const latestCompaction = (harness: Harness) => {
+			const entry = harness.sessionManager
+				.getBranch()
+				.filter((item) => item.type === "compaction")
+				.at(-1);
+			if (entry?.type !== "compaction") throw new Error("expected a compaction");
+			return entry;
+		};
+
+		it.each([
+			["Default", "Plan"],
+			["Plan", "Default"],
+		])(
+			"conflicting masks (B2): kept %s, pending %s; /compact carries the pending value and hides the kept copy",
+			async (kept, pending) => {
+				let keepFrom: string | undefined;
+				const { harness, delivered, compacted } = await compactionSetup({ firstKept: () => keepFrom });
+				const requests: string[][] = [];
+				harness.setResponses([respond(requests), respond(requests), respond(requests), respond(requests)]);
+				await harness.session.prompt("one");
+				harness.session.setStandingInstruction("mode", kept);
+				await harness.session.prompt("two");
+				keepFrom = harness.sessionManager
+					.getBranch()
+					.find((entry) => entry.type === "message" && getMessageText(entry.message) === "two")?.id;
+				harness.session.setStandingInstruction("mode", pending);
+				delivered.length = 0;
+
+				await harness.session.compact();
+
+				const compaction = latestCompaction(harness);
+				const branch = harness.sessionManager.getBranch();
+				const keptIndex = branch.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+				expect(
+					branch.slice(keptIndex).some((entry) => entry.type === "message" && entry.standingKey === "mode"),
+				).toBe(true);
+				expect(compaction.standing?.map((item) => `${item.key}:${getMessageText(item.message)}`)).toEqual([
+					`mode:${pending}`,
+				]);
+				expect(delivered).toEqual([{ key: "mode", content: pending, entryId: compaction.id }]);
+				expect(compacted).toEqual([compaction.id]);
+				expect(harness.session.getStandingInstruction("mode")).toMatchObject({ delivered: true });
+
+				await harness.session.prompt("three");
+				const request = requests.at(-1) ?? [];
+				expect(request.slice(0, 2)).toEqual(["system", `developer:${pending}`]);
+				expect(request.filter((line) => line.startsWith("developer:"))).toEqual([`developer:${pending}`]);
+				expect(keyedDevelopers(harness).filter((line) => line === `mode:${pending}`)).toEqual([]);
+				expect(delivered).toHaveLength(1);
+			},
+		);
+
+		it("a value set while the summarizer runs is in a between-runs carry (post-run overflow without retry)", async () => {
+			const { harness, delivered } = await compactionSetup({
+				models: [{ id: "faux-1", contextWindow: 1, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+				onBefore: (pi) => pi.setStandingInstruction("mode", "Plan"),
+			});
+			harness.setResponses([fauxAssistantMessage("answer")]);
+
+			await harness.session.prompt("hello");
+
+			const compaction = latestCompaction(harness);
+			expect(compaction.standing?.map((item) => getMessageText(item.message))).toEqual(["Plan"]);
+			expect(delivered).toEqual([{ key: "mode", content: "Plan", entryId: compaction.id }]);
+			expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(true);
+		});
+
+		it("two compactions with identical summaries: session_compact receives the new entry", async () => {
+			const { harness, compacted } = await compactionSetup({ summary: () => "same" });
+			harness.setResponses([fauxAssistantMessage("a"), fauxAssistantMessage("b"), fauxAssistantMessage("c")]);
+			await harness.session.prompt("one");
+			await harness.session.prompt("two");
+			await harness.session.compact();
+			const first = latestCompaction(harness).id;
+			await harness.session.prompt("three");
+			await harness.session.compact();
+			const second = latestCompaction(harness).id;
+
+			expect(second).not.toBe(first);
+			expect(compacted).toEqual([first, second]);
+		});
+
+		it("mid-run threshold compaction carries the delivered value; the pending one follows the next input; tree R3", async () => {
+			const largeTool: AgentTool = {
+				name: "large_result",
+				label: "Large result",
+				description: "Returns enough content to cross the compaction threshold",
+				parameters: Type.Object({}),
+				execute: async () => ({
+					content: [{ type: "text", text: `large-tool-result:${"x".repeat(7400)}` }],
+					details: {},
+				}),
+			};
+			let setPlan = false;
+			const { harness, delivered } = await compactionSetup({
+				models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 400, keepRecentTokens: 1750 } },
+				tools: [largeTool],
+				bootstrapped: false,
+				maxCompactions: 1,
+				onBefore: (pi) => {
+					if (setPlan) pi.setStandingInstruction("mode", "Plan");
+				},
+			});
+			const requests: string[][] = [];
+			harness.setResponses([
+				respond(requests, () => fauxAssistantMessage(`old-history:${"a".repeat(800)}`)),
+				respond(requests, () => fauxAssistantMessage(`recent-history:${"b".repeat(800)}`)),
+				respond(requests, () => fauxAssistantMessage(fauxToolCall("large_result", {}), { stopReason: "toolUse" })),
+				respond(requests, () => fauxAssistantMessage("after compaction")),
+				respond(requests),
+				respond(requests),
+				respond(requests),
+			]);
+			harness.session.setStandingInstruction("mode", "Default");
+			await harness.session.prompt("seed old history");
+			await harness.session.prompt("seed recent history");
+			setPlan = true;
+			delivered.length = 0;
+			await harness.session.prompt("run the large tool");
+
+			// The threshold compaction in prepareNextTurn is mid-run: it carries the delivered Default and
+			// emits no delivered event; Plan stays pending until the next input.
+			const compaction = latestCompaction(harness);
+			expect(compaction.standing?.map((item) => getMessageText(item.message))).toEqual(["Default"]);
+			expect(delivered).toEqual([]);
+			expect(requests[3]?.filter((line) => line.startsWith("developer:"))).toEqual(["developer:Default"]);
+			expect(harness.session.getStandingInstruction("mode")).toMatchObject({ content: "Plan", delivered: false });
+
+			await harness.session.prompt("next");
+			expect(requests[4]?.slice(-2)).toEqual(["user:next", "developer:Plan"]);
+			expect(delivered).toEqual([expect.objectContaining({ key: "mode", content: "Plan" })]);
+			const leaf = harness.sessionManager.getLeafId();
+			if (!leaf) throw new Error("expected a leaf");
+
+			// Tree (Astra R3): at C Plan is pending again and the next input gets it; back at the leaf it is
+			// delivered and nothing is sent.
+			await harness.session.navigateTree(compaction.id, { summarize: false });
+			expect(harness.session.getStandingInstruction("mode")).toMatchObject({ content: "Plan", delivered: false });
+			await harness.session.prompt("from C");
+			expect(requests[5]?.slice(-2)).toEqual(["user:from C", "developer:Plan"]);
+			await harness.session.navigateTree(leaf, { summarize: false });
+			expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(true);
+			const keyedBefore = keyedDevelopers(harness).length;
+			await harness.session.prompt("at leaf");
+			expect(keyedDevelopers(harness)).toHaveLength(keyedBefore);
+		});
+
+		it("retry + queued follow-up (R1): the retry has the delivered value only; the follow-up gets the pending one once", async () => {
+			let session: Harness["session"] | undefined;
+			const { harness } = await compactionSetup({
+				models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+				settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
+				bootstrapped: false,
+				onBefore: (pi) => {
+					pi.setStandingInstruction("mode", "Plan");
+					void session!.followUp("follow");
+				},
+			});
+			session = harness.session;
+			const requests: string[][] = [];
+			harness.setResponses([
+				respond(requests, () => fauxAssistantMessage("partial", { stopReason: "length" })),
+				respond(requests, () => fauxAssistantMessage("completed")),
+				respond(requests, () => fauxAssistantMessage("followed")),
+			]);
+			harness.session.setStandingInstruction("mode", "Default");
+
+			await harness.session.prompt("x".repeat(5000));
+			await harness.session.agent.waitForIdle();
+
+			expect(requests).toHaveLength(3);
+			const developers = (request: string[] | undefined) => request?.filter((line) => line.startsWith("developer:"));
+			expect(developers(requests[1])).toEqual(["developer:Default"]);
+			expect(developers(requests[2])).toEqual(["developer:Default", "developer:Plan"]);
+			expect(requests[2]?.slice(-2)).toEqual(["user:follow", "developer:Plan"]);
+			expect(keyedDevelopers(harness).filter((line) => line === "mode:Plan")).toHaveLength(1);
+		});
+	});
 });

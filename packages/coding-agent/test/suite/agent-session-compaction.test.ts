@@ -233,6 +233,29 @@ describe("AgentSession compaction characterization", () => {
 		expect(checkpoint.toolsAdded?.map((tool) => tool.name)).toEqual(
 			harness.session.getActiveToolNames().filter((name) => name !== "read" && name !== "bash"),
 		);
+		expect(harness.sessionManager.getBranch().at(-1)).toMatchObject({ type: "compaction", standing: [] });
+	});
+
+	it("carries standing values right after the checkpoint", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("declared")]);
+		harness.session.setStandingInstruction("mode", "Plan");
+		await harness.session.prompt("declare the prompt");
+		const firstKeptEntryId = harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		harness.sessionManager.appendCompaction("compacted", firstKeptEntryId, 100);
+
+		const compaction = harness.sessionManager.getBranch().at(-1);
+		expect(compaction).toMatchObject({
+			type: "compaction",
+			standing: [{ key: "mode", message: { role: "developer", content: "Plan" } }],
+		});
+		const messages = harness.sessionManager.buildSessionContext().messages;
+		expect(messages.map((message) => message.role)).toEqual(["system", "developer", "compactionSummary", "user"]);
 	});
 
 	it("allows a queued prompt to start when manual compaction ends", async () => {
@@ -922,7 +945,7 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false, "delivered");
 	});
 
 	it("does not trigger threshold compaction for error messages when no prior usage exists", async () => {

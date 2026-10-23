@@ -352,6 +352,8 @@ interface PreparedRun {
 }
 
 /** One delivered standing value (keyed developer). */
+type CompactionCarry = "desired" | "delivered";
+
 interface StandingDelivery {
 	key: string;
 	content: string | TextContent[];
@@ -1124,8 +1126,37 @@ export class AgentSession {
 		return { key, content: copy, message, entryId };
 	}
 
+	/**
+	 * Append a compaction with its standing carry (§7.4) and return the entry `appendCompaction` wrote,
+	 * plus one delivery per carried value that was pending before the append (its delivered event).
+	 */
+	private _appendCompactionWithCarry(
+		args: [string, string, number, unknown, boolean, Usage | undefined],
+		carry: CompactionCarry,
+	): { entry: CompactionEntry | undefined; delivered: Array<Omit<StandingDelivery, "message">> } {
+		const pendingBefore = new Set(
+			this.sessionManager
+				.getStandingState()
+				.filter((state) => state.pending)
+				.map((state) => state.key),
+		);
+		const entryId = this.sessionManager.appendCompaction(...args, { carry });
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry?.type !== "compaction") return { entry: undefined, delivered: [] };
+		const nowPending = new Set(
+			this.sessionManager
+				.getStandingState()
+				.filter((state) => state.pending)
+				.map((state) => state.key),
+		);
+		const delivered = (entry.standing ?? [])
+			.filter((item) => pendingBefore.has(item.key) && !nowPending.has(item.key))
+			.map((item) => ({ key: item.key, content: item.message.content, entryId }));
+		return { entry, delivered };
+	}
+
 	/** Emit standing_instruction_delivered per delivery, in order; handler errors are reported by the runner. */
-	private async _emitStandingDelivered(deliveries: StandingDelivery[]): Promise<void> {
+	private async _emitStandingDelivered(deliveries: Array<Omit<StandingDelivery, "message">>): Promise<void> {
 		for (const { key, content, entryId } of deliveries) {
 			try {
 				await this._extensionRunner.emit({ type: "standing_instruction_delivered", key, content, entryId });
@@ -2569,7 +2600,7 @@ export class AgentSession {
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) {
-			await this._checkCompaction(lastAssistant, false);
+			await this._checkCompaction(lastAssistant, false, [], "desired");
 		}
 
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
@@ -2655,7 +2686,7 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(message, true, toolResults)) {
+		if (await this._checkCompaction(message, true, toolResults, "desired")) {
 			return !this._agentRunAbortRequested;
 		}
 
@@ -3751,16 +3782,14 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const { entry: savedCompactionEntry, delivered } = this._appendCompactionWithCarry(
+				[summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage],
+				"desired",
+			);
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
+			await this._emitStandingDelivered(delivered);
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
 					type: "session_compact",
@@ -3855,6 +3884,7 @@ export class AgentSession {
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		toolResults: AgentMessage[] = [],
+		carry: CompactionCarry = "delivered",
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
@@ -3920,7 +3950,7 @@ export class AgentSession {
 			// Case 2: the response completed successfully. Compact, but do not retry because
 			// agent.continue() cannot continue from a completed assistant response.
 			if (!willRetry) {
-				return await this._runAutoCompaction("overflow", false);
+				return await this._runAutoCompaction("overflow", false, carry);
 			}
 
 			if (this._overflowRecoveryAttempted) {
@@ -3986,7 +4016,7 @@ export class AgentSession {
 			contextTokens = directContextTokens;
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			return await this._runAutoCompaction("threshold", false);
+			return await this._runAutoCompaction("threshold", false, carry);
 		}
 		return false;
 	}
@@ -4001,7 +4031,11 @@ export class AgentSession {
 	 * @param willRetry Whether to continue the interrupted turn after overflow compaction
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
-	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+	private async _runAutoCompaction(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+		carry: CompactionCarry = "delivered",
+	): Promise<boolean> {
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -4081,16 +4115,14 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
-			const newEntries = this.sessionManager.getEntries();
+			const { entry: savedCompactionEntry, delivered } = this._appendCompactionWithCarry(
+				[summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage],
+				carry,
+			);
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
+			await this._emitStandingDelivered(delivered);
 			if (this._extensionRunner && savedCompactionEntry) {
 				await this._extensionRunner.emit({
 					type: "session_compact",
