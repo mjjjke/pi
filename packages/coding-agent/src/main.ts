@@ -32,6 +32,7 @@ import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
+import { runSessionsCommand } from "./cli/sessions-migrate.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
@@ -617,6 +618,17 @@ export async function main(args: string[], options?: MainOptions) {
 	if (args[0] === "mcp") {
 		const { runMcpCommand } = await loadMcpCommand();
 		process.exitCode = await runMcpCommand(args.slice(1), { cwd, agentDir });
+		return;
+	}
+
+	if (args[0] === "sessions") {
+		// Before any session is opened (design §4.3).
+		const envSessionDir = process.env[ENV_SESSION_DIR];
+		process.exitCode = await runSessionsCommand(args.slice(1), {
+			agentDir,
+			settingSessionDir: bootstrapSettingsManager.getSessionDir(),
+			envSessionDir: envSessionDir ? expandTildePath(envSessionDir) : undefined,
+		});
 		return;
 	}
 
