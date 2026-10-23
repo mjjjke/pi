@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createRuntimeHarness, type RuntimeHarness } from "./runtime-harness.ts";
 
 /** role:text of a message; system messages show their tool declarations. */
 function describeMessage(message: { role: string } & Record<string, unknown>): string {
@@ -180,6 +181,114 @@ describe("AgentSession bootstrap commit (B)", () => {
 		);
 
 		expect(requests[0]).toEqual(["system", "user:seed", "user:kickoff"]);
+	});
+
+	describe("session replacement", () => {
+		const runtimes: RuntimeHarness[] = [];
+
+		afterEach(async () => {
+			while (runtimes.length > 0) await runtimes.pop()?.cleanup();
+		});
+
+		function recordRuntimeRequests(runtime: RuntimeHarness, count = 1): string[][] {
+			const requests: string[][] = [];
+			runtime.faux.setResponses(
+				Array.from(
+					{ length: count },
+					(): FauxResponseFactory => (context) => {
+						requests.push(context.messages.map((message) => describeMessage(message as never)));
+						return fauxAssistantMessage("done");
+					},
+				),
+			);
+			return requests;
+		}
+
+		function runtimeJournal(runtime: RuntimeHarness): string[] {
+			return runtime.runtime.session.sessionManager
+				.buildSessionProjection()
+				.messages.map((message) => describeMessage(message as never));
+		}
+
+		it("/new setup + withSession: state entries, context and developers land after the snapshot", async () => {
+			const harness = await createRuntimeHarness();
+			runtimes.push(harness);
+			const requests = recordRuntimeRequests(harness, 2);
+			await harness.runtime.session.prompt("old");
+			const messageEnds: string[] = [];
+
+			await harness.runtime.newSession({
+				setup: async (sm) => {
+					sm.appendCustomEntry("handoff-state", { ready: true });
+				},
+				withSession: async (ctx) => {
+					harness.runtime.session.subscribe((event) => {
+						if (event.type === "message_end") messageEnds.push(describeMessage(event.message as never));
+					});
+					await ctx.sendMessage({ customType: "handoff", content: "handoff", display: true });
+					ctx.appendDeveloperMessage("notice");
+				},
+			});
+			const session = harness.runtime.session;
+			expect(runtimeJournal(harness)).toEqual([]);
+			expect(session.stagedMessages.map((message) => describeMessage(message as never))).toEqual(["custom:handoff"]);
+
+			await session.prompt("go");
+
+			expect(requests[1]).toEqual(["system", "developer:notice", "user:handoff", "user:go"]);
+			expect(runtimeJournal(harness)).toEqual([
+				"system",
+				"developer:notice",
+				"custom:handoff",
+				"user:go",
+				"assistant",
+			]);
+			expect(session.sessionManager.getEntries().some((entry) => entry.type === "custom")).toBe(true);
+			expect(messageEnds.filter((end) => end === "custom:handoff")).toHaveLength(1);
+			expect(messageEnds.filter((end) => end === "system")).toHaveLength(1);
+		});
+
+		it("collab-style fresh session: state entry, standing mask from session_start, artifact and a triggered kickoff", async () => {
+			const harness = await createRuntimeHarness((pi) => {
+				pi.on("session_start", (_event, ctx) => {
+					const state = ctx.sessionManager
+						.getEntries()
+						.findLast((entry) => entry.type === "custom" && entry.customType === "mode-state");
+					const mode = state?.type === "custom" ? (state.data as { mode: string }).mode : "Default";
+					pi.setStandingInstruction("collaboration-mode", `mode:${mode}`);
+				});
+			});
+			runtimes.push(harness);
+			const requests = recordRuntimeRequests(harness, 2);
+			await harness.runtime.session.prompt("plan it");
+			const messageEnds: string[] = [];
+
+			await harness.runtime.newSession({
+				setup: async (sm) => {
+					sm.appendCustomEntry("mode-state", { mode: "Execute" });
+				},
+				withSession: async (ctx) => {
+					harness.runtime.session.subscribe((event) => {
+						if (event.type === "message_end") messageEnds.push(describeMessage(event.message as never));
+					});
+					await ctx.sendMessage({ customType: "artifact", content: "artifact", display: true });
+					await ctx.sendMessage(
+						{ customType: "kickoff", content: "kickoff", display: true },
+						{ deliverAs: "followUp", triggerTurn: true },
+					);
+				},
+			});
+			await harness.runtime.session.waitForIdle();
+
+			expect(requests).toHaveLength(2);
+			expect(requests[1]).toEqual(["system", "developer:mode:Execute", "user:artifact", "user:kickoff"]);
+			const session = harness.runtime.session;
+			expect(session.sessionManager.buildSessionProjection().messages[0]?.role).toBe("system");
+			expect(runtimeJournal(harness).filter((line) => line === "system")).toHaveLength(1);
+			expect(session.getStandingInstruction("collaboration-mode")).toMatchObject({ delivered: true });
+			expect(messageEnds.filter((end) => end === "custom:artifact")).toHaveLength(1);
+			expect(messageEnds.filter((end) => end === "custom:kickoff")).toHaveLength(1);
+		});
 	});
 
 	it("later runs are unchanged: idle sends append at once", async () => {
