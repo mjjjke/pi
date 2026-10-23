@@ -4251,6 +4251,7 @@ export class InteractiveMode {
 			updateFooter: true,
 			populateHistory: true,
 		});
+		this.renderStagedMessages();
 		this.renderProjectTrustWarningIfNeeded();
 
 		// Show compaction info if session was compacted
@@ -4300,6 +4301,15 @@ export class InteractiveMode {
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.renderStagedMessages();
+	}
+
+	/**
+	 * Startup content staged until the first run (§3.7) is not in the journal yet: render it after the
+	 * entries so a rebuild (reload, theme or settings changes) does not drop displayed custom and bash output.
+	 */
+	private renderStagedMessages(): void {
+		for (const message of this.session.stagedMessages) this.addMessageToChat(message);
 	}
 
 	// =========================================================================
