@@ -483,7 +483,7 @@ describe("triggered custom-message prompt preflight", () => {
 		},
 	);
 
-	it("still dispatches extension commands and handled input after admission closes", async () => {
+	it("rejects extension commands and handled input after admission closes (recheck R4)", async () => {
 		const handled: string[] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -504,10 +504,10 @@ describe("triggered custom-message prompt preflight", () => {
 		harnesses.push(harness);
 		harness.session.closeAdmission();
 
-		await harness.session.prompt("/local");
-		await harness.session.prompt("handled input");
+		await expect(harness.session.prompt("/local")).rejects.toThrow("prompt cancelled: session shutting down");
+		await expect(harness.session.prompt("handled input")).rejects.toThrow("prompt cancelled: session shutting down");
 
-		expect(handled).toEqual(["command", "input"]);
+		expect(handled).toEqual([]);
 		expect(harness.eventsOfType("agent_start")).toEqual([]);
 	});
 

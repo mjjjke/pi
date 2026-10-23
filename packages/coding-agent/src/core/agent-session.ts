@@ -334,6 +334,13 @@ export interface PromptOptions {
 }
 
 /** A developer instruction queued with queueDeveloperMessage() and not yet committed. */
+/** A start deferred by a readiness barrier: the barrier currently holding it waits for its release. */
+interface DeferredStart {
+	/** Move to the barrier installed now, releasing the hold of the barrier it was deferred by. */
+	follow(): void;
+	release(): void;
+}
+
 interface PendingInstruction {
 	pendingId: string;
 	message: DeveloperMessage;
@@ -459,11 +466,17 @@ export class AgentSession {
 	/** Set while bindExtensions() or reload() runs startup; runs wait for it (readiness barrier). */
 	private _readiness: Promise<void> | undefined = undefined;
 	/**
-	 * Starts deferred by the current barrier. Each is released once it reserves its run, settles, or is
-	 * about to run extension code (command handler, input hooks, async auth), so the binder returns after
-	 * a startup-triggered run is reserved without ever waiting on extension code (no deadlock).
+	 * Starts deferred by the current barrier. Each is released once it reserves its run, settles, is
+	 * about to run extension code (command handler, input hooks, async auth), or meets a newer barrier
+	 * (it then belongs to that one), so the binder returns after a startup-triggered run is reserved
+	 * without ever waiting on extension code or on a later barrier (no deadlock).
 	 */
 	private _readinessStarters: Set<Promise<void>> | undefined = undefined;
+	/**
+	 * Prompts deferred by a readiness barrier, until they settle (including their command, input and
+	 * auth preflight). Print mode drains them after binding; the binder itself never waits for them.
+	 */
+	private _deferredPrompts = new Set<Promise<void>>();
 	/** bindExtensions() ran at least once, so reload() re-runs startup. */
 	private _extensionsBound = false;
 	private _agentRunAbortRequested = false;
@@ -2505,10 +2518,10 @@ export class AgentSession {
 		trigger: BeforeAgentStartTrigger,
 		onStarted?: () => void,
 		admissionGen = this._admissionGen,
-		releaseDeferred: () => void = () => {},
+		deferredStart?: DeferredStart,
 	): Promise<void> {
 		// Readiness barrier: a run requested during binding or reload starts after it.
-		while (this._readiness) await this._readiness;
+		await this._awaitReadiness(deferredStart);
 		this._throwIfAdmissionChanged(admissionGen);
 		// After an ambiguous append the session refuses runs until it is reopened (§3.6).
 		const persistenceError = this.sessionManager.getPersistenceError();
@@ -2522,7 +2535,7 @@ export class AgentSession {
 		}
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
-		releaseDeferred();
+		deferredStart?.release();
 		let prepared: PreparedRun;
 		let nextTurn: CustomMessage[] = [];
 		const needsSnapshot = this._needsBootstrap();
@@ -2820,41 +2833,103 @@ export class AgentSession {
 		}
 		if (!this._readiness) return this._promptWhenReady(text, options, admissionGen);
 		// Readiness barrier: commands, input hooks and expansion see the ready resources.
-		const releaseDeferred = this._trackDeferredStart();
+		const run = this._promptAfterReadiness(text, options, admissionGen);
+		const tracked = run.then(
+			() => {},
+			() => {},
+		);
+		this._deferredPrompts.add(tracked);
+		void tracked.finally(() => this._deferredPrompts.delete(tracked));
+		return run;
+	}
+
+	private async _promptAfterReadiness(
+		text: string,
+		options: PromptOptions | undefined,
+		admissionGen: number,
+	): Promise<void> {
+		const deferredStart = this._trackDeferredStart();
 		try {
-			while (this._readiness) await this._readiness;
+			await this._awaitReadiness(deferredStart);
 			// Admission may have closed while waiting: no command or input hook runs then.
 			this._throwIfAdmissionChanged(admissionGen);
-			await this._promptWhenReady(text, options, admissionGen, releaseDeferred);
+			await this._promptWhenReady(text, options, admissionGen, deferredStart);
 		} finally {
-			releaseDeferred();
+			deferredStart.release();
 		}
 	}
 
 	/**
-	 * Register a start deferred by the current readiness barrier; its binder waits until the returned
-	 * function is called. Only the barrier that deferred it waits for it (one set per barrier).
+	 * Wait until no readiness barrier is installed. A deferred start always belongs to the barrier it
+	 * is currently waiting on: when it meets a newer barrier, it leaves the older binder's set before
+	 * waiting, so no bind or reload waits on a start that itself waits on a later barrier.
 	 */
-	private _trackDeferredStart(): () => void {
-		const starters = this._readinessStarters;
-		if (!starters) return () => {};
-		let release = () => {};
-		const released = new Promise<void>((resolve) => {
-			release = () => {
-				starters.delete(released);
-				resolve();
-			};
-		});
-		starters.add(released);
-		return release;
+	private async _awaitReadiness(deferredStart?: DeferredStart): Promise<void> {
+		while (this._readiness) {
+			deferredStart?.follow();
+			await this._readiness;
+		}
+	}
+
+	/**
+	 * Register a start deferred by the current readiness barrier. The barrier holding it waits (after
+	 * its own release) until the start reserves its run, settles, reaches extension code, or moves to
+	 * a newer barrier (`follow()`). One set per barrier.
+	 */
+	private _trackDeferredStart(): DeferredStart {
+		let released = false;
+		let held: { starters: Set<Promise<void>>; ticket: Promise<void>; resolve: () => void } | undefined;
+		const drop = () => {
+			if (!held) return;
+			held.starters.delete(held.ticket);
+			held.resolve();
+			held = undefined;
+		};
+		const follow = () => {
+			if (released) return;
+			const starters = this._readinessStarters;
+			if (held?.starters === starters) return;
+			drop();
+			if (!starters) return;
+			let resolve = () => {};
+			const ticket = new Promise<void>((r) => {
+				resolve = r;
+			});
+			starters.add(ticket);
+			held = { starters, ticket, resolve };
+		};
+		follow();
+		return {
+			follow,
+			release: () => {
+				released = true;
+				drop();
+			},
+		};
+	}
+
+	/**
+	 * Wait for every prompt deferred by a readiness barrier to settle, including command, input-hook
+	 * and auth preflight, then for the session to be idle. Print mode calls it after binding so that
+	 * startup-triggered prompts complete before output and disposal (dispose cancels them instead).
+	 * Never call it from extension code that a deferred prompt may itself be waiting on.
+	 */
+	async waitForDeferredPrompts(): Promise<void> {
+		while (this._deferredPrompts.size > 0) {
+			await Promise.all([...this._deferredPrompts]);
+		}
+		await this.waitForIdle();
 	}
 
 	private async _promptWhenReady(
 		text: string,
 		options: PromptOptions | undefined,
 		admissionGen: number,
-		releaseDeferred: () => void = () => {},
+		deferredStart?: DeferredStart,
 	): Promise<void> {
+		// Admission is checked on every path (also without a barrier) before commands or input hooks.
+		this._throwIfAdmissionChanged(admissionGen);
+		const releaseDeferred = () => deferredStart?.release();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		// Handle extension commands first (execute immediately, even during streaming)
@@ -2874,6 +2949,7 @@ export class AgentSession {
 			);
 		}
 
+		this._throwIfAdmissionChanged(admissionGen);
 		// Emit input event for extension interception (before skill/template expansion)
 		if (this._extensionRunner.hasHandlers("input")) releaseDeferred();
 		const processedInput = await this._runInputHandlers(
@@ -2939,7 +3015,7 @@ export class AgentSession {
 			{ messageType: "user", prompt: expandedText, images: currentImages },
 			() => preflightResult?.("started"),
 			admissionGen,
-			releaseDeferred,
+			deferredStart,
 		);
 	}
 

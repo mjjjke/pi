@@ -224,6 +224,110 @@ describe("AgentSession readiness barrier", () => {
 		expect(log[0]!.texts).toEqual(["hello"]);
 	});
 
+	it("a start deferred by bind that then waits on a reload barrier no longer holds the bind (recheck R1)", async () => {
+		const steps: string[] = [];
+		let binding: Promise<void> = Promise.resolve();
+		let reloadFinished = false;
+		const harness = await setup([
+			(pi) => {
+				pi.on("session_start", async (event) => {
+					steps.push(`start:${event.reason}`);
+					if (event.reason === "startup") {
+						pi.sendUserMessage("/r", { expandPromptTemplates: true });
+						pi.sendUserMessage("second");
+					} else {
+						// A reload handler that waits for the original SDK bind to return.
+						await binding;
+						steps.push("initial bind returned");
+					}
+				});
+				pi.registerCommand("r", {
+					description: "reload",
+					handler: async (_args, ctx) => {
+						await ctx.reload();
+						reloadFinished = true;
+					},
+				});
+			},
+		]);
+		const session = harness.session;
+		binding = session.bindExtensions({
+			commandContextActions: {
+				waitForIdle: () => session.waitForIdle(),
+				newSession: async () => ({ cancelled: true }),
+				fork: async () => ({ cancelled: true }),
+				navigateTree: async () => ({ cancelled: true }),
+				switchSession: async () => ({ cancelled: true }),
+				reload: () => session.reload(),
+			},
+		});
+		expect(await within(binding.then(() => "bound"))).toBe("bound");
+		await vi.waitFor(() => expect(reloadFinished).toBe(true));
+		// The second start ran after the reload (the plain harness's faux provider does not survive a
+		// reload, so the run itself ends in a provider error; only its start matters here).
+		await vi.waitFor(() => expect(session.messages.some((m) => m.role === "assistant")).toBe(true));
+		await session.waitForIdle();
+		expect(steps).toEqual(["start:startup", "start:reload", "initial bind returned"]);
+		expect(session.messages.filter((m) => m.role === "user").map((m) => getMessageText(m))).toEqual(["second"]);
+	});
+
+	it.each([
+		["closeAdmission", (harness: Harness) => harness.session.closeAdmission()],
+		["dispose", (harness: Harness) => harness.session.dispose()],
+	])("after %s with no barrier, no command or input hook runs (recheck R4)", async (_label, close) => {
+		let commands = 0;
+		let inputs = 0;
+		const harness = await setup([
+			(pi) => {
+				pi.registerCommand("x", {
+					description: "x",
+					handler: async () => {
+						commands++;
+					},
+				});
+				pi.on("input", () => {
+					inputs++;
+					return { action: "handled" as const };
+				});
+			},
+		]);
+		await harness.session.bindExtensions({});
+		close(harness);
+		const outcome = (promise: Promise<void>) =>
+			promise.then(
+				() => "resolved",
+				(error: Error) => error.message,
+			);
+		expect(await outcome(harness.session.prompt("/x"))).toBe("prompt cancelled: session shutting down");
+		expect(await outcome(harness.session.prompt("hello"))).toBe("prompt cancelled: session shutting down");
+		expect(commands).toBe(0);
+		expect(inputs).toBe(0);
+	});
+
+	it("dispose cancels a deferred startup prompt still in its async input hook; waitForDeferredPrompts settles (recheck R3)", async () => {
+		const gate = deferred();
+		const harness = await setup([
+			(pi) => {
+				pi.on("session_start", () => {
+					pi.sendUserMessage("hello");
+				});
+				pi.on("input", async () => {
+					await gate.promise;
+					return { action: "continue" as const };
+				});
+			},
+		]);
+		const log = recordRequests(harness, 1);
+		await harness.session.bindExtensions({});
+		const drained = harness.session.waitForDeferredPrompts().then(() => "drained");
+		await tick();
+		expect(await within(drained, 50)).toBe("timeout");
+		harness.session.dispose();
+		gate.resolve();
+		expect(await within(drained)).toBe("drained");
+		expect(log).toHaveLength(0);
+	});
+
 	it.each([
 		["closeAdmission", (harness: Harness) => harness.session.closeAdmission()],
 		["dispose", (harness: Harness) => harness.session.dispose()],
@@ -591,6 +695,48 @@ describe("AgentSession readiness barrier", () => {
 			expect(requests.map((request) => request.userTexts)).toEqual([["from startup"], ["from startup", "from cli"]]);
 			expect(rpcIo.outputLines).toEqual(["ok\n"]);
 		});
+
+		it.each(["input", "auth"] as const)(
+			"print mode (real runtime): a startup prompt with async %s preflight completes before disposal (recheck R3)",
+			async (kind) => {
+				const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+				const harness: RuntimeHarness = await createRuntimeHarness(
+					(pi) => {
+						pi.on("session_start", () => pi.sendUserMessage("hello"));
+						if (kind === "input") {
+							pi.on("input", async () => {
+								await sleep(50);
+								return { action: "continue" as const };
+							});
+						}
+					},
+					{ bind: false },
+				);
+				cleanups.push(() => harness.cleanup());
+				if (kind === "auth") {
+					const modelRuntime = (
+						harness.runtime.session as unknown as {
+							_modelRuntime: { hasConfiguredAuth: () => boolean; checkAuth: () => Promise<string> };
+						}
+					)._modelRuntime;
+					modelRuntime.hasConfiguredAuth = () => false;
+					modelRuntime.checkAuth = async () => {
+						await sleep(50);
+						return "test-key";
+					};
+				}
+				const { requests, factory } = recordWire();
+				harness.faux.setResponses([factory()]);
+				vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+				rpcIo.outputLines.length = 0;
+				const session = harness.runtime.session;
+
+				expect(await runPrintMode(harness.runtime, { mode: "text", messages: [] })).toBe(0);
+				expect(requests.map((request) => request.userTexts)).toEqual([["hello"]]);
+				expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+				expect(rpcIo.outputLines).toEqual(["ok\n"]);
+			},
+		);
 
 		async function rpcSetup(
 			extensionFactory: (pi: ExtensionAPI) => void,
