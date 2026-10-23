@@ -18,8 +18,11 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fchmodSync,
+	fchownSync,
 	fstatSync,
 	fsyncSync,
+	futimesSync,
 	linkSync,
 	mkdirSync,
 	openSync,
@@ -537,7 +540,9 @@ function migrateV3ToV4(entries: FileEntry[], report: SessionMigrationReport): vo
 			parentId = entry.id;
 		}
 		for (const child of originalChildren) child.parentId = parentId;
-		for (const entry of contextEntries) blockOf.set(entry.id, system.id);
+		// Every entry of the chain, context or not, maps to the block's first slot (now S), so a kept range
+		// starting on a non-context slot still includes the context entries the permutation moved before it.
+		for (const entry of chain) blockOf.set(entry.id, system.id);
 		report.permutedBlocks++;
 	}
 
@@ -974,10 +979,30 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return loadSessionFile(filePath).entries;
 }
 
-/** Entries of a session file plus its size/mtime as read (after any torn-tail repair). */
+/**
+ * A session file as read. Reading never writes: a torn last line is only reported (`endsWithoutNewline`)
+ * and terminated before the next append (`_persist`), and a whole-file rewrite terminates every line.
+ */
 interface LoadedSessionFile {
 	entries: FileEntry[];
+	/** Size/mtime of the revision that was read (fstat before reading). */
 	stat?: Stats;
+	/** 1-based numbers of non-blank lines that did not parse; a rewrite would drop them. */
+	unparseableLines?: number[];
+	/** The file does not end with a newline (a torn or unterminated last line). */
+	endsWithoutNewline?: boolean;
+}
+
+/**
+ * Read a session file without modifying it. Returns no entries when the first record is not a session
+ * header. Exported for `pi sessions migrate`.
+ */
+export function readSessionFile(filePath: string): {
+	entries: FileEntry[];
+	unparseableLines: number[];
+} {
+	const loaded = loadSessionFile(filePath);
+	return { entries: loaded.entries, unparseableLines: loaded.unparseableLines ?? [] };
 }
 
 function loadSessionFile(filePath: string): LoadedSessionFile {
@@ -985,6 +1010,14 @@ function loadSessionFile(filePath: string): LoadedSessionFile {
 	if (!existsSync(resolvedFilePath)) return { entries: [] };
 
 	const entries: FileEntry[] = [];
+	const unparseableLines: number[] = [];
+	let lineNumber = 0;
+	const parseLine = (text: string) => {
+		lineNumber++;
+		const entry = parseSessionEntryLine(text);
+		if (entry) entries.push(entry);
+		else if (text.trim()) unparseableLines.push(lineNumber);
+	};
 	let pending = "";
 	let fileStat: Stats;
 	const fd = openSync(resolvedFilePath, "r");
@@ -1001,8 +1034,7 @@ function loadSessionFile(filePath: string): LoadedSessionFile {
 			let lineStart = 0;
 			let newlineIndex = pending.indexOf("\n", lineStart);
 			while (newlineIndex !== -1) {
-				const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
-				if (entry) entries.push(entry);
+				parseLine(pending.slice(lineStart, newlineIndex));
 				lineStart = newlineIndex + 1;
 				newlineIndex = pending.indexOf("\n", lineStart);
 			}
@@ -1010,24 +1042,32 @@ function loadSessionFile(filePath: string): LoadedSessionFile {
 		}
 
 		pending += decoder.end();
-		const finalEntry = parseSessionEntryLine(pending);
-		if (finalEntry) entries.push(finalEntry);
+		if (pending) parseLine(pending);
 	} finally {
 		closeSync(fd);
 	}
 
-	// Validate session header before repairing the file.
-	if (entries.length === 0) return { entries, stat: fileStat };
+	const endsWithoutNewline = pending.length > 0;
+	if (entries.length === 0) return { entries, stat: fileStat, unparseableLines, endsWithoutNewline };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
 		return { entries: [] };
 	}
+	return { entries, stat: fileStat, unparseableLines, endsWithoutNewline };
+}
 
-	if (pending) {
-		appendFileSync(resolvedFilePath, "\n");
-		fileStat = statSync(resolvedFilePath);
+/** Whether a non-empty file's last byte is something other than a newline (read at append time). */
+function fileEndsWithoutNewline(filePath: string): boolean {
+	const fd = openSync(filePath, "r");
+	try {
+		const size = fstatSync(fd).size;
+		if (size === 0) return false;
+		const last = Buffer.alloc(1);
+		readSync(fd, last, 0, 1, size - 1);
+		return last[0] !== 0x0a;
+	} finally {
+		closeSync(fd);
 	}
-	return { entries, stat: fileStat };
 }
 
 function errorMessage(error: unknown): string {
@@ -1076,11 +1116,17 @@ export interface AtomicSessionWriteOptions {
 	mode: "create" | "replace";
 	/** Called after the temp file is synced and before it is published; throwing aborts the write. */
 	beforePublish?: () => void;
+	/** `replace` only: keep the target's access and modification times (migration-only rewrites). */
+	preserveTimes?: boolean;
 }
 
 /**
  * Write a whole session file atomically: temp file in the same directory, fsync, then link (create) or
  * rename (replace). A failure leaves the target as it was and no temp file behind.
+ *
+ * `create` gives the file the default permissions (as a `"wx"` write would). `replace` creates the temp
+ * owner-only, then copies the target's permission bits and (best effort) its owner and group before
+ * publishing, so a rewrite never broadens access. ACLs and extended attributes are not copied.
  */
 export function writeSessionFileAtomic(
 	target: string,
@@ -1091,11 +1137,31 @@ export function writeSessionFileAtomic(
 	const temp = sessionTempPath(target);
 	let tempExists = false;
 	try {
-		const fd = openSync(temp, "wx");
+		let original: Stats | undefined;
+		if (options.mode === "replace") {
+			try {
+				original = statSync(target);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
+		const fd = openSync(temp, "wx", options.mode === "replace" ? 0o600 : 0o666);
 		tempExists = true;
 		try {
 			for (const entry of entries) {
 				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			}
+			if (original) {
+				const stats = original;
+				if (stats.uid !== process.getuid?.() || stats.gid !== process.getgid?.()) {
+					try {
+						fchownSync(fd, stats.uid, stats.gid);
+					} catch {
+						// Best effort: only root may give a file away; the mode below still never broadens access.
+					}
+				}
+				fchmodSync(fd, stats.mode & 0o7777);
+				if (options.preserveTimes) futimesSync(fd, stats.atime, stats.mtime);
 			}
 			fsyncSync(fd);
 		} finally {
@@ -1463,6 +1529,8 @@ export class SessionManager {
 	private leafId: string | null = null;
 	private loadWarnings: string[] = [];
 	private persistenceError: SessionPersistenceError | undefined;
+	/** The loaded file did not end with a newline: check its last byte before the next append. */
+	private tailMayNeedNewline = false;
 
 	private constructor(
 		cwd: string,
@@ -1497,6 +1565,7 @@ export class SessionManager {
 		this.sessionFile = resolvePath(sessionFile);
 		this.loadWarnings = [];
 		this.persistenceError = undefined;
+		this.tailMayNeedNewline = false;
 		if (existsSync(this.sessionFile)) {
 			const loaded = preloaded ?? loadSessionFile(this.sessionFile);
 			const entries = loaded.entries;
@@ -1516,7 +1585,8 @@ export class SessionManager {
 			}
 
 			this.flushed = true;
-			this._loadEntries(entries, undefined, loaded.stat);
+			this.tailMayNeedNewline = loaded.endsWithoutNewline === true;
+			this._loadEntries(entries, undefined, loaded);
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1544,6 +1614,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.tailMayNeedNewline = false;
 		this.loadWarnings = [];
 		this.persistenceError = undefined;
 
@@ -1554,13 +1625,13 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions, fileStat?: Stats): void {
+	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions, loaded?: LoadedSessionFile): void {
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 
 		if (header) {
 			this.fileEntries = entries;
 			this.sessionId = header.id;
-			if ((header.version ?? 1) < CURRENT_SESSION_VERSION) this._migrateStrayFile(entries, fileStat);
+			if ((header.version ?? 1) < CURRENT_SESSION_VERSION) this._migrateStrayFile(entries, loaded);
 		} else {
 			this.newSession(options);
 			this.fileEntries = this.fileEntries.concat(entries);
@@ -1592,10 +1663,12 @@ export class SessionManager {
 
 	/**
 	 * Migrate an older file in memory and rewrite it atomically (§4.3 stray-file rule). The rewrite is
-	 * abandoned when the file changed since it was read; the session then uses the migrated in-memory
-	 * view (or the raw entries if migrating threw), with a load warning.
+	 * abandoned when the file changed since the revision that was read, or when it has unparseable lines
+	 * (a rewrite would drop them); the session then uses the migrated in-memory view (or the raw entries if
+	 * migrating threw), with a load warning, and the file keeps its bytes. A rewrite keeps the file's
+	 * permissions and mtime.
 	 */
-	private _migrateStrayFile(entries: FileEntry[], fileStat: Stats | undefined): void {
+	private _migrateStrayFile(entries: FileEntry[], loaded: LoadedSessionFile | undefined): void {
 		const label = this.sessionFile ?? "in-memory session";
 		let migrated: FileEntry[];
 		try {
@@ -1611,11 +1684,20 @@ export class SessionManager {
 			return;
 		}
 		this.fileEntries = migrated;
+		const fileStat = loaded?.stat;
 		if (!this.persist || !this.sessionFile || !fileStat) return;
 		const file = this.sessionFile;
+		const unparseable = loaded?.unparseableLines ?? [];
+		if (unparseable.length > 0) {
+			this.loadWarnings.push(
+				`Session ${label}: not rewritten as v${CURRENT_SESSION_VERSION}, using the migrated view in memory: unparseable line(s) ${unparseable.join(", ")} would be lost; the file is left unchanged.`,
+			);
+			return;
+		}
 		try {
 			writeSessionFileAtomic(file, migrated, {
 				mode: "replace",
+				preserveTimes: true,
 				beforePublish: () => {
 					const now = statSync(file);
 					if (now.size !== fileStat.size || now.mtimeMs !== fileStat.mtimeMs) {
@@ -1623,6 +1705,7 @@ export class SessionManager {
 					}
 				},
 			});
+			this.tailMayNeedNewline = false;
 		} catch (error) {
 			this.loadWarnings.push(
 				`Session ${label}: not rewritten as v${CURRENT_SESSION_VERSION}, using the migrated view in memory: ${errorMessage(error)}`,
@@ -1671,10 +1754,8 @@ export class SessionManager {
 	 * closing pi without chatting leaves no file behind. Starting at the user message (not the
 	 * first assistant reply) keeps the prompt on disk if the first turn never completes (#10000).
 	 */
-	private _hasConversation(): boolean {
-		return this.fileEntries.some(
-			(e) => e.type === "message" && (e.message.role === "user" || e.message.role === "assistant"),
-		);
+	private _hasConversation(entries: readonly FileEntry[] = this.fileEntries): boolean {
+		return entries.some((e) => e.type === "message" && (e.message.role === "user" || e.message.role === "assistant"));
 	}
 
 	_persist(entry: SessionEntry): void {
@@ -1687,7 +1768,10 @@ export class SessionManager {
 			this.flushed = true;
 		} else {
 			try {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				// Terminate a torn last line first (checked now, not at load: the file is never written at load).
+				const prefix = this.tailMayNeedNewline && fileEndsWithoutNewline(this.sessionFile) ? "\n" : "";
+				appendFileSync(this.sessionFile, `${prefix}${JSON.stringify(entry)}\n`);
+				this.tailMayNeedNewline = false;
 			} catch (error) {
 				// Some bytes may be on disk: refuse further writes until the session is reopened.
 				this.persistenceError = new SessionPersistenceError(error);
@@ -2303,19 +2387,19 @@ export class SessionManager {
 				parentId = labelEntry.id;
 			}
 
-			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+			const fileEntries: FileEntry[] = [header, ...pathWithoutLabels, ...labelEntries];
+			// Use the same rule as _persist(): write now if the branched path already has a conversation,
+			// otherwise let _persist() create the file later. Publish before switching any state, so a failed
+			// write leaves the manager on the previous file, unchanged.
+			const flushed = this._hasConversation(fileEntries);
+			if (flushed) writeSessionFileAtomic(newSessionFile, fileEntries, { mode: "create" });
+
+			this.fileEntries = fileEntries;
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
+			this.flushed = flushed;
+			this.tailMayNeedNewline = false;
 			this._buildIndex();
-
-			// Use the same rule as _persist(): write now if the branched path already
-			// has a conversation, otherwise let _persist() create the file later.
-			if (this._hasConversation()) {
-				this._writeWholeFile("create");
-				this.flushed = true;
-			} else {
-				this.flushed = false;
-			}
 
 			return newSessionFile;
 		}
