@@ -8,6 +8,7 @@ import {
 	rmSync,
 	statSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +22,7 @@ import {
 	runSessionsCommand,
 } from "../src/cli/sessions-migrate.ts";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../src/config.ts";
+import { findMostRecentSession } from "../src/core/session-manager.ts";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const sourceResolverUrl = pathToFileURL(resolve(__dirname, "../src/experimental/source-resolver.ts")).href;
@@ -230,6 +232,93 @@ describe("pi sessions migrate (§4.3)", () => {
 		const root = tempDir();
 		expect((await run(["migrate", "--force"], { agentDir: root })).code).toBe(1);
 		expect((await run([], { agentDir: root })).code).toBe(1);
+	});
+});
+
+describe("pi sessions migrate data safety (review A)", () => {
+	it("finding 2: a default store symlinked outside the agent dir stays protected", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		mkdirSync(agentDir);
+		const file = writeV3(join(root, "external-store", "--p--", "a.jsonl"));
+		symlinkSync(join(root, "external-store"), join(agentDir, "sessions"));
+		const before = readFileSync(file, "utf8");
+		const result = await run(["migrate"], { agentDir, live: LIVE_PI });
+		expect(result.code).toBe(2);
+		expect(result.out).toContain("Protected targets: 1");
+		expect(readFileSync(file, "utf8")).toBe(before);
+	});
+
+	it("finding 2: nested directory and file symlinks inside a protected store stay protected, also when listed by --dir", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const nested = writeV3(join(root, "elsewhere", "dir", "a.jsonl"));
+		const single = writeV3(join(root, "elsewhere", "file", "b.jsonl"));
+		mkdirSync(join(agentDir, "sessions"), { recursive: true });
+		symlinkSync(join(root, "elsewhere", "dir"), join(agentDir, "sessions", "--p--"));
+		symlinkSync(single, join(agentDir, "sessions", "b.jsonl"));
+		const result = await run(["migrate", "--dir", join(root, "elsewhere")], { agentDir, live: LIVE_PI });
+		expect(result.code).toBe(2);
+		expect(result.out).toContain("Protected targets: 2");
+		expect(versionOf(nested)).toBe(3);
+		expect(versionOf(single)).toBe(3);
+	});
+
+	it("finding 5: a migrated file keeps its permissions under a permissive umask", async () => {
+		const root = tempDir();
+		const file = writeV3(join(root, "copies", "a.jsonl"));
+		chmodSync(file, 0o600);
+		const saved = process.umask(0o002);
+		try {
+			expect((await run(["migrate", "--dir", join(root, "copies")], { agentDir: join(root, "agent") })).code).toBe(
+				0,
+			);
+		} finally {
+			process.umask(saved);
+		}
+		expect(versionOf(file)).toBe(4);
+		expect(statSync(file).mode & 0o777).toBe(0o600);
+	});
+
+	it.each([
+		[
+			"an interior malformed record",
+			(lines: string[]) => `${lines[0]}\n{broken record: recover me}\n${lines.slice(1).join("\n")}\n`,
+		],
+		["a torn fragment at the end", (lines: string[]) => `${lines.join("\n")}\n{"type":"message","id":"half`],
+	])("finding 6: a file with %s is refused, reported and left byte-identical", async (_name, build) => {
+		const root = tempDir();
+		mkdirSync(join(root, "copies"));
+		const file = join(root, "copies", "a.jsonl");
+		const lines = [header(3), msg("d", null, "developer"), msg("s", "d", "system")].map((entry) =>
+			JSON.stringify(entry),
+		);
+		const content = build(lines);
+		writeFileSync(file, content);
+		const dry = await run(["migrate", "--dry-run", "--dir", join(root, "copies")], { agentDir: join(root, "agent") });
+		expect(dry.out).toContain(`Refused (unparseable lines, left untouched): 1\n  ${file}: line`);
+		const result = await run(["migrate", "--dir", join(root, "copies")], { agentDir: join(root, "agent") });
+		expect(result.code).toBe(1);
+		expect(result.out).toContain("Migrated: 0");
+		expect(result.out).toContain(`Refused (unparseable lines, left untouched): 1\n  ${file}: line`);
+		expect(readFileSync(file, "utf8")).toBe(content);
+	});
+
+	it("finding 8: migration keeps mtimes, so the session pi -c resumes does not change", async () => {
+		const root = tempDir();
+		const store = join(root, "copies");
+		for (const [name, seconds] of [
+			["a-resumed", 300],
+			["z-later-created", 200],
+		] as const) {
+			utimesSync(writeV3(join(store, `${name}.jsonl`)), seconds, seconds);
+		}
+		const before = findMostRecentSession(store);
+		expect(before).toBe(join(store, "a-resumed.jsonl"));
+		expect((await run(["migrate", "--dir", store], { agentDir: join(root, "agent") })).code).toBe(0);
+		expect(versionOf(join(store, "z-later-created.jsonl"))).toBe(4);
+		expect(statSync(join(store, "z-later-created.jsonl")).mtimeMs).toBe(200_000);
+		expect(findMostRecentSession(store)).toBe(before);
 	});
 });
 

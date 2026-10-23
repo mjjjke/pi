@@ -11,6 +11,7 @@ import {
 	CURRENT_SESSION_VERSION,
 	type FileEntry,
 	migrateSessionEntries,
+	readSessionFile,
 	type SessionHeader,
 	type SessionMigrationSkipReason,
 	writeSessionFileAtomic,
@@ -136,16 +137,27 @@ function isInside(child: string, parent: string): boolean {
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/** Every `*.jsonl` below root (following directory symlinks once), as real paths. */
-function walkSessionFiles(root: string, files: Set<string>, visitedDirs: Set<string>): void {
+/**
+ * Every `*.jsonl` below root (following symlinks), keyed by real path. The value records whether the file
+ * was reached through a protected store: provenance survives realpath deduplication, so a file a running pi
+ * may write through a symlinked store stays protected even when its real path lies elsewhere.
+ * `visitedDirs` maps a real directory to whether it was already walked as protected.
+ */
+function walkSessionFiles(
+	root: string,
+	isProtected: boolean,
+	files: Map<string, boolean>,
+	visitedDirs: Map<string, boolean>,
+): void {
 	let realDir: string;
 	try {
 		realDir = realpathSync(root);
 	} catch {
 		return;
 	}
-	if (visitedDirs.has(realDir)) return;
-	visitedDirs.add(realDir);
+	const visited = visitedDirs.get(realDir);
+	if (visited === true || (visited === false && !isProtected)) return;
+	visitedDirs.set(realDir, isProtected);
 	for (const name of readdirSync(realDir)) {
 		const path = join(realDir, name);
 		let stats: ReturnType<typeof statSync>;
@@ -154,22 +166,12 @@ function walkSessionFiles(root: string, files: Set<string>, visitedDirs: Set<str
 		} catch {
 			continue;
 		}
-		if (stats.isDirectory()) walkSessionFiles(path, files, visitedDirs);
-		else if (stats.isFile() && name.endsWith(".jsonl")) files.add(realpathOrResolve(path));
-	}
-}
-
-function readEntries(file: string): FileEntry[] {
-	const entries: FileEntry[] = [];
-	for (const line of readFileSync(file, "utf8").split("\n")) {
-		if (!line.trim()) continue;
-		try {
-			entries.push(JSON.parse(line) as FileEntry);
-		} catch {
-			// Malformed lines are skipped, as the loader does.
+		if (stats.isDirectory()) walkSessionFiles(path, isProtected, files, visitedDirs);
+		else if (stats.isFile() && name.endsWith(".jsonl")) {
+			const real = realpathOrResolve(path);
+			files.set(real, (files.get(real) ?? false) || isProtected);
 		}
 	}
-	return entries;
 }
 
 function validHeader(entries: FileEntry[]): SessionHeader | undefined {
@@ -177,7 +179,10 @@ function validHeader(entries: FileEntry[]): SessionHeader | undefined {
 	return first?.type === "session" && typeof (first as { id?: unknown }).id === "string" ? first : undefined;
 }
 
-/** Run `pi sessions <args>`; returns the exit code (0 ok, 1 usage error or failed files, 2 refused). */
+/**
+ * Run `pi sessions <args>`; returns the exit code (0 ok, 1 usage error, failed files or files refused for
+ * unparseable lines, 2 refused because of a running pi).
+ */
 export async function runSessionsCommand(args: string[], options: SessionsMigrateOptions): Promise<number> {
 	const out = options.out ?? ((line: string) => console.log(line));
 	const err = options.err ?? ((line: string) => console.error(line));
@@ -193,43 +198,52 @@ export async function runSessionsCommand(args: string[], options: SessionsMigrat
 		return 1;
 	}
 
-	const agentDir = realpathOrResolve(options.agentDir);
 	const roots: SessionRoot[] = [{ path: join(options.agentDir, "sessions"), source: "default" }];
 	if (options.settingSessionDir) roots.push({ path: options.settingSessionDir, source: "setting" });
 	if (options.envSessionDir) roots.push({ path: options.envSessionDir, source: "env" });
 	for (const dir of parsed.dirs) roots.push({ path: resolve(dir), source: "--dir" });
-	// Where a running pi may write: the agent dir and configured roots (never plain --dir roots).
-	const protectedRoots = [
-		agentDir,
-		...roots
-			.filter((root) => root.source === "setting" || root.source === "env")
-			.map((root) => realpathOrResolve(root.path)),
+	// Where a running pi may write: the agent dir and configured roots (never plain --dir roots), both as
+	// given and as real paths (a configured store may be a symlink to elsewhere).
+	const configuredRoots = [
+		options.agentDir,
+		...roots.filter((root) => root.source !== "--dir").map((root) => root.path),
 	];
+	const protectedRoots = [...new Set(configuredRoots.flatMap((path) => [resolve(path), realpathOrResolve(path)]))];
+	const insideProtected = (path: string) => protectedRoots.some((root) => isInside(path, root));
 
-	const files = new Set<string>();
-	const visitedDirs = new Set<string>();
+	// Configured roots first; a --dir root is protected when it lies in a protected store. A file reached
+	// through a protected store keeps that provenance after realpath deduplication.
+	const files = new Map<string, boolean>();
+	const visitedDirs = new Map<string, boolean>();
 	for (const root of roots) {
-		if (existsSync(root.path)) walkSessionFiles(root.path, files, visitedDirs);
+		const isProtected =
+			root.source !== "--dir" ||
+			insideProtected(resolve(root.path)) ||
+			insideProtected(realpathOrResolve(root.path));
+		if (existsSync(root.path)) walkSessionFiles(root.path, isProtected, files, visitedDirs);
 	}
 
-	const targets: Array<{ file: string; entries: FileEntry[] }> = [];
+	const targets: Array<{ file: string; entries: FileEntry[]; protected: boolean }> = [];
 	const invalid: string[] = [];
 	const failed: Array<{ file: string; error: string }> = [];
+	// Files with unparseable lines are never rewritten: a rewrite would drop those bytes (review A #6).
+	const refused: Array<{ file: string; lines: number[] }> = [];
 	let current = 0;
-	for (const file of [...files].sort()) {
-		let entries: FileEntry[];
+	for (const [file, reachedProtected] of [...files].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+		let read: ReturnType<typeof readSessionFile>;
 		try {
-			entries = readEntries(file);
+			read = readSessionFile(file);
 		} catch (error) {
 			failed.push({ file, error: error instanceof Error ? error.message : String(error) });
 			continue;
 		}
-		const header = validHeader(entries);
+		const header = validHeader(read.entries);
 		if (!header) invalid.push(file);
 		else if ((header.version ?? 1) >= CURRENT_SESSION_VERSION) current++;
-		else targets.push({ file, entries });
+		else if (read.unparseableLines.length > 0) refused.push({ file, lines: read.unparseableLines });
+		else targets.push({ file, entries: read.entries, protected: reachedProtected || insideProtected(file) });
 	}
-	const protectedCount = targets.filter((target) => protectedRoots.some((root) => isInside(target.file, root))).length;
+	const protectedCount = targets.filter((target) => target.protected).length;
 
 	out(`Session roots:`);
 	for (const root of roots) {
@@ -260,7 +274,10 @@ export async function runSessionsCommand(args: string[], options: SessionsMigrat
 	for (const target of targets) {
 		try {
 			const report = migrateSessionEntries(target.entries);
-			if (!parsed.dryRun) writeSessionFileAtomic(target.file, target.entries, { mode: "replace" });
+			if (!parsed.dryRun) {
+				// Keep permissions and mtime: recent-session selection (`pi -c`) orders files by mtime.
+				writeSessionFileAtomic(target.file, target.entries, { mode: "replace", preserveTimes: true });
+			}
 			migrated++;
 			permuted += report.permutedBlocks;
 			remapped += report.remappedTargets;
@@ -281,9 +298,11 @@ export async function runSessionsCommand(args: string[], options: SessionsMigrat
 	);
 	out(`Skipped with warning: ${skipped.length}`);
 	for (const skip of skipped) out(`  ${skip.reason}: ${skip.file} (system ${skip.systemEntryId})`);
+	out(`Refused (unparseable lines, left untouched): ${refused.length}`);
+	for (const refusal of refused) out(`  ${refusal.file}: line ${refusal.lines.join(", ")}`);
 	out(`Invalid: ${invalid.length}`);
 	for (const file of invalid) out(`  ${file}`);
 	out(`Failed: ${failed.length}`);
 	for (const failure of failed) out(`  ${failure.file}: ${failure.error}`);
-	return failed.length > 0 ? 1 : 0;
+	return failed.length > 0 || refused.length > 0 ? 1 : 0;
 }
