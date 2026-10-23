@@ -9,6 +9,7 @@ import {
 	type SessionEntry,
 	SessionManager,
 } from "../../src/core/session-manager.ts";
+import * as oldReader from "./fixtures/v3-reader-main.ts";
 
 // Pass-through fs with fault hooks for the stray-file cases (§4.3).
 const fsHooks = vi.hoisted(() => ({
@@ -320,19 +321,40 @@ describe("stray v3 file opened by SessionManager (§4.3)", () => {
 	});
 });
 
-describe("old reader (version-3 gate) on a v4 file", () => {
-	it("leaves a v4 file unmigrated and projects it unchanged", () => {
+describe("pinned main-branch v3 reader (fixtures/v3-reader-main.ts) on a v4 file", () => {
+	it("leaves a v4 file unmigrated and projects it as the current reader does", () => {
 		const entries = [header(4), ...chain(sys("S"), dev("d1"), custom("h1"), user("u1"), assistant("a1"))];
 		const before = JSON.stringify(entries);
-		// Old builds skip files whose version is >= 3; the current build skips >= 4. Either way nothing changes.
-		migrateSessionEntries(entries);
+		// The rollback build skips files whose version is >= 3.
+		expect(oldReader.migrateToCurrentVersion(entries)).toBe(false);
 		expect(JSON.stringify(entries)).toBe(before);
-		expect(buildSessionProjection(sessionEntries(entries), "a1").messages.map((message) => message.role)).toEqual([
-			"system",
-			"developer",
-			"custom",
-			"user",
-			"assistant",
-		]);
+		expect(oldReader.buildSessionProjection(sessionEntries(entries), "a1").messages).toEqual(
+			buildSessionProjection(sessionEntries(entries), "a1").messages,
+		);
+		expect(
+			oldReader.buildSessionProjection(sessionEntries(entries), "a1").messages.map((message) => message.role),
+		).toEqual(["system", "developer", "custom", "user", "assistant"]);
+	});
+
+	it("projects a file migrated by the current build exactly as the current reader does", () => {
+		const entries = [header(3), ...chain(dev("d1"), custom("h1"), sys("S"), user("u1"), assistant("a1"))];
+		migrateSessionEntries(entries);
+		expect(oldReader.buildSessionProjection(sessionEntries(entries), "a1").messages).toEqual(
+			buildSessionProjection(sessionEntries(entries), "a1").messages,
+		);
+	});
+
+	it("does not project a branch-summary checkpoint (rollback, \u00a74.1)", () => {
+		const summary = {
+			type: "branch_summary",
+			id: "b",
+			fromId: "x",
+			summary: "went elsewhere",
+			systemMessage: { role: "system", content: "prompt", timestamp: 1 },
+		};
+		const entries = sessionEntries([header(4), ...chain(summary, user("u1"))]);
+		const roles = (messages: { role: string }[]) => messages.map((message) => message.role);
+		expect(roles(buildSessionProjection(entries, "u1").messages)).toEqual(["system", "branchSummary", "user"]);
+		expect(roles(oldReader.buildSessionProjection(entries, "u1").messages)).toEqual(["branchSummary", "user"]);
 	});
 });

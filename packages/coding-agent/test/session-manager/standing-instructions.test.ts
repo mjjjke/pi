@@ -6,6 +6,7 @@ import {
 	type SessionEntry,
 	SessionManager,
 } from "../../src/core/session-manager.ts";
+import * as oldReader from "./fixtures/v3-reader-main.ts";
 
 const KEY = "collaboration-mode";
 const timestamp = "2026-10-23T00:00:00.000Z";
@@ -212,7 +213,7 @@ describe("standing projection (§7.4)", () => {
 		expect(roles(old, "c2")).toEqual(["system", "compactionSummary", "developer", "user", "user"]);
 	});
 
-	it("an old reader (entry type unknown, field ignored) projects the same messages except the carried values", () => {
+	it("the pinned main-branch v3 reader projects the same messages except the carried values", () => {
 		const entries = chain(
 			system("s"),
 			keyed("d1", "Plan"),
@@ -222,14 +223,24 @@ describe("standing projection (§7.4)", () => {
 			user("u2"),
 		);
 		const current = buildSessionProjection(entries, "u2").messages;
-		const oldView = entries.map((entry) => {
-			if (entry.type !== "compaction") return entry;
-			const { standing: _standing, ...rest } = entry;
-			return rest as SessionEntry;
-		});
-		const old = buildSessionProjection(oldView, "u2").messages;
+		// The rollback build itself (fixtures/v3-reader-main.ts): unknown entry type, `standing` field ignored.
+		const old = oldReader.buildSessionProjection(entries, "u2").messages;
 		expect(current.filter((message) => message.role !== "developer")).toEqual(old);
 		expect(current.filter((message) => message.role === "developer")).toHaveLength(1);
+		expect(old.some((message) => message.role === "developer")).toBe(false);
+	});
+
+	it("the pinned main-branch v3 reader shows a hidden kept keyed developer again (rollback, \u00a74.1)", () => {
+		const entries = chain(system("s"), keyed("d1", "Plan"), user("u1"), awareCompaction("c", "d1", [[KEY, "Plan"]]));
+		const developers = (messages: { role: string }[]) => messages.filter((message) => message.role === "developer");
+		expect(developers(buildSessionProjection(entries, "c").messages)).toHaveLength(1);
+		expect(developers(oldReader.buildSessionProjection(entries, "c").messages)).toHaveLength(1);
+		expect(oldReader.buildSessionProjection(entries, "c").messages.map((message) => message.role)).toEqual([
+			"system",
+			"compactionSummary",
+			"developer",
+			"user",
+		]);
 	});
 });
 
