@@ -2149,16 +2149,23 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
+		// Canonicalize the copied entries (the source file is never rewritten), then publish the fork atomically.
+		const report = migrateToCurrentVersion(sourceEntries);
+		writeSessionFileAtomic(
+			newSessionFile,
+			[newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")],
+			{
+				mode: "create",
+			},
+		);
 
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
-			}
+		const forked = new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		for (const skip of report.skipped) {
+			forked.loadWarnings.push(
+				`Session ${resolvedSourcePath}: startup prefix ending at ${skip.systemEntryId} left unchanged (${skip.reason}).`,
+			);
 		}
-
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		return forked;
 	}
 
 	/**
