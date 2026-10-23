@@ -38,7 +38,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
 
 export interface SessionHeader {
 	type: "session";
@@ -330,25 +330,172 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
+/** What the v3 → v4 migration changed in one file (see docs/session-format.md). */
+export interface SessionMigrationReport {
+	/** Version found in the header before migrating (1 when absent). */
+	fromVersion: number;
+	/** True when any migration ran (the header was bumped). */
+	migrated: boolean;
+	/** Startup prefixes reordered to `system · developers · content`. */
+	permutedBlocks: number;
+	/** Compaction `firstKeptEntryId`s moved to the first entry of a permuted block. */
+	remappedTargets: number;
+	/** Compactions that gained a `systemMessage` checkpoint. */
+	backfilledCheckpoints: number;
+	/** Startup prefixes left as they were, with the reason. */
+	skipped: Array<{ systemEntryId: string; reason: SessionMigrationSkipReason }>;
+}
+
+export type SessionMigrationSkipReason = "not-startup-prefix" | "branch-inside-prefix" | "terminal-system";
+
+function isContextEntry(entry: SessionEntry): boolean {
+	return (
+		entry.type === "message" ||
+		entry.type === "custom_message" ||
+		entry.type === "branch_summary" ||
+		entry.type === "compaction"
+	);
+}
+
+function isSystemEntry(entry: SessionEntry): boolean {
+	return entry.type === "message" && entry.message.role === "system";
+}
+
+function isDeveloperEntry(entry: SessionEntry): boolean {
+	return entry.type === "message" && entry.message.role === "developer";
+}
+
+/** Context entries that may precede the initial snapshot in a startup prefix. */
+function isStartupEntry(entry: SessionEntry): boolean {
+	if (entry.type === "custom_message") return true;
+	if (entry.type !== "message") return false;
+	const role = (entry.message as { role: string }).role;
+	return role !== "assistant" && role !== "toolResult" && role !== "system";
+}
+
+/**
+ * Migrate v3 → v4 (mutates in place):
+ * 1. reorder each startup prefix to `system · developers · content` within its own file slots;
+ * 2. move compaction targets that point into a reordered block to its first entry;
+ * 3. backfill a `systemMessage` checkpoint on compactions without one.
+ */
+function migrateV3ToV4(entries: FileEntry[], report: SessionMigrationReport): void {
+	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
+	if (header) header.version = 4;
+	const sessionEntries = () => entries.filter((e): e is SessionEntry => e.type !== "session");
+	const byId = new Map<string, SessionEntry>();
+	const children = new Map<string | null, SessionEntry[]>();
+	for (const entry of sessionEntries()) {
+		byId.set(entry.id, entry);
+		const list = children.get(entry.parentId) ?? [];
+		list.push(entry);
+		children.set(entry.parentId, list);
+	}
+	const position = new Map<FileEntry, number>(entries.map((entry, index) => [entry, index]));
+	const lastEntry = entries.at(-1);
+	const blockOf = new Map<string, string>();
+
+	for (const system of sessionEntries()) {
+		if (!isSystemEntry(system)) continue;
+		// Ancestors from the root down to the parent of S.
+		const prefix: SessionEntry[] = [];
+		let isFirstSystem = true;
+		for (let id = system.parentId; id !== null; ) {
+			const ancestor = byId.get(id);
+			if (!ancestor) break;
+			if (isSystemEntry(ancestor)) isFirstSystem = false;
+			prefix.unshift(ancestor);
+			id = ancestor.parentId;
+		}
+		if (!isFirstSystem || !prefix.some(isContextEntry)) continue;
+		const skip = (reason: SessionMigrationSkipReason) => report.skipped.push({ systemEntryId: system.id, reason });
+		if (prefix.some((entry) => isContextEntry(entry) && !isStartupEntry(entry))) {
+			skip("not-startup-prefix");
+			continue;
+		}
+		const chain = [...prefix, system];
+		if (prefix.some((entry, index) => (children.get(entry.id) ?? []).some((child) => child !== chain[index + 1]))) {
+			skip("branch-inside-prefix");
+			continue;
+		}
+		if (system === lastEntry) {
+			skip("terminal-system");
+			continue;
+		}
+
+		const contextEntries = chain.filter(isContextEntry);
+		const ordered = [
+			system,
+			...prefix.filter(isDeveloperEntry),
+			...prefix.filter((entry) => isContextEntry(entry) && !isDeveloperEntry(entry)),
+		];
+		if (ordered.every((entry, index) => entry === contextEntries[index])) continue;
+		const slots = contextEntries.map((entry) => position.get(entry)!).sort((a, b) => a - b);
+		ordered.forEach((entry, index) => {
+			entries[slots[index]!] = entry;
+			position.set(entry, slots[index]!);
+		});
+		// Re-link the chain in its new file order; every original child of S follows the block end.
+		const relinked = chain.slice().sort((a, b) => position.get(a)! - position.get(b)!);
+		const originalChildren = children.get(system.id) ?? [];
+		let parentId = prefix[0]!.parentId;
+		for (const entry of relinked) {
+			entry.parentId = parentId;
+			parentId = entry.id;
+		}
+		for (const child of originalChildren) child.parentId = parentId;
+		for (const entry of contextEntries) blockOf.set(entry.id, system.id);
+		report.permutedBlocks++;
+	}
+
+	for (const entry of sessionEntries()) {
+		if (entry.type !== "compaction") continue;
+		const block = blockOf.get(entry.firstKeptEntryId);
+		if (block !== undefined && entry.firstKeptEntryId !== block) {
+			entry.firstKeptEntryId = block;
+			report.remappedTargets++;
+		}
+	}
+
+	const migrated = sessionEntries();
+	for (const entry of migrated) {
+		if (entry.type !== "compaction" || entry.systemMessage) continue;
+		const systemMessage = getCurrentSystemMessage(buildSessionProjection(migrated, entry.parentId).messages);
+		if (!systemMessage) continue;
+		entry.systemMessage = { ...systemMessage, timestamp: new Date(entry.timestamp).getTime() };
+		report.backfilledCheckpoints++;
+	}
+}
+
 /**
  * Run all necessary migrations to bring entries to current version.
- * Mutates entries in place. Returns true if any migration was applied.
+ * Mutates entries in place and reports what changed.
  */
-function migrateToCurrentVersion(entries: FileEntry[]): boolean {
+function migrateToCurrentVersion(entries: FileEntry[]): SessionMigrationReport {
 	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 	const version = header?.version ?? 1;
+	const report: SessionMigrationReport = {
+		fromVersion: version,
+		migrated: false,
+		permutedBlocks: 0,
+		remappedTargets: 0,
+		backfilledCheckpoints: 0,
+		skipped: [],
+	};
 
-	if (version >= CURRENT_SESSION_VERSION) return false;
+	if (version >= CURRENT_SESSION_VERSION) return report;
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries, report);
 
-	return true;
+	report.migrated = true;
+	return report;
 }
 
-/** Exported for testing */
-export function migrateSessionEntries(entries: FileEntry[]): void {
-	migrateToCurrentVersion(entries);
+/** Migrate entries to the current version in place (pure; no file access). Returns what changed. */
+export function migrateSessionEntries(entries: FileEntry[]): SessionMigrationReport {
+	return migrateToCurrentVersion(entries);
 }
 
 /** Exported for compaction.test.ts */
@@ -1089,7 +1236,7 @@ export class SessionManager {
 			this.fileEntries = entries;
 			this.sessionId = header.id;
 
-			if (migrateToCurrentVersion(this.fileEntries)) {
+			if (migrateToCurrentVersion(this.fileEntries).migrated) {
 				this._rewriteFile();
 			}
 		} else {

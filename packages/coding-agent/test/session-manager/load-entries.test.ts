@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FileEntry, SessionEntry, SessionMessageEntry } from "../../src/core/session-manager.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { CURRENT_SESSION_VERSION, SessionManager } from "../../src/core/session-manager.ts";
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -158,7 +158,7 @@ describe("SessionManager.inMemory with preloaded entries", () => {
 		const session = SessionManager.inMemory("/project", undefined, entries);
 		const restored = session.getEntries()[0] as SessionMessageEntry;
 
-		expect(session.getHeader()!.version).toBe(3);
+		expect(session.getHeader()!.version).toBe(CURRENT_SESSION_VERSION);
 		expect(restored.message.role).toBe("custom");
 		expect(restored.id).toBe("abc12345");
 	});
