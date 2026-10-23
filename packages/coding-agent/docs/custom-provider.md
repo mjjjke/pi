@@ -123,7 +123,19 @@ This is safer than copying a stream implementation because it preserves Pi’s m
 
 Implement `streamSimple` only when no existing API implementation can represent the service. Study the implementations under [`packages/ai/src/api`](https://github.com/earendil-works/pi/tree/main/packages/ai/src/api) first.
 
-The stream receives a normalized `TranscriptContext`. System prompts and tool declarations live in transcript system messages, so read them with `getCurrentSystemPrompt(context.messages)` and `getCurrentTools(context.messages)` rather than expecting `context.systemPrompt` or `context.tools`. A model that supports mid-conversation system messages can receive them in place; otherwise call `collapseSystemMessages(context)` to fold later system messages into the leading one.
+The stream receives a normalized `TranscriptContext`. System prompts and tool declarations live in transcript system messages, so read them with `getCurrentSystemPrompt(context.messages)` and `getCurrentTools(context.messages)` rather than expecting `context.systemPrompt` or `context.tools`. Only the message at index 0 is the initial snapshot; every later system message is an update to render in place.
+
+This fork removed `collapseSystemMessages()` and `resolveTranscript()`: later system messages are never folded into the leading one. A model either accepts them in place or the request is refused before anything is sent. `supportsMidConversationSystemMessages(model)` is false for Google, Vertex and Bedrock, true for `pi-messages`, and otherwise follows `compat.supportsMidConvoSystemMessages`. Every built-in API checks it through `lazyApi()`. A custom stream registered through `streamSimple` does not pass through `lazyApi()`, so if it cannot render later system messages, call the assertion at the start of request setup and let the throw become the stream's `error` event:
+
+```typescript
+import { assertSystemUpdatesSupported } from "@earendil-works/pi-ai";
+
+// Throws when a message after index 0 is a system update (text, sections or tool changes)
+// and the model does not support mid-conversation system messages.
+assertSystemUpdatesSupported(model, context);
+```
+
+The error text names the model and tells the user to switch models, compact or start a new conversation; it matches neither the retry nor the context-overflow patterns, so it is not retried. Both helpers are also exported from the lean `@earendil-works/pi-ai/utils/transcript` entry. See [`custom-provider-anthropic`](../examples/extensions/custom-provider-anthropic/index.ts).
 
 A custom stream must:
 
