@@ -459,11 +459,11 @@ export class AgentSession {
 	/** Set while bindExtensions() or reload() runs startup; runs wait for it (readiness barrier). */
 	private _readiness: Promise<void> | undefined = undefined;
 	/**
-	 * Prompts that waited for the barrier, released once they reserve a run or settle, so the
-	 * binder returns after a startup-triggered run is reserved (as before the barrier).
+	 * Starts deferred by the current barrier. Each is released once it reserves its run, settles, or is
+	 * about to run extension code (command handler, input hooks, async auth), so the binder returns after
+	 * a startup-triggered run is reserved without ever waiting on extension code (no deadlock).
 	 */
-	private _barrierStarters = new Set<() => void>();
-	private _barrierStarterPromises = new Set<Promise<void>>();
+	private _readinessStarters: Set<Promise<void>> | undefined = undefined;
 	/** bindExtensions() ran at least once, so reload() re-runs startup. */
 	private _extensionsBound = false;
 	private _agentRunAbortRequested = false;
@@ -1014,6 +1014,21 @@ export class AgentSession {
 	private _discardStaged(): void {
 		this._stagedInstructions = [];
 		this._stagedContent = [];
+	}
+
+	/**
+	 * Reload rule for staged instructions created through the extension API (§3.7): a bound session's
+	 * extensions rebuild them from the journal at session_start(reload), so they are dropped; a never-bound
+	 * session keeps them without onCommit (its runtime is invalidated). SDK-owned items and content stay.
+	 */
+	private _releaseExtensionStagedInstructions(): void {
+		if (this._extensionsBound) {
+			this._stagedInstructions = this._stagedInstructions.filter((pending) => pending.owner === undefined);
+		} else {
+			for (const pending of this._stagedInstructions) {
+				if (pending.owner !== undefined) pending.onCommit = undefined;
+			}
+		}
 	}
 
 	/** Move the preflight buffers behind the staged content (failed preflight or failed B, §3.6). */
@@ -2490,6 +2505,7 @@ export class AgentSession {
 		trigger: BeforeAgentStartTrigger,
 		onStarted?: () => void,
 		admissionGen = this._admissionGen,
+		releaseDeferred: () => void = () => {},
 	): Promise<void> {
 		// Readiness barrier: a run requested during binding or reload starts after it.
 		while (this._readiness) await this._readiness;
@@ -2506,7 +2522,7 @@ export class AgentSession {
 		}
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
-		for (const settle of [...this._barrierStarters]) settle();
+		releaseDeferred();
 		let prepared: PreparedRun;
 		let nextTurn: CustomMessage[] = [];
 		const needsSnapshot = this._needsBootstrap();
@@ -2804,35 +2820,47 @@ export class AgentSession {
 		}
 		if (!this._readiness) return this._promptWhenReady(text, options, admissionGen);
 		// Readiness barrier: commands, input hooks and expansion see the ready resources.
-		let settle = () => {};
-		const settled = new Promise<void>((resolve) => {
-			settle = () => {
-				this._barrierStarters.delete(settle);
-				this._barrierStarterPromises.delete(settled);
+		const releaseDeferred = this._trackDeferredStart();
+		try {
+			while (this._readiness) await this._readiness;
+			// Admission may have closed while waiting: no command or input hook runs then.
+			this._throwIfAdmissionChanged(admissionGen);
+			await this._promptWhenReady(text, options, admissionGen, releaseDeferred);
+		} finally {
+			releaseDeferred();
+		}
+	}
+
+	/**
+	 * Register a start deferred by the current readiness barrier; its binder waits until the returned
+	 * function is called. Only the barrier that deferred it waits for it (one set per barrier).
+	 */
+	private _trackDeferredStart(): () => void {
+		const starters = this._readinessStarters;
+		if (!starters) return () => {};
+		let release = () => {};
+		const released = new Promise<void>((resolve) => {
+			release = () => {
+				starters.delete(released);
 				resolve();
 			};
 		});
-		this._barrierStarters.add(settle);
-		this._barrierStarterPromises.add(settled);
-		try {
-			while (this._readiness) await this._readiness;
-			await this._promptWhenReady(text, options, admissionGen);
-		} finally {
-			settle();
-		}
+		starters.add(released);
+		return release;
 	}
 
 	private async _promptWhenReady(
 		text: string,
 		options: PromptOptions | undefined,
 		admissionGen: number,
+		releaseDeferred: () => void = () => {},
 	): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		// Handle extension commands first (execute immediately, even during streaming)
 		// Extension commands manage their own LLM interaction via pi.sendMessage()
 		if (expandPromptTemplates && text.startsWith("/")) {
-			const handled = await this._tryExecuteExtensionCommand(text);
+			const handled = await this._tryExecuteExtensionCommand(text, releaseDeferred);
 			if (handled) {
 				// Extension command executed, no prompt to send
 				preflightResult?.("handled");
@@ -2847,6 +2875,7 @@ export class AgentSession {
 		}
 
 		// Emit input event for extension interception (before skill/template expansion)
+		if (this._extensionRunner.hasHandlers("input")) releaseDeferred();
 		const processedInput = await this._runInputHandlers(
 			text,
 			options?.images,
@@ -2888,9 +2917,12 @@ export class AgentSession {
 			throw new Error(formatNoModelSelectedMessage());
 		}
 
-		const hasConfiguredAuth =
-			this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
-			(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		let hasConfiguredAuth = this._modelRuntime.hasConfiguredAuth(this.model.provider);
+		if (!hasConfiguredAuth) {
+			// Async auth can run provider code: the binder does not wait for it.
+			releaseDeferred();
+			hasConfiguredAuth = (await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
+		}
 		if (!hasConfiguredAuth) {
 			const isOAuth = this._modelRuntime.isUsingOAuth(this.model.provider);
 			if (isOAuth) {
@@ -2907,6 +2939,7 @@ export class AgentSession {
 			{ messageType: "user", prompt: expandedText, images: currentImages },
 			() => preflightResult?.("started"),
 			admissionGen,
+			releaseDeferred,
 		);
 	}
 
@@ -2921,7 +2954,7 @@ export class AgentSession {
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
-	private async _tryExecuteExtensionCommand(text: string): Promise<boolean> {
+	private async _tryExecuteExtensionCommand(text: string, releaseDeferred: () => void = () => {}): Promise<boolean> {
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
@@ -2929,6 +2962,8 @@ export class AgentSession {
 
 		const command = this._extensionRunner.getCommand(commandName);
 		if (!command) return false;
+		// The binder never waits for a command: it may await ctx.reload() or anything else.
+		releaseDeferred();
 
 		// Get command context from extension runner (includes session control methods)
 		const ctx = this._extensionRunner.createCommandContext();
@@ -4208,33 +4243,39 @@ export class AgentSession {
 		if (this._readiness) {
 			throw new Error("Cannot bind extensions while extensions are binding or reloading");
 		}
-		const release = this._beginReadiness();
+		const barrier = this._beginReadiness();
 		try {
 			await this._bindExtensions(bindings);
 		} finally {
-			release();
+			barrier.release();
 		}
-		await this._awaitBarrierStarters();
+		await barrier.deferredStarts();
 	}
 
-	/** Install the readiness barrier; the returned function always releases it. */
-	private _beginReadiness(): () => void {
+	/**
+	 * Install the readiness barrier. `release()` always releases it; `deferredStarts()` then resolves once
+	 * every start this barrier deferred has reserved its run, settled, or reached extension code.
+	 */
+	private _beginReadiness(): { release: () => void; deferredStarts: () => Promise<void> } {
 		let resolve = () => {};
 		const promise = new Promise<void>((r) => {
 			resolve = r;
 		});
+		const starters = new Set<Promise<void>>();
 		this._readiness = promise;
-		return () => {
-			if (this._readiness === promise) this._readiness = undefined;
-			resolve();
+		this._readinessStarters = starters;
+		return {
+			release: () => {
+				if (this._readiness === promise) {
+					this._readiness = undefined;
+					this._readinessStarters = undefined;
+				}
+				resolve();
+			},
+			deferredStarts: async () => {
+				while (starters.size > 0) await Promise.all([...starters]);
+			},
 		};
-	}
-
-	/** Wait until prompts deferred by the barrier have reserved their run or settled. */
-	private async _awaitBarrierStarters(): Promise<void> {
-		while (!this._readiness && this._barrierStarterPromises.size > 0) {
-			await Promise.all([...this._barrierStarterPromises]);
-		}
 	}
 
 	private async _bindExtensions(bindings: ExtensionBindings): Promise<void> {
@@ -4669,13 +4710,13 @@ export class AgentSession {
 		if (this._isAgentRunActive || this.isCompacting || this._readiness) {
 			throw new Error("Cannot reload while a run is active, compaction is running, or extensions are binding");
 		}
-		const release = this._beginReadiness();
+		const barrier = this._beginReadiness();
 		try {
 			await this._reload(options);
 		} finally {
-			release();
+			barrier.release();
 		}
-		await this._awaitBarrierStarters();
+		await barrier.deferredStarts();
 	}
 
 	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
@@ -4684,15 +4725,13 @@ export class AgentSession {
 		// Staged instructions created through the extension API belong to the old runtime. A bound
 		// session's extensions rebuild them from the journal at session_start(reload); a never-bound
 		// session keeps them without onCommit (its runtime is invalidated). Staged content is kept (§3.7).
-		if (this._extensionsBound) {
-			this._stagedInstructions = this._stagedInstructions.filter((pending) => pending.owner === undefined);
-		} else {
-			for (const pending of this._stagedInstructions) {
-				if (pending.owner !== undefined) pending.onCommit = undefined;
-			}
-		}
+		this._releaseExtensionStagedInstructions();
+		// A due latch belongs to the runtime being replaced (§7.3); derivation keeps the value pending.
+		this._standingDue.clear();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
+		// session_shutdown handlers may have staged more through the old runtime: apply the same rule.
+		this._releaseExtensionStagedInstructions();
 		const getDefaultTools = () =>
 			this._usesDefaultTools
 				? applyToolModifiers(
@@ -5164,6 +5203,8 @@ export class AgentSession {
 
 			// Staged items belong to the abandoned branch: discarded, no onCommit (§3.7).
 			this._discardStaged();
+			// So does the due latch (§7.3): the new branch's pending values wait for its next input.
+			this._standingDue.clear();
 			// Update finalized context from the canonical session projection.
 			this._refreshFinalizedContext();
 			this._restoreToolsFromTranscript();

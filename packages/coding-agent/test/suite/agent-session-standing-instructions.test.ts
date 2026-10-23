@@ -480,6 +480,34 @@ describe("AgentSession standing instructions", () => {
 			}
 		});
 
+		it("the due latch is reset by reload and by tree navigation to another branch with the same key pending (§7.3)", async () => {
+			const harness = await setup({ bootstrapped: true });
+			harness.setResponses([respond([]), respond([])]);
+			const due = () => [...(harness.session as unknown as { _standingDue: Set<string> })._standingDue];
+			const rootLeaf = harness.sessionManager.getLeafId()!;
+			let failing = true;
+			failStandingAppend(harness, () => failing);
+
+			harness.session.setStandingInstruction("mode", "Plan");
+			await harness.session.prompt("first");
+			expect(due()).toEqual(["mode"]);
+			await harness.session.reload();
+			expect(due()).toEqual([]);
+
+			await harness.session.prompt("second");
+			expect(due()).toEqual(["mode"]);
+			// Another branch from the bootstrapped root, where the same key is pending with another value.
+			failing = false;
+			const firstLeaf = harness.sessionManager.getLeafId()!;
+			harness.sessionManager.branch(rootLeaf);
+			harness.session.setStandingInstruction("mode", "Default");
+			const otherLeaf = harness.sessionManager.getLeafId()!;
+			harness.sessionManager.branch(firstLeaf);
+			await harness.session.navigateTree(otherLeaf, { summarize: false });
+			expect(harness.session.getStandingInstruction("mode")?.delivered).toBe(false);
+			expect(due()).toEqual([]);
+		});
+
 		it("already-acknowledged child: a next-request value set and acked at once; the task's boundary append throws", async () => {
 			let acked = false;
 			const harness = await setup({

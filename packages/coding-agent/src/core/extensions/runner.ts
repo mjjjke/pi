@@ -776,9 +776,20 @@ export class ExtensionRunner {
 		return () => this.errorListeners.delete(listener);
 	}
 
+	/**
+	 * Report an error to every listener. A throwing listener is written to stderr (never re-reported, so
+	 * reporting cannot recurse) and does not stop the others or the caller.
+	 */
 	emitError(error: ExtensionError): void {
-		for (const listener of this.errorListeners) {
-			listener(error);
+		for (const listener of [...this.errorListeners]) {
+			try {
+				listener(error);
+			} catch (listenerError) {
+				const reason = listenerError instanceof Error ? listenerError.message : String(listenerError);
+				console.error(
+					`Extension error listener failed (${error.event}): ${reason}; original error: ${error.error}`,
+				);
+			}
 		}
 	}
 

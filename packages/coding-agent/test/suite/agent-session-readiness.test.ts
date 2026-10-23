@@ -159,6 +159,115 @@ describe("AgentSession readiness barrier", () => {
 		expect(log.map((entry) => entry.texts)).toEqual([["raw (transformed)"]]);
 	});
 
+	/** Resolve with "timeout" when `promise` has not settled within `ms` (deadlock probe). */
+	function within<T>(promise: Promise<T>, ms = 1000): Promise<T | "timeout"> {
+		return Promise.race([promise, new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), ms))]);
+	}
+
+	it("a deferred startup command that awaits ctx.reload() does not deadlock binding (review B finding 1)", async () => {
+		const steps: string[] = [];
+		const harness = await setup([
+			(pi) => {
+				pi.on("session_start", (event) => {
+					steps.push(`start:${event.reason}`);
+					if (event.reason === "startup") pi.sendUserMessage("/reload-test", { expandPromptTemplates: true });
+				});
+				pi.registerCommand("reload-test", {
+					description: "reloads",
+					handler: async (_args, ctx) => {
+						steps.push("command");
+						await ctx.reload();
+						steps.push("command returned");
+					},
+				});
+			},
+		]);
+		const session = harness.session;
+		const bound = await within(
+			session
+				.bindExtensions({
+					commandContextActions: {
+						waitForIdle: () => session.waitForIdle(),
+						newSession: async () => ({ cancelled: true }),
+						fork: async () => ({ cancelled: true }),
+						navigateTree: async () => ({ cancelled: true }),
+						switchSession: async () => ({ cancelled: true }),
+						reload: () => session.reload(),
+					},
+				})
+				.then(() => "bound"),
+		);
+		expect(bound).toBe("bound");
+		await vi.waitFor(() => expect(steps).toContain("command returned"));
+		expect(steps).toEqual(["start:startup", "command", "start:reload", "command returned"]);
+	});
+
+	it("a deferred startup prompt whose input hook awaits the binder does not deadlock binding", async () => {
+		const bound = deferred();
+		const harness = await setup([
+			(pi) => {
+				pi.on("session_start", () => {
+					pi.sendUserMessage("hello");
+				});
+				pi.on("input", async () => {
+					await bound.promise;
+					return { action: "continue" as const };
+				});
+			},
+		]);
+		const log = recordRequests(harness, 1);
+		const result = await within(harness.session.bindExtensions({}).then(() => "bound"));
+		expect(result).toBe("bound");
+		bound.resolve();
+		await vi.waitFor(() => expect(log).toHaveLength(1));
+		await harness.session.waitForIdle();
+		expect(log[0]!.texts).toEqual(["hello"]);
+	});
+
+	it.each([
+		["closeAdmission", (harness: Harness) => harness.session.closeAdmission()],
+		["dispose", (harness: Harness) => harness.session.dispose()],
+	])(
+		"%s while a prompt waits for readiness: no command or input hook runs (review B finding 2)",
+		async (_label, close) => {
+			const gate = deferred();
+			let commands = 0;
+			let inputs = 0;
+			const harness = await setup([
+				(pi) => {
+					pi.on("session_start", () => gate.promise);
+					pi.registerCommand("test", {
+						description: "test",
+						handler: async () => {
+							commands++;
+						},
+					});
+					pi.on("input", () => {
+						inputs++;
+						return { action: "continue" as const };
+					});
+				},
+			]);
+			const binding = harness.session.bindExtensions({});
+			const command = harness.session.prompt("/test").then(
+				() => "resolved",
+				(error: Error) => error.message,
+			);
+			const text = harness.session.prompt("plain").then(
+				() => "resolved",
+				(error: Error) => error.message,
+			);
+			await tick();
+			close(harness);
+			gate.resolve();
+			await binding.catch(() => {});
+			expect(await command).toBe("prompt cancelled: session shutting down");
+			expect(await text).toBe("prompt cancelled: session shutting down");
+			expect(commands).toBe(0);
+			expect(inputs).toBe(0);
+		},
+	);
+
 	it("reload rejects while the first run is blocked in preflight", async () => {
 		const gate = deferred();
 		const harness = await setup([
@@ -439,7 +548,7 @@ describe("AgentSession readiness barrier", () => {
 			expectReadyRequest(requests[0], "late_reload");
 		});
 
-		it("print mode: the startup run waits for binding to finish", async () => {
+		it("print mode (real runtime): the startup run waits for binding, completes and is printed before disposal", async () => {
 			const gate = deferred();
 			const skillsDir = createSkillDir();
 			const harness: RuntimeHarness = await createRuntimeHarness(solTrace(gate, skillsDir, "startup"), {
@@ -449,33 +558,38 @@ describe("AgentSession readiness barrier", () => {
 			const { requests, factory } = recordWire();
 			harness.faux.setResponses([factory()]);
 			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-			const runtime = harness.runtime;
-			// The host keeps the runtime for cleanup; disposing waits for the startup run to settle.
-			const host = {
-				get session() {
-					return runtime.session;
-				},
-				newSession: vi.fn(async () => ({ cancelled: true })),
-				fork: vi.fn(async () => ({ cancelled: true })),
-				switchSession: vi.fn(async () => ({ cancelled: true })),
-				dispose: vi.fn(async () => {
-					await runtime.session.waitForIdle();
-				}),
-				setRebindSession: vi.fn(),
-			};
+			rpcIo.outputLines.length = 0;
+			const session = harness.runtime.session;
 
-			const printing = runPrintMode(host as unknown as Parameters<typeof runPrintMode>[0], {
-				mode: "text",
-				messages: [],
-			});
+			const printing = runPrintMode(harness.runtime, { mode: "text", messages: [] });
 			await tick();
 			expect(requests).toHaveLength(0);
 			gate.resolve();
 			expect(await printing).toBe(0);
-			await runtime.session.waitForIdle();
 
+			// The real runtime disposed the session: the run had already completed, it was not cancelled.
 			expect(requests).toHaveLength(1);
 			expectReadyRequest(requests[0], "late_startup");
+			expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(rpcIo.outputLines).toEqual(["ok\n"]);
+		});
+
+		it("print mode (real runtime): a startup run completes before the CLI message runs", async () => {
+			const harness: RuntimeHarness = await createRuntimeHarness(
+				(pi) => {
+					pi.on("session_start", () => pi.sendUserMessage("from startup"));
+				},
+				{ bind: false },
+			);
+			cleanups.push(() => harness.cleanup());
+			const { requests, factory } = recordWire();
+			harness.faux.setResponses([factory(), factory()]);
+			vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+			rpcIo.outputLines.length = 0;
+
+			expect(await runPrintMode(harness.runtime, { mode: "text", messages: ["from cli"] })).toBe(0);
+			expect(requests.map((request) => request.userTexts)).toEqual([["from startup"], ["from startup", "from cli"]]);
+			expect(rpcIo.outputLines).toEqual(["ok\n"]);
 		});
 
 		async function rpcSetup(

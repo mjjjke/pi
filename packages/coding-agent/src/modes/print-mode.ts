@@ -131,6 +131,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		await rebindSession();
+		// A run a session_start handler started completes (and is printed) before the CLI messages run
+		// and before disposal, instead of being cancelled by it.
+		await session.waitForIdle();
 
 		if (initialMessage) {
 			await session.prompt(initialMessage, { images: initialImages });

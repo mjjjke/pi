@@ -235,6 +235,31 @@ describe("AgentSession bootstrap commit failures", () => {
 		expect(onCommit).toHaveBeenCalledTimes(1);
 	});
 
+	it("a throwing error observer does not stop B's remaining events and callbacks", async () => {
+		const harness = await setup();
+		const errorObserver = vi.fn(() => {
+			throw new Error("error observer failed");
+		});
+		await harness.session.bindExtensions({ onError: errorObserver });
+		const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+		const onCommit = vi.fn();
+		harness.session.queueDeveloperMessage("dev", { onCommit });
+		harness.session.subscribe((event) => {
+			if (event.type === "message_start" && event.message.role === "system") throw new Error("listener failed");
+		});
+		const seen: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "system") seen.push("system");
+		});
+		const requests = recordRequests(harness);
+		await harness.session.prompt("go");
+		expect(errorObserver).toHaveBeenCalled();
+		expect(stderr).toHaveBeenCalled();
+		expect(seen).toEqual(["system"]);
+		expect(onCommit).toHaveBeenCalledTimes(1);
+		expect(requests).toEqual([["system", "developer:dev", "user:go"]]);
+	});
+
 	it("tree navigation away from a pre-system point discards staged items without onCommit", async () => {
 		const seeded = SessionManager.inMemory();
 		const markerId = seeded.appendCustomEntry("marker", {});
@@ -580,5 +605,24 @@ describe("AgentSession bootstrap commit failures", () => {
 		await harness.session.prompt("go").catch(() => {});
 		expect(journal(harness).slice(0, 3)).toEqual(["system", "developer:from sdk", "custom:content"]);
 		expect(extensionCommit).not.toHaveBeenCalled();
+	});
+
+	it("reload also drops instructions the old runtime stages from session_shutdown(reload) (§3.7)", async () => {
+		const shutdownCommit = vi.fn();
+		const harness = await setup([
+			(pi) => {
+				pi.on("session_shutdown", (event) => {
+					if (event.reason === "reload")
+						pi.queueDeveloperMessage("old shutdown policy", { onCommit: shutdownCommit });
+				});
+			},
+		]);
+		await harness.session.bindExtensions({});
+		harness.session.queueDeveloperMessage("from sdk");
+		await harness.session.sendCustomMessage({ customType: "c", content: "content", display: false });
+		await harness.session.reload();
+		await harness.session.prompt("go").catch(() => {});
+		expect(journal(harness).slice(0, 4)).toEqual(["system", "developer:from sdk", "custom:content", "user:go"]);
+		expect(shutdownCommit).not.toHaveBeenCalled();
 	});
 });
