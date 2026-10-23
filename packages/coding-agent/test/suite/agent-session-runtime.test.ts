@@ -305,6 +305,30 @@ describe("AgentSessionRuntime characterization", () => {
 		]);
 	});
 
+	it("newSession setup receives a state-only manager (§3.7)", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		let received: Record<string, unknown> | undefined;
+
+		await runtime.newSession({
+			setup: async (sessionManager) => {
+				received = sessionManager as unknown as Record<string, unknown>;
+				sessionManager.appendCustomEntry("my-state", { ready: true });
+				sessionManager.appendSessionInfo("named");
+				expect(sessionManager.getBranch().map((entry) => entry.type)).toEqual(
+					expect.arrayContaining(["custom", "session_info"]),
+				);
+			},
+		});
+
+		expect(received?.appendMessage).toBeUndefined();
+		expect(received?.appendCustomMessageEntry).toBeUndefined();
+		expect(received?.appendCompaction).toBeUndefined();
+		const types = runtime.session.sessionManager.getEntries().map((entry) => entry.type);
+		expect(types).toEqual(expect.arrayContaining(["custom", "session_info"]));
+		expect(types).not.toContain("message");
+		expect(runtime.session.sessionManager.getSessionName()).toBe("named");
+	});
+
 	it("honors session_before_switch cancellation for new and resume", async () => {
 		const events: RecordedSessionEvent[] = [];
 		let cancelReason: "new" | "resume" | undefined;

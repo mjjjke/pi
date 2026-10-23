@@ -78,7 +78,7 @@ import type {
 	ProjectedSessionEntry,
 	ReadonlySessionManager,
 	SessionEntry,
-	SessionManager,
+	SessionSetupManager,
 } from "../session-manager.ts";
 import type { Settings } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
@@ -323,7 +323,8 @@ export interface CompactOptions {
 
 export interface RequestNewSessionOptions {
 	parentSession?: string;
-	setup?: (sessionManager: SessionManager) => Promise<void>;
+	/** State-only: append custom/session-info/label entries here; send context through `withSession`. */
+	setup?: (sessionManager: SessionSetupManager) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 }
 

@@ -329,6 +329,7 @@ export {
 	type SessionMigrationReport,
 	SessionPersistenceError,
 	type SessionProjection,
+	type SessionSetupManager,
 	type SessionTreeNode,
 	type StandingInstructionApply,
 	type StandingInstructionContent,

@@ -312,6 +312,48 @@ export type ReadonlySessionManager = Pick<
 	| "getStandingState"
 >;
 
+const READONLY_SESSION_MANAGER_METHODS = [
+	"getCwd",
+	"getSessionDir",
+	"getSessionId",
+	"getSessionFile",
+	"getLeafId",
+	"getLeafEntry",
+	"getEntry",
+	"getLabel",
+	"getBranch",
+	"buildContextEntries",
+	"buildSessionProjection",
+	"getHeader",
+	"getEntries",
+	"getTree",
+	"getSessionName",
+	"getStandingState",
+] as const satisfies ReadonlyArray<keyof ReadonlySessionManager>;
+
+/**
+ * State-only manager handed to `newSession` `setup` (§3.7): non-context state entries and getters.
+ * Context (messages) goes through `withSession`, where it is staged until the first run.
+ */
+export type SessionSetupManager = ReadonlySessionManager &
+	Pick<SessionManager, "appendCustomEntry" | "appendSessionInfo" | "appendLabelChange">;
+
+/** Build the state-only facade over a session manager; only the listed methods exist on it. */
+export function createSessionSetupManager(manager: SessionManager): SessionSetupManager {
+	const methods = [
+		...READONLY_SESSION_MANAGER_METHODS,
+		"appendCustomEntry",
+		"appendSessionInfo",
+		"appendLabelChange",
+	] as const;
+	const facade: Record<string, unknown> = {};
+	for (const name of methods) {
+		const method = manager[name] as (...args: unknown[]) => unknown;
+		facade[name] = (...args: unknown[]) => method.apply(manager, args);
+	}
+	return Object.freeze(facade) as unknown as SessionSetupManager;
+}
+
 function createSessionId(): string {
 	return uuidv7();
 }

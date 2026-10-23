@@ -12,7 +12,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionManager } from "./session-manager.ts";
+import { createSessionSetupManager, SessionManager, type SessionSetupManager } from "./session-manager.ts";
 
 /**
  * Result returned by runtime creation.
@@ -225,7 +225,7 @@ export class AgentSessionRuntime {
 
 	async newSession(options?: {
 		parentSession?: string;
-		setup?: (sessionManager: SessionManager) => Promise<void>;
+		setup?: (sessionManager: SessionSetupManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
 		const beforeResult = await this.emitBeforeSwitch("new");
@@ -252,7 +252,7 @@ export class AgentSessionRuntime {
 			}),
 		);
 		if (options?.setup) {
-			await options.setup(this.session.sessionManager);
+			await options.setup(createSessionSetupManager(this.session.sessionManager));
 			this.session.refreshContext();
 		}
 		await this.finishSessionReplacement(options?.withSession);
