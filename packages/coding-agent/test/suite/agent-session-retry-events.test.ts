@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, type Harness } from "./harness.ts";
+import { createBootstrappedSessionManager, createHarness, type Harness } from "./harness.ts";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
 	const normalized: string[] = [];
@@ -263,7 +263,9 @@ describe("AgentSession retry and event characterization", () => {
 
 	it("emits extension events before public event subscribers", async () => {
 		const order: string[] = [];
+		// Later-run order: the session already has its initial snapshot (first-run order: bootstrap tests).
 		const harness = await createHarness({
+			sessionManager: createBootstrappedSessionManager(),
 			extensionFactories: [
 				(pi) => {
 					pi.on("message_start", async (event) => {
@@ -302,7 +304,7 @@ describe("AgentSession retry and event characterization", () => {
 	});
 
 	it("emits the expected event order for a single prompt", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("hello")]);
 
@@ -347,11 +349,12 @@ describe("AgentSession retry and event characterization", () => {
 		await harness.session.prompt("hi");
 
 		expect(toolRuns).toEqual(["hello"]);
+		// First run: the bootstrap commit announces the snapshot before the loop starts.
 		expect(normalizeEventOrder(harness.events)).toEqual([
-			"agent_start",
-			"turn_start",
 			"message_start:system",
 			"message_end:system",
+			"agent_start",
+			"turn_start",
 			"message_start:user",
 			"message_end:user",
 			"message_start:assistant",

@@ -4,7 +4,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
-import { createHarness, type Harness } from "./harness.ts";
+import { createBootstrappedSessionManager, createHarness, type Harness } from "./harness.ts";
 
 function getEntryTypes(harness: Harness): string[] {
 	return harness.sessionManager.getEntries().map((entry) => entry.type);
@@ -38,7 +38,7 @@ describe("AgentSession bash and persistence characterization", () => {
 	});
 
 	it("records bash results immediately while idle", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 		harnesses.push(harness);
 
 		harness.session.recordBashResult("echo hi", {
@@ -50,7 +50,30 @@ describe("AgentSession bash and persistence characterization", () => {
 
 		expect(harness.session.hasPendingBashMessages).toBe(false);
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("bashExecution");
-		expect(getEntryTypes(harness)).toContain("message");
+		expect(getEntryTypes(harness)).toEqual(["message", "message"]);
+	});
+
+	it("stages idle bash results before the first run and writes them after the snapshot", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		harness.session.recordBashResult("echo hi", {
+			output: "hi",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+		});
+
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.session.stagedMessages.map((message) => message.role)).toEqual(["bashExecution"]);
+		await harness.session.prompt("go");
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
+			"bashExecution",
+			"user",
+			"assistant",
+		]);
 	});
 
 	it("defers bash results while streaming and flushes them before the next prompt", async () => {
@@ -114,7 +137,7 @@ describe("AgentSession bash and persistence characterization", () => {
 	});
 
 	it("executes bash commands and records the result", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 		harnesses.push(harness);
 
 		const result = await harness.session.executeBash("printf 'hello'");
@@ -223,18 +246,18 @@ describe("AgentSession bash and persistence characterization", () => {
 		await harness.session.prompt("start");
 
 		const entries = harness.sessionManager.getEntries();
-		// The prompt is declared by the first request, after the queued custom message.
+		// The snapshot comes first; the custom message staged before the first run follows it.
 		expect(entries.map((entry) => entry.type)).toEqual([
-			"custom_message",
 			"message",
+			"custom_message",
 			"message",
 			"message",
 			"message",
 			"message",
 		]);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
-			"custom",
 			"system",
+			"custom",
 			"user",
 			"assistant",
 			"toolResult",
@@ -292,7 +315,7 @@ describe("AgentSession bash and persistence characterization", () => {
 	});
 
 	it("records bash output through custom operations", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 		harnesses.push(harness);
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, options) => {
@@ -342,7 +365,7 @@ describe("AgentSession bash and persistence characterization", () => {
 	describe("escape sequences split across output chunks", () => {
 		/** Runs a user bash command whose fake shell emits the given chunks; `beforeExit` sees what was streamed by then. */
 		async function runChunks(chunks: Array<string | Buffer>, beforeExit?: (streamed: string) => void) {
-			const harness = await createHarness();
+			const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 			harnesses.push(harness);
 			const deltas: string[] = [];
 			const operations: BashOperations = {

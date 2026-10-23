@@ -32,7 +32,7 @@ import {
 	runToolCall,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getCurrentSystemMessage, retryDelayMs } from "@earendil-works/pi-ai";
+import { contentText, getCurrentSystemMessage, getToolStateChanges, retryDelayMs } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -339,6 +339,22 @@ interface PendingInstruction {
 	onCommit?: (entryId: string) => void;
 	state: "pending" | "committing" | "committed";
 	entryId?: string;
+	/** Extension runner that created it (extension API); undefined for SDK callers. */
+	owner?: ExtensionRunner;
+}
+
+/** A prepared run: the system patch (if any), the starting message and before_agent_start messages. */
+interface PreparedRun {
+	update: SystemMessage | undefined;
+	start: AgentMessage;
+	returned: AgentMessage[];
+}
+
+/** Content held until the bootstrap commit (B). */
+interface StagedContent {
+	message: CustomMessage | BashExecutionMessage;
+	/** message_start/message_end were already emitted at send. */
+	announced: boolean;
 }
 
 function isBlankInstruction(content: string | TextContent[]): boolean {
@@ -439,6 +455,10 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** One-shot developer instructions held until B (status `staged`), FIFO. No drain but B commits them. */
+	private _stagedInstructions: PendingInstruction[] = [];
+	/** Custom and bash content held until B, in ingress order. */
+	private _stagedContent: StagedContent[] = [];
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -932,6 +952,137 @@ export class AgentSession {
 		};
 	}
 
+	/** The active branch has no system state yet: its first run writes the snapshot (B). */
+	private _needsBootstrap(): boolean {
+		return !this.sessionManager.buildSessionProjection().messages.some((message) => message.role === "system");
+	}
+
+	/** Producers stage on a branch that needs bootstrap, or while anything is still staged (§3.3). */
+	private _isStagingBranch(): boolean {
+		return this._stagedInstructions.length > 0 || this._stagedContent.length > 0 || this._needsBootstrap();
+	}
+
+	/** Developer instructions stage while idle or in a run's preflight on a staging branch. */
+	private _shouldStage(): boolean {
+		return (!this.isStreaming || this._isPreparingRun) && this._isStagingBranch();
+	}
+
+	/** Content staged before B, for display (TUI rebuild). Committed messages are not included. */
+	get stagedMessages(): ReadonlyArray<CustomMessage | BashExecutionMessage> {
+		return this._stagedContent.map((item) => item.message);
+	}
+
+	/** Drop everything staged (dispose, replacement, tree navigation): no onCommit. */
+	private _discardStaged(): void {
+		this._stagedInstructions = [];
+		this._stagedContent = [];
+	}
+
+	/** Move the preflight buffers behind the staged content (failed preflight or failed B, §3.6). */
+	private _stagePreflightBuffers(): void {
+		for (const message of this._pendingBashMessages.splice(0)) {
+			this._stagedContent.push({ message, announced: false });
+		}
+		for (const message of this._pendingCustomMessages.splice(0)) {
+			this._stagedContent.push({ message: structuredClone(message), announced: false });
+		}
+	}
+
+	/** Emit to every listener; a throwing listener is reported and does not stop the others. */
+	private _emitIsolated(event: AgentSessionEvent): void {
+		for (const listener of [...this._eventListeners]) {
+			try {
+				listener(event);
+			} catch (error) {
+				this._reportBootstrapError(error);
+			}
+		}
+	}
+
+	private _reportBootstrapError(error: unknown): void {
+		this._extensionRunner.emitError({
+			extensionPath: "<runtime>",
+			event: "session_bootstrap",
+			error: error instanceof Error ? error.message : String(error),
+			stack: error instanceof Error ? error.stack : undefined,
+		});
+	}
+
+	/**
+	 * The bootstrap commit (B, §3.4): write the snapshot, the staged developers and the staged content,
+	 * synchronously and in order. Events and deferred onCommit callbacks run afterwards from the receipts
+	 * of the appends that succeeded, also when a later append threw (which is rethrown).
+	 */
+	private _bootstrapCommit(
+		snapshotPatch: SystemMessage | undefined,
+		needsSnapshot: boolean,
+		includePreflightCustom: boolean,
+	): void {
+		const events: AgentSessionEvent[] = [];
+		const callbacks: Array<() => void> = [];
+		try {
+			if (needsSnapshot) {
+				const toolsAdded = getToolStateChanges([], this.agent.state.tools).toolsAdded;
+				const snapshot: SystemMessage = {
+					...(snapshotPatch ?? { role: "system", content: "", sections: {}, timestamp: Date.now() }),
+					...(toolsAdded.length > 0 ? { toolsAdded } : {}),
+				};
+				this.sessionManager.appendMessage(snapshot);
+				events.push({ type: "message_start", message: snapshot }, { type: "message_end", message: snapshot });
+			}
+			for (const pending of this._stagedInstructions.slice()) {
+				this._commitInstruction(pending, { deferOnCommit: true });
+				this._stagedInstructions.splice(this._stagedInstructions.indexOf(pending), 1);
+				const { onCommit, entryId } = pending;
+				if (onCommit && entryId) callbacks.push(() => onCommit(entryId));
+			}
+			while (this._stagedContent.length > 0) {
+				const item = this._stagedContent[0]!;
+				this._appendContentMessage(item.message);
+				this._stagedContent.shift();
+				if (!item.announced && item.message.role === "custom") {
+					events.push(
+						{ type: "message_start", message: item.message },
+						{ type: "message_end", message: item.message },
+					);
+				}
+			}
+			while (this._pendingBashMessages.length > 0) {
+				this.sessionManager.appendMessage(this._pendingBashMessages[0]!);
+				this._pendingBashMessages.shift();
+			}
+			while (includePreflightCustom && this._pendingCustomMessages.length > 0) {
+				const message = this._pendingCustomMessages[0]!;
+				this._appendContentMessage(message);
+				this._pendingCustomMessages.shift();
+				events.push({ type: "message_start", message }, { type: "message_end", message });
+			}
+		} finally {
+			this._refreshFinalizedContext();
+			for (const event of events) this._emitIsolated(event);
+			for (const callback of callbacks) {
+				try {
+					callback();
+				} catch (error) {
+					this._reportInstructionError(error);
+				}
+			}
+		}
+	}
+
+	private _appendContentMessage(message: CustomMessage | BashExecutionMessage): void {
+		if (message.role === "custom") {
+			this.sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
+		} else {
+			this.sessionManager.appendMessage(message);
+		}
+	}
+
 	private _createPendingInstruction(
 		content: string | TextContent[],
 		onCommit?: (entryId: string) => void,
@@ -949,7 +1100,10 @@ export class AgentSession {
 	 * `pending` and the error is rethrown. Persistence precedes every event; the committed message is
 	 * frozen, and `onCommit` runs last, isolated from the commit.
 	 */
-	private _commitInstruction(pending: PendingInstruction, options: { refresh?: boolean } = {}): string {
+	private _commitInstruction(
+		pending: PendingInstruction,
+		options: { refresh?: boolean; deferOnCommit?: boolean } = {},
+	): string {
 		if (pending.state === "committed" && pending.entryId !== undefined) return pending.entryId;
 		// Unreachable today: appendMessage() is synchronous and calls back into nothing, so no caller
 		// can observe the "committing" state. Guard against a future reentrant path double-appending.
@@ -975,7 +1129,7 @@ export class AgentSession {
 		}
 		Object.freeze(pending.message);
 		if (options.refresh) this._refreshFinalizedContext();
-		if (pending.onCommit) {
+		if (pending.onCommit && !options.deferOnCommit) {
 			try {
 				pending.onCommit(entryId);
 			} catch (error) {
@@ -1686,6 +1840,7 @@ export class AgentSession {
 		this._disposed = true;
 		this._admissionGen++;
 		this._admissionClosed = true;
+		this._discardStaged();
 		for (const pending of this._pendingInstructions.splice(0)) {
 			try {
 				this._commitInstruction(pending);
@@ -2153,25 +2308,54 @@ export class AgentSession {
 		this._isAgentRunActive = true;
 		this._agentRunAbortRequested = false;
 		for (const settle of [...this._barrierStarters]) settle();
-		let messages: AgentMessage[];
+		let prepared: PreparedRun;
+		let nextTurn: CustomMessage[] = [];
+		const needsSnapshot = this._needsBootstrap();
+		const bootstrap = needsSnapshot || this._stagedInstructions.length > 0 || this._stagedContent.length > 0;
+		const failStart = (error: unknown): never => {
+			this._isAgentRunActive = false;
+			if (!this._isAdmissionChanged(admissionGen)) {
+				if (bootstrap) {
+					// Staged content is data: it waits for the next B instead of being committed (§3.6).
+					this._stagePreflightBuffers();
+				} else {
+					this._flushPendingBashMessages();
+					this._flushPendingCustomMessages();
+				}
+			}
+			// nextTurn messages consumed by this run go back to the front (Sol F4b).
+			this._pendingNextTurnMessages.unshift(...nextTurn);
+			this._resolveIdleWaitIfIdle();
+			throw error;
+		};
 		try {
-			messages = await this._prepareRun(trigger, admissionGen);
+			prepared = await this._prepareRun(trigger, admissionGen);
 			// Loadout hooks can schedule shutdown in a microtask before this await resumes.
 			this._throwIfAdmissionChanged(admissionGen);
 		} catch (error) {
-			this._isAgentRunActive = false;
-			if (!this._isAdmissionChanged(admissionGen)) {
-				this._flushPendingBashMessages();
-				this._flushPendingCustomMessages();
-			}
-			this._resolveIdleWaitIfIdle();
-			throw error;
+			return failStart(error);
 		}
-		// Bash output and user-run context held during startup precede its starting messages.
-		// Passive messages received during custom preflight instead wait for the turn boundary,
-		// so they cannot precede their triggering notification.
-		this._flushPendingBashMessages();
-		if (trigger.messageType === "user") this._flushPendingCustomMessages();
+		// Consumed only after the final admission check (Sol F4b).
+		nextTurn = this._pendingNextTurnMessages;
+		this._pendingNextTurnMessages = [];
+		let update = prepared.update;
+		if (bootstrap) {
+			try {
+				this._bootstrapCommit(needsSnapshot ? update : undefined, needsSnapshot, trigger.messageType === "user");
+				// A callback of B may have disposed the session or closed admission.
+				this._throwIfAdmissionChanged(admissionGen);
+			} catch (error) {
+				return failStart(error);
+			}
+			if (needsSnapshot) update = undefined;
+		} else {
+			// Bash output and user-run context held during startup precede its starting messages.
+			// Passive messages received during custom preflight instead wait for the turn boundary,
+			// so they cannot precede their triggering notification.
+			this._flushPendingBashMessages();
+			if (trigger.messageType === "user") this._flushPendingCustomMessages();
+		}
+		const messages: AgentMessage[] = [...(update ? [update] : []), prepared.start, ...nextTurn, ...prepared.returned];
 		onStarted?.();
 
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
@@ -2217,7 +2401,7 @@ export class AgentSession {
 	 * message followed by pending nextTurn messages (consumed here) and handler messages, with a
 	 * system patch first when the prompt changed.
 	 */
-	private async _prepareRun(trigger: BeforeAgentStartTrigger, admissionGen: number): Promise<AgentMessage[]> {
+	private async _prepareRun(trigger: BeforeAgentStartTrigger, admissionGen: number): Promise<PreparedRun> {
 		// Check if we need to compact before sending (catches aborted responses).
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
@@ -2242,9 +2426,9 @@ export class AgentSession {
 			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
 		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
 
-		const messages: AgentMessage[] = [];
+		let start: AgentMessage;
 		if (trigger.messageType === "custom") {
-			messages.push(trigger.message);
+			start = trigger.message;
 		} else {
 			// Normalize images after before_agent_start so extension-driven model selection
 			// determines the resize profile used for the request and history.
@@ -2253,17 +2437,16 @@ export class AgentSession {
 			this._throwIfAdmissionChanged(admissionGen);
 			const text =
 				normalized.hints.length > 0 ? `${trigger.prompt}\n\n${normalized.hints.join("\n")}` : trigger.prompt;
-			messages.push({
+			start = {
 				role: "user",
 				content: [{ type: "text", text }, ...normalized.images],
 				timestamp: Date.now(),
-			});
+			};
 		}
-		// Inject any pending "nextTurn" messages as context alongside the starting message
-		messages.push(...this._pendingNextTurnMessages);
-		this._pendingNextTurnMessages = [];
+		// Pending "nextTurn" messages are added by _startRun after the final admission check.
+		const returned: AgentMessage[] = [];
 		for (const msg of result.messages) {
-			messages.push({
+			returned.push({
 				role: "custom",
 				customType: msg.customType,
 				// Untyped extensions can pass null/missing content; normalize at ingestion.
@@ -2273,10 +2456,9 @@ export class AgentSession {
 				timestamp: Date.now(),
 			});
 		}
-		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
+		const update = this._preparePromptAndToolLoadout(result.systemPromptOptions);
 		this._runSystemPromptOptions = result.systemPromptOptions;
-		if (updateMessage) messages.unshift(updateMessage);
-		return messages;
+		return { update, start, returned };
 	}
 
 	private async _handlePostAgentRun(): Promise<boolean> {
@@ -2700,6 +2882,10 @@ export class AgentSession {
 	}
 
 	appendDeveloperMessage(content: string | TextContent[]): void {
+		this._appendDeveloperMessage(content);
+	}
+
+	private _appendDeveloperMessage(content: string | TextContent[], owner?: ExtensionRunner): void {
 		if (isBlankInstruction(content)) return;
 
 		if (this.isStreaming && !this._isPreparingRun && !this._isEmittingAgentEndExtensionEvent) {
@@ -2709,6 +2895,11 @@ export class AgentSession {
 		}
 
 		const pending = this._createPendingInstruction(content);
+		pending.owner = owner;
+		if (this._shouldStage()) {
+			this._stagedInstructions.push(pending);
+			return;
+		}
 		if (!this._drainPendingInstructions()) {
 			// An earlier instruction still fails to commit: queue behind it (committed later, in order).
 			this._pendingInstructions.push(pending);
@@ -2727,9 +2918,27 @@ export class AgentSession {
 		content: string | TextContent[],
 		options?: QueueDeveloperMessageOptions,
 	): QueueDeveloperMessageResult {
+		return this._queueDeveloperMessage(content, options);
+	}
+
+	private _queueDeveloperMessage(
+		content: string | TextContent[],
+		options: QueueDeveloperMessageOptions | undefined,
+		owner?: ExtensionRunner,
+	): QueueDeveloperMessageResult {
 		if (this._disposed) throw new Error("queueDeveloperMessage() cannot be called after the session is disposed.");
 		if (isBlankInstruction(content)) throw new Error("queueDeveloperMessage() requires non-blank content.");
-		const pending = this._createPendingInstruction(content, options?.onCommit);
+		const onCommit = options?.onCommit;
+		const pending = this._createPendingInstruction(
+			content,
+			// A stale extension runtime's callback is skipped, not called (§3.7).
+			onCommit && owner ? (entryId) => (owner.isInvalidated() ? undefined : onCommit(entryId)) : onCommit,
+		);
+		pending.owner = owner;
+		if (this._shouldStage()) {
+			this._stagedInstructions.push(pending);
+			return { status: "staged", pendingId: pending.pendingId };
+		}
 		if (
 			(!this.isStreaming || this._isPreparingRun || this._isEmittingAgentEndExtensionEvent) &&
 			this._drainPendingInstructions()
@@ -2746,6 +2955,11 @@ export class AgentSession {
 	 */
 	cancelQueuedDeveloperMessage(pendingId: string): boolean {
 		if (this._disposed) return false;
+		const stagedIndex = this._stagedInstructions.findIndex((item) => item.pendingId === pendingId);
+		if (stagedIndex !== -1) {
+			this._stagedInstructions.splice(stagedIndex, 1);
+			return true;
+		}
 		const index = this._pendingInstructions.findIndex(
 			(item) => item.pendingId === pendingId && item.state === "pending",
 		);
@@ -2804,6 +3018,11 @@ export class AgentSession {
 			// to the end of the turn. Nothing is emitted yet: message events must not
 			// describe messages the session tree does not contain.
 			this._pendingCustomMessages.push(appMessage);
+		} else if (this._isStagingBranch()) {
+			// Before B: held after the snapshot, announced now (#5943).
+			this._stagedContent.push({ message: structuredClone(appMessage), announced: true });
+			this._emit({ type: "message_start", message: appMessage });
+			this._emit({ type: "message_end", message: appMessage });
 		} else {
 			this._appendCustomMessage(appMessage);
 		}
@@ -3963,9 +4182,9 @@ export class AgentSession {
 					});
 				},
 				appendDeveloperMessage: (content) => {
-					this.appendDeveloperMessage(content);
+					this._appendDeveloperMessage(content, runner);
 				},
-				queueDeveloperMessage: (content, options) => this.queueDeveloperMessage(content, options),
+				queueDeveloperMessage: (content, options) => this._queueDeveloperMessage(content, options, runner),
 				cancelQueuedDeveloperMessage: (pendingId) => this.cancelQueuedDeveloperMessage(pendingId),
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
@@ -4254,6 +4473,16 @@ export class AgentSession {
 	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
 		const previousFlagValues = oldRunner.getFlagValues();
+		// Staged instructions created through the extension API belong to the old runtime. A bound
+		// session's extensions rebuild them from the journal at session_start(reload); a never-bound
+		// session keeps them without onCommit (its runtime is invalidated). Staged content is kept (§3.7).
+		if (this._extensionsBound) {
+			this._stagedInstructions = this._stagedInstructions.filter((pending) => pending.owner === undefined);
+		} else {
+			for (const pending of this._stagedInstructions) {
+				if (pending.owner !== undefined) pending.onCommit = undefined;
+			}
+		}
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
 		const getDefaultTools = () =>
@@ -4483,6 +4712,8 @@ export class AgentSession {
 		if (this.isStreaming) {
 			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
+		} else if (this._isStagingBranch()) {
+			this._stagedContent.push({ message: bashMessage, announced: true });
 		} else {
 			this.sessionManager.appendMessage(bashMessage);
 			this._refreshFinalizedContext();
@@ -4723,6 +4954,8 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
+			// Staged items belong to the abandoned branch: discarded, no onCommit (§3.7).
+			this._discardStaged();
 			// Update finalized context from the canonical session projection.
 			this._refreshFinalizedContext();
 			this._restoreToolsFromTranscript();

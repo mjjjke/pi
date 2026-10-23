@@ -13,7 +13,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { type SessionEntry, sessionEntryToContextMessages } from "../../src/core/session-manager.ts";
 import type { ExtensionFactory } from "../../src/index.ts";
-import { createHarness } from "./harness.ts";
+import { createBootstrappedSessionManager, createHarness } from "./harness.ts";
 
 function messageEntry(message: Record<string, unknown>): SessionEntry {
 	return {
@@ -84,7 +84,7 @@ describe("lax message content handling", () => {
 	});
 
 	it("normalizes null content in custom messages from extensions", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 
 		try {
 			await harness.session.sendCustomMessage({

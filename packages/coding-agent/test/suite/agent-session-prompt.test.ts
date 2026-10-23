@@ -369,7 +369,7 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
-	it("appendDeveloperMessage persists passively from idle extension commands", async () => {
+	it("appendDeveloperMessage from idle extension commands is staged on a fresh session and written at B", async () => {
 		const harness = await createHarness({
 			extensionFactories: [
 				(pi) => {
@@ -388,14 +388,17 @@ describe("AgentSession prompt characterization", () => {
 		await harness.session.prompt("/mask");
 
 		expect(harness.getPendingResponseCount()).toBe(1);
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["developer"]);
-		expect(getMessageText(harness.session.messages[0]!)).toBe("Prefer minimal diffs.");
-		const entries = harness.sessionManager.getEntries();
-		expect(entries).toHaveLength(1);
-		expect(entries[0]).toMatchObject({
-			type: "message",
-			message: { role: "developer", content: "Prefer minimal diffs." },
-		});
+		// Staged: no run starts and nothing is written before the snapshot exists.
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.sessionManager.getEntries()).toHaveLength(0);
+		await harness.session.prompt("go");
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
+			"developer",
+			"user",
+			"assistant",
+		]);
+		expect(getMessageText(harness.session.messages[1]!)).toBe("Prefer minimal diffs.");
 	});
 
 	it("appendDeveloperMessage ignores blank content", async () => {
@@ -864,6 +867,12 @@ describe("AgentSession prompt characterization", () => {
 
 			expect(requests).toHaveLength(1);
 			expect(JSON.stringify(requests[0].messages)).toContain("context from handler");
+			// Written by the bootstrap commit: after the snapshot, before the starting message.
+			expect(
+				requests[0].messages.map((message) =>
+					message.role === "system" ? "system" : `${message.role}:${getMessageText(message)}`,
+				),
+			).toEqual(["system", "user:context from handler", "user:hello"]);
 		});
 
 		it("aborts a run when abort is requested while before_agent_start runs", async () => {

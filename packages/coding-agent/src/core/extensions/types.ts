@@ -480,7 +480,14 @@ export interface QueueDeveloperMessageOptions {
 /** Result of `queueDeveloperMessage()`. */
 export type QueueDeveloperMessageResult =
 	| { status: "committed"; entryId: string }
-	| { status: "pending"; pendingId: string };
+	| { status: "pending"; pendingId: string }
+	/**
+	 * Accepted before the branch's initial snapshot exists: committed by the first run's bootstrap
+	 * (after the snapshot and standing values, FIFO, before the first provider request), when
+	 * `onCommit` fires once. Cancellable until then; dropped without `onCommit` on dispose,
+	 * replacement, tree navigation away, and reload of a bound session (extension-created items).
+	 */
+	| { status: "staged"; pendingId: string };
 
 /**
  * Fresh command-capable context bound to the replacement session after a session switch.

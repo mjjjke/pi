@@ -141,6 +141,16 @@ export interface Harness {
 	cleanup: () => void;
 }
 
+/**
+ * An in-memory session whose branch already has an initial system snapshot, so producers append at
+ * once instead of staging for the first run's bootstrap commit.
+ */
+export function createBootstrappedSessionManager(): SessionManager {
+	const sessionManager = SessionManager.inMemory();
+	sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 0 });
+	return sessionManager;
+}
+
 function createTempDir(): string {
 	const tempDir = join(tmpdir(), `pi-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });

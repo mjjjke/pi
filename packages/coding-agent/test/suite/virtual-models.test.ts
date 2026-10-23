@@ -298,8 +298,9 @@ describe("AgentSession virtual models", () => {
 
 		await harness.session.prompt("hello");
 
-		// One per request, one between the turns, and one for the compaction check after the run.
-		expect(projections).toHaveBeenCalledTimes(4);
+		// One per request, one between the turns, one for the compaction check after the run, and the
+		// bootstrap check and commit refresh before the first run.
+		expect(projections).toHaveBeenCalledTimes(6);
 	});
 
 	it("stores router state on the branch and passes it to later requests", async () => {

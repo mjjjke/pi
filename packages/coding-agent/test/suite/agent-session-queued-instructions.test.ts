@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type TextContent } from "@earendil-
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createBootstrappedSessionManager, createHarness, getMessageText, type Harness } from "./harness.ts";
 
 interface Deferred {
 	promise: Promise<void>;
@@ -94,7 +94,7 @@ describe("AgentSession.queueDeveloperMessage", () => {
 	}
 
 	it("commits immediately while idle and calls onCommit once with the entry id", async () => {
-		const harness = await setup();
+		const harness = await setup({ sessionManager: createBootstrappedSessionManager() });
 		const onCommit = vi.fn();
 
 		const result = harness.session.queueDeveloperMessage("Idle instruction.", { onCommit });
@@ -105,12 +105,34 @@ describe("AgentSession.queueDeveloperMessage", () => {
 		expect(result).toEqual({ status: "committed", entryId: entries[0]!.id });
 		expect(onCommit).toHaveBeenCalledTimes(1);
 		expect(onCommit).toHaveBeenCalledWith(entries[0]!.id);
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["developer"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "developer"]);
+	});
+
+	it("stages while idle on a fresh session and commits at the first run's bootstrap", async () => {
+		const harness = await setup();
+		const onCommit = vi.fn();
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		const result = harness.session.queueDeveloperMessage("Idle instruction.", { onCommit });
+
+		expect(result).toEqual({ status: "staged", pendingId: expect.any(String) });
+		expect(developerEntries(harness)).toHaveLength(0);
+		expect(onCommit).not.toHaveBeenCalled();
+		await harness.session.prompt("go");
+		const entries = developerEntries(harness);
+		expect(entries).toHaveLength(1);
+		expect(onCommit).toHaveBeenCalledExactlyOnceWith(entries[0]!.id);
+		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
+			"developer",
+			"user",
+			"assistant",
+		]);
 	});
 
 	for (const trigger of ["user", "custom"] as const) {
 		it.each(["append", "queue"] as const)(
-			`commits %s instructions from before_agent_start before the first system snapshot (${trigger})`,
+			`stages %s instructions from before_agent_start and commits them after the first system snapshot (${trigger})`,
 			async (api) => {
 				const onCommit = vi.fn();
 				const errors: string[] = [];
@@ -158,23 +180,24 @@ describe("AgentSession.queueDeveloperMessage", () => {
 
 				expect(errors).toEqual([]);
 				expect(busy).toEqual([true]);
-				expect(hookRoles).toEqual([["developer"]]);
-				expect(commitCallsInHook).toEqual([api === "queue" ? 1 : 0]);
+				// Staged: nothing is written during preflight; onCommit fires at B.
+				expect(hookRoles).toEqual([[]]);
+				expect(commitCallsInHook).toEqual([0]);
 				expect(appendErrors).toHaveLength(1);
 				expect(appendErrors[0]).toContain("appendDeveloperMessage() can only be called");
 				expect(harness.session.messages.map((message) => message.role)).toEqual([
-					"developer",
 					"system",
+					"developer",
 					trigger,
 					"assistant",
 				]);
 				expect(requests).toHaveLength(1);
-				expect(requests[0]?.[0]).toBe("developer:Preflight instruction.");
-				expect(requests[0]?.[1]).toMatch(/^system:/);
+				expect(requests[0]?.[0]).toMatch(/^system:/);
+				expect(requests[0]?.[1]).toBe("developer:Preflight instruction.");
 				const entries = developerEntries(harness);
 				expect(entries).toHaveLength(1);
 				if (api === "queue") {
-					expect(result).toEqual({ status: "committed", entryId: entries[0]!.id });
+					expect(result).toEqual({ status: "staged", pendingId: expect.any(String) });
 					expect(onCommit).toHaveBeenCalledExactlyOnceWith(entries[0]!.id);
 				}
 			},

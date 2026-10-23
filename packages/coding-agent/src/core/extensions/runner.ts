@@ -757,6 +757,11 @@ export class ExtensionRunner {
 		}
 	}
 
+	/** True after invalidate(): the runtime was replaced or reloaded. */
+	isInvalidated(): boolean {
+		return this.staleMessage !== undefined;
+	}
+
 	private assertActive(): void {
 		if (this.staleMessage) {
 			throw new Error(this.staleMessage);

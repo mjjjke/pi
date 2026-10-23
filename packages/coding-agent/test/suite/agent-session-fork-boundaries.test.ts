@@ -1,6 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { describe, expect, it } from "vitest";
-import { createHarness, getAssistantTexts } from "./harness.ts";
+import { createBootstrappedSessionManager, createHarness, getAssistantTexts } from "./harness.ts";
 
 function barrier() {
 	let resolve!: () => void;
@@ -90,12 +90,12 @@ describe("fork instructions at canonical session boundaries", () => {
 	});
 
 	it("refreshes developer instructions from persisted context without retaining cache-only messages", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ sessionManager: createBootstrappedSessionManager() });
 		try {
 			harness.session.agent.state.messages.push({ role: "user", content: "not persisted", timestamp: Date.now() });
 			harness.session.appendDeveloperMessage("persisted instruction");
 			expect(harness.session.messages).toEqual(harness.sessionManager.buildSessionProjection().messages);
-			expect(harness.session.messages.map((message) => message.role)).toEqual(["developer"]);
+			expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "developer"]);
 			harness.session.agent.followUp({ role: "user", content: "queued", timestamp: Date.now() });
 			await expect(harness.session.agent.continue()).rejects.toThrow("No messages to continue from");
 			expect(harness.session.agent.hasQueuedMessages()).toBe(true);
