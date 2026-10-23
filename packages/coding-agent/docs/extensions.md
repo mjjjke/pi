@@ -47,7 +47,7 @@ Place the extension in your user or project extensions directory. Pi loads direc
 
 Use a single file for a small extension and a directory for a multi-file implementation. Put npm dependencies in a nearby `package.json`. See [Configuration](configuration.md) for conventional locations and [Settings](settings.md#resources) for additional paths.
 
-Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
+Reload replaces the extension runtime, so code after `await ctx.reload()` must not reuse state from the old runtime. In this fork `reload()` throws `Cannot reload while a run is active, compaction is running, or extensions are binding` instead of racing those operations, in every mode (RPC and extension command contexts included). Only personal and explicit command-line extensions can participate in the `project_trust` event that runs before project extensions load.
 
 <a id="understand-the-lifecycle"></a>
 
@@ -58,6 +58,18 @@ The factory can be synchronous or asynchronous. Pi waits for an asynchronous fac
 Do not start processes, sockets, watchers, or timers in the factory because some invocations load extensions without starting a session.
 Start long-lived resources from `session_start` or from the command or tool that needs them.
 Close session-scoped resources from an idempotent `session_shutdown` handler.
+
+<a id="readiness"></a>
+
+This fork makes startup a barrier. Binding extensions (`session_start` handlers, then `resources_discover`) and `reload()` (from `session_shutdown` until the reload's `resources_discover` finishes) set a readiness gate, and every run waits for it:
+
+- A prompt waits before extension-command lookup, `input` hooks, skill and prompt-template expansion and model checks, so a prompt sent from an early `session_start` handler is expanded with the skills, templates and `input` hooks that later handlers and `resources_discover` add. Custom-triggered runs wait before the run is reserved.
+- A run requested from a lifecycle handler is deferred, not rejected; `pi.sendMessage()` and `pi.sendUserMessage()` do not wait for it. Tools registered anywhere before the first run starts are in its initial system snapshot.
+- `bindExtensions()` throws while another bind or reload is in progress. `reload()` throws while a run is active, compaction runs, or a bind or reload is in progress.
+- A prompt that already passed its readiness wait and is inside its `input` hooks when a reload starts keeps the expansion it computed; its run still waits for the reload.
+- A `session_start` handler that awaits `ctx.waitForIdle()` sees an idle session: the deferred run is not reserved yet.
+- Reload emits `session_start` (reason `reload`) and `resources_discover` for every session that was bound, including SDK sessions bound with `bindExtensions({})`. A session that was never bound reloads without them, as before.
+- Session replacement (`/new`, `/resume`, `/fork`, `/clone`, and their RPC commands) binds the new session once, so `session_start` fires once per replacement in every mode.
 
 A run proceeds from input and `before_agent_start`, through model, message, and tool events, to `agent_end`.
 Pi counts as busy while a run starts, including the compaction check and `before_agent_start`, so messages sent meanwhile go into the starting run.
@@ -270,7 +282,7 @@ A tool that reaches other tools declares which ones a call may reach with `reach
 
 Register every tool first, keep optional tools inactive, and use `pi.setActiveTools()` from a loader tool to select the desired active tools. Names must already be registered; unknown names are ignored.
 
-Pi records the initial prompt and tool set in the transcript's first system message, then appends tool and prompt changes before the next model request. Providers that cannot represent the transition receive a complete transcript checkpoint, which can invalidate the cached prefix.
+Pi records the initial prompt and tool set in the transcript's first system message, then appends tool and prompt changes before the next model request. In this fork the tool set is read again at every request boundary, the first one included, so a tool registered in `agent_start`, in an awaited message hook or in an `onCommit` callback is declared before the next request rather than executable but undeclared; a change after a boundary's declaration is declared at the next boundary. Models that cannot receive later system messages (`supportsMidConversationSystemMessages()` from `@earendil-works/pi-ai` is false) refuse a request whose conversation changed the prompt or tools after it started, with an error that names the model and suggests switching models, `/compact` or `/new`; nothing is sent and the run ends like any provider error. After a compaction such a model works again until the next change.
 
 ### Tool rendering
 
@@ -302,6 +314,8 @@ Command handlers receive `ExtensionCommandContext`, which adds operations for wa
 These operations are command-only because calling them from lifecycle handlers can deadlock the runtime.
 
 Session replacement invalidates the old context. Capture only plain data before switching, then use the fresh context supplied to `withSession` for session-bound work. The fresh `ReplacedSessionContext` includes `appendDeveloperMessage()` and async `sendMessage()` and `sendUserMessage()` helpers.
+
+In this fork the `setup` callback of `ctx.newSession()` and `ctx.requestNewSession()` receives a `SessionSetupManager`: a frozen, state-only facade with the read-only getters (`getBranch()`, `getEntries()`, `getStandingState()`, ...) plus `appendCustomEntry()`, `appendSessionInfo()` and `appendLabelChange()`. It cannot append messages. Send context (handoff text, seeds, instructions) from `withSession`, where it is staged until the first run (see [before the first run](#before-the-first-run)). This is a breaking type change for callers that used the full `SessionManager` there.
 
 ### ctx.requestBashHandover(options?)
 
@@ -362,7 +376,7 @@ pi.on("agent_end", async (_event, ctx) => {
 });
 ```
 
-Options match `ctx.newSession()`: `parentSession` records the parent file, `setup` mutates the new `SessionManager`, and `withSession` performs post-switch work against the fresh context. The old `pi` and `ctx` become stale after successful replacement.
+Options match `ctx.newSession()`: `parentSession` records the parent file, `setup` appends state entries through the new session's `SessionSetupManager`, and `withSession` performs post-switch work against the fresh context. The old `pi` and `ctx` become stale after successful replacement.
 
 `completion` resolves with `{ cancelled }`, or rejects when replacement fails, including unsupported modes. Attach a rejection handler when observing it. Never await `completion` inside the handler that queued it: replacement cannot run until all `agent_end` handlers return.
 
@@ -378,6 +392,7 @@ Choose storage based on how state participates in the conversation:
 | Tool state that follows the active branch | Tool-result `details` |
 | Durable data excluded from model context | `pi.appendEntry()` |
 | Custom content stored and sent to the model | `pi.sendMessage()` |
+| A value the model must keep seeing (a mode, a policy) | `pi.setStandingInstruction()` |
 | Data outside one session | External storage |
 
 Reconstruct branch-sensitive state from `ctx.sessionManager.getBranch()` during `session_start`.
@@ -393,7 +408,7 @@ pi.appendDeveloperMessage("Prefer concise, reversible changes.");
 pi.appendDeveloperMessage([{ type: "text", text: "Stay in plan mode until approved." }]);
 ```
 
-Blank content is ignored. Calls are allowed while idle and from `before_agent_start` and `agent_end` handlers. Instructions appended during `before_agent_start` commit before the run's starting messages, including its first system snapshot; the session still counts as busy for user and custom message delivery. Other active-run events, including `before_provider_request`, reject these calls; wait for idle when an interactive action occurs mid-stream. The canonical persisted role is `developer`; the wire role is resolved per provider as described above.
+Blank content is ignored. Calls are allowed while idle and from `before_agent_start` and `agent_end` handlers. Before a branch's first run (see [before the first run](#before-the-first-run)) the instruction is staged, not written; that run commits it after its initial system snapshot. On later runs, instructions appended during `before_agent_start` commit before the run's starting messages and system patch; the session still counts as busy for user and custom message delivery. Other active-run events, including `before_provider_request`, reject these calls; wait for idle when an interactive action occurs mid-stream. The canonical persisted role is `developer`; the wire role is resolved per provider as described above.
 
 ### pi.queueDeveloperMessage(content, options?)
 
@@ -403,10 +418,11 @@ Queue a passive, persisted developer instruction that also works during a run. `
 const result = pi.queueDeveloperMessage("Research only; do not edit files.", {
   onCommit: (entryId) => pi.appendEntry("my-ack", { entryId }),
 });
-// { status: "committed", entryId } or { status: "pending", pendingId }
+// { status: "committed", entryId }, { status: "pending", pendingId } or { status: "staged", pendingId }
 ```
 
-- While idle or from a `before_agent_start` or `agent_end` handler, the instruction is committed now (`status: "committed"`). Preflight instructions precede the run's starting messages, including its first system snapshot.
+- Before a branch's first run, while idle or from that run's `before_agent_start`, the instruction is staged (`status: "staged"`, see [before the first run](#before-the-first-run)): the run's bootstrap commits it after the initial system snapshot and the standing values, in FIFO order with other staged instructions, before the first provider request, and `onCommit` fires then. It stays cancellable until then. It is dropped without `onCommit` on dispose, session replacement, tree navigation away from the branch, and on `reload()` of a bound session when it was created through an extension API; a failed run start keeps it staged. `staged` means no provider request goes out without it, not that it is on disk.
+- Otherwise, while idle or from a `before_agent_start` or `agent_end` handler, the instruction is committed now (`status: "committed"`). Preflight instructions precede the run's starting messages and its system patch.
 - During a run it stays pending (`status: "pending"`) and is committed immediately before the next provider request whose last non-instruction message is a user message or tool results: after that turn's tool results and steering messages, before `prepareRequest` (a `prepareRequest` handler sees it already appended). This covers retries, overflow recovery and queued continuations. A pending instruction left when the run ends (for example after an abort) is committed at run end; `dispose()` commits pending instructions too. `clearQueue()` and `abort()` do not discard it.
 - Instructions commit in the order they were queued. If an earlier one failed to commit (the session append threw) and is still pending, a later idle or `agent_end` call does not overtake it: it commits the earlier ones first, and if one still fails, the new instruction is queued behind it and `status: "pending"` is returned. `pi.appendDeveloperMessage()` behaves the same way (it returns nothing; its instruction then commits later, in order).
 - "Committed" means appended to the session; a new session file is written only once it has its first assistant message.
@@ -427,7 +443,59 @@ if (result.status === "pending") {
 
 Returns `true` only if the instruction was still pending and was removed. It will never be committed (including at run end or disposal), and its `onCommit` callback will not run. Other pending instructions keep their FIFO order. This also works for an instruction left pending by a failed append.
 
-Unknown ids, instructions already committing or committed, and direct `AgentSession` calls after disposal return `false` without throwing. Cancellation cannot retract a committed instruction, even if the provider request has not yet been sent. Like queueing, calls on a stale `pi` or command context throw; use the current runtime.
+Unknown ids, instructions already committing or committed, and direct `AgentSession` calls after disposal return `false` without throwing. Cancellation cannot retract a committed instruction, even if the provider request has not yet been sent. Like queueing, calls on a stale `pi` or command context throw; use the current runtime. Staged instructions can be cancelled the same way until the bootstrap commits them.
+
+<a id="before-the-first-run"></a>
+
+### Before the first run
+
+This fork keeps every branch in one order: the initial system snapshot (prompt sections and tools) first, then developer and system updates, then user, custom and bash content. Before a branch has a system snapshot (a new session, `/new`, a fork or tree navigation to a point before the first run) the snapshot does not exist yet, so producers stage their messages in memory instead of writing them:
+
+| Call before the first run | Effect |
+|---|---|
+| `pi.sendMessage()` without `triggerTurn` while idle | Staged. `message_start`/`message_end` fire at send, as before; the entry is written by the first run. |
+| `pi.sendMessage()` without `triggerTurn` during the first run's preflight | Buffered as before, not announced; written by the first run (user-triggered runs) and announced then. |
+| `!cmd` / `!!cmd` (`recordBashResult`) | Staged. |
+| `pi.appendDeveloperMessage()` / `pi.queueDeveloperMessage()` while idle or in the first run's `before_agent_start` | Staged (`status: "staged"`). |
+| `pi.setStandingInstruction()` | Not staged: its state entry is appended at once; the first run delivers the value. |
+
+The first run writes everything in one bootstrap step, after `before_agent_start` and before the first provider request: the snapshot with every tool registered by then, one keyed developer per pending standing value (key order), the staged developer instructions (FIFO), then the staged content in arrival order, then the preflight buffers. Then come the run's starting messages. Events and `onCommit` callbacks run after all of these appends; a callback that queues, sends or changes tools follows the normal rules of a running session. A fresh session file is still created only when the first user or assistant message is written, so an idle launch leaves no file.
+
+If a bootstrap append fails, the run fails before any provider request. Entries already written stay and get their events and `onCommit` once; the rest stays staged (cancellable) and the next run start retries it before its own messages. No other path commits staged items.
+
+Staged content is shown in the TUI after the committed entries and survives `/reload`; it is discarded by dispose, session replacement and tree navigation away. `session.messages`, RPC `get_messages` and `ctx.sessionManager` show committed entries only; `AgentSession.stagedMessages` lists staged content. `ctx.hasPendingMessages()`, `pendingMessageCount` and RPC `get_state` count only queued steer/follow-up input, never staged items or pending standing values. Later runs are unchanged. SDK callers that seed a `SessionManager` with messages must start the seed with a system snapshot, or send through `AgentSession` after construction (which stages); otherwise the snapshot lands after the seed.
+
+<a id="standing-instructions"></a>
+
+### Standing instructions
+
+A standing instruction is a keyed value that must stay in effect for the model, such as "the current mode is Plan". Pi owns its delivery: an extension sets the desired value, and Pi delivers it, carries it across compaction and derives its state per branch from the session. Use one-shot developer instructions (`appendDeveloperMessage`, `queueDeveloperMessage`) for notices that are history rather than state.
+
+```typescript
+pi.setStandingInstruction("my-mode", "<mode>Plan: research only, no edits.</mode>");
+pi.setStandingInstruction("my-mode", text, { apply: "next-request" });
+pi.clearStandingInstruction("my-mode");
+const info = pi.getStandingInstruction("my-mode");
+// { content, apply, delivered, deliveredEntryId? } or undefined
+
+pi.on("standing_instruction_delivered", (event) => {
+  // event.key, event.content, event.entryId (the keyed developer, or the compaction that carried it)
+});
+```
+
+`AgentSession` has the same three methods for SDK use.
+
+- **Set.** Writes a non-context `standing_instruction` entry, unless the content equals the desired content and `apply` is absent or equal. Setting the delivered value while nothing is pending is therefore a no-op, setting a new value before delivery replaces the pending one, and setting the delivered value back cancels it. New content without `apply` gets `next-input`. Callable at any time (idle, preflight, streaming, before the first run). Throws for an empty key, blank content, a disposed session or a session with a persistence error.
+- **Clear.** Writes a cleared state entry when the key has a desired value. Nothing is sent; the value is no longer carried at the next compaction. Send your own one-shot message if the model should be told.
+- **Get.** The desired value on the active branch, `delivered: true` when the delivered content equals it, or `undefined`. Pi keeps no copy in memory: reload, resume, tree navigation, fork and session replacement recompute it from the journal. Re-sync on `session_start` and `session_tree` with `get` and `set`; `set` writes nothing unless the text changed.
+- **Delivery.** A pending value is written as a developer message entry with `standingKey` (a keyed developer). The first run of a branch writes it after the initial snapshot. Later, it is written at a request boundary, before the request: `next-request` at the next one, also mid-run; `next-input` (default) at the first boundary after an input entered the context. Inputs are the run's starting messages, user or custom steers and follow-ups (also drained mid-run or by `agent.continue()`). Tool results, retries, overflow recovery, context-only continuations, passive custom messages and bash results are not. A value delivered at a boundary goes before the one-shot instructions of that boundary, including those queued by `standing_instruction_delivered` handlers.
+- **Fail closed.** If writing a selected value fails, the request is not sent and the run ends with `Standing instruction "<key>" could not be delivered: <cause>`; the value stays pending and the next attempt delivers it first, also a retry without input. One-shot instructions keep their best-effort rule.
+- **Compaction.** A compaction carries the value in effect for the next request into its new epoch, after the checkpoint and before the summary (`CompactionEntry.standing`). Between runs (`/compact`, the pre-prompt and post-run checks) that is the desired value, so a pending value is delivered by the compaction; mid-run it is the delivered value and a pending one is delivered at its boundary. Keyed developers retained in the compaction's kept range are hidden from the model. `session_compact` receives the entry just written.
+- **Events.** `standing_instruction_delivered` fires once per delivery (keyed developer or carry of a pending value), never for re-carrying a delivered value. Handler errors are reported and do not stop delivery or other handlers.
+- **Models.** Keyed developers are developer messages: models without `midConversationInstructionMessages` drop them on the wire (the value still counts as delivered) and see them again after a switch to a capable model. They never cause a refusal.
+- **Not counted** by `ctx.hasPendingMessages()` or `pendingMessageCount`.
+
+Keys are plain strings named after the owner, for example `collaboration-mode`. Pi never interprets the content. See [Session format](session-format.md#standing-instructions) for the entries and the derivation.
 
 <a id="custom-ui"></a>
 <a id="mode-behavior"></a>
