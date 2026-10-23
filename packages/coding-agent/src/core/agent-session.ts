@@ -890,6 +890,9 @@ export class AgentSession {
 	}
 
 	private _installAgentRequestProjection(): void {
+		// One tool snapshot per request boundary (§6): the loop refreshes its tools from state before
+		// declaring changes, and prepareRequest sends exactly that declared snapshot.
+		this.agent.getTools = () => this.agent.state.tools.slice();
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
 			const failed = this._failedResponse;
@@ -899,8 +902,9 @@ export class AgentSession {
 				const canonicalContext = {
 					...request.context,
 					messages: projection.messages,
-					// Messages declare the provider-visible loadout; context.tools keeps executable implementations.
-					tools: this.agent.state.tools.slice(),
+					// Messages declare the provider-visible loadout; context.tools is the snapshot the loop just
+					// declared. A later change is declared at the next boundary, never sent undeclared.
+					tools: request.context.tools?.slice() ?? [],
 				};
 				const previous = await previousPrepareRequest?.(
 					{
