@@ -69,6 +69,10 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
+		// A replacement session opened from disk (resume, fork) may carry migration warnings.
+		for (const warning of runtimeHost.session.sessionManager.getLoadWarnings()) {
+			console.error(`Warning: ${warning}`);
+		}
 	});
 
 	const rebindSession = async (): Promise<void> => {

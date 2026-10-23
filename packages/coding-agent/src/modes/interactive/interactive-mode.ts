@@ -618,6 +618,8 @@ export class InteractiveMode {
 		this.runtimeHost.setRebindSession(async () => {
 			await this.rebindCurrentSession({ renderBeforeBind: true });
 			this.themeController.applyFromSettings();
+			// A replacement session opened from disk (/resume, /fork) may carry migration warnings.
+			for (const warning of this.session.sessionManager.getLoadWarnings()) this.showWarning(warning);
 		});
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({

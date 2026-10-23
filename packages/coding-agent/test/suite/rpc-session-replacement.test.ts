@@ -121,3 +121,33 @@ describe("RPC session replacement binds once (recheck N1)", () => {
 		},
 	);
 });
+
+describe("RPC session replacement surfaces load warnings", () => {
+	it("switch_session prints the opened session's load warnings to stderr", async () => {
+		const harness = await createRpcHarness(rpcIo, {});
+		const stderr: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderr.push(String(chunk));
+			return true;
+		});
+		try {
+			harness.faux.setResponses([fauxAssistantMessage("first")]);
+			harness.send({ id: "p0", type: "prompt", message: "first prompt" });
+			await harness.waitForResponse("p0");
+			await harness.runtime.session.waitForIdle();
+			const path = harness.runtime.session.sessionManager.getSessionFile();
+			harness.send({ id: "n0", type: "new_session" });
+			await harness.waitForResponse("n0");
+			const { SessionManager } = await import("../../src/core/session-manager.ts");
+			vi.spyOn(SessionManager.prototype, "getLoadWarnings").mockReturnValue(["stray file kept in memory"]);
+
+			harness.send({ id: "s0", type: "switch_session", sessionPath: path });
+			await harness.waitForResponse("s0");
+
+			expect(stderr.join("")).toContain("Warning: stray file kept in memory");
+		} finally {
+			vi.restoreAllMocks();
+			await harness.cleanup();
+		}
+	});
+});

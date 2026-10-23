@@ -330,6 +330,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
+		// A replacement session opened from disk (resume, fork) may carry migration warnings.
+		for (const warning of runtimeHost.session.sessionManager.getLoadWarnings()) {
+			process.stderr.write(`Warning: ${warning}\n`);
+		}
 	});
 
 	const rebindSession = async (): Promise<void> => {
