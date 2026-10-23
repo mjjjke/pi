@@ -486,7 +486,7 @@ describe("mid-conversation instruction messages", () => {
 			model,
 			normalizeContext({ messages: [snapshot, { role: "user", content: "First", timestamp: 2 }, snapshot] }),
 			new Set(),
-			{ includeSystemPrompt: false, supportsMidConvoSystemMessages: true },
+			{ includeSystemPrompt: false },
 		);
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["user", "developer"]);
 		expect(input[1]).toMatchObject({ content: 'Updated system prompt section "rules":\n\nBase rules' });
@@ -502,24 +502,20 @@ describe("mid-conversation instruction messages", () => {
 		} as unknown as Message;
 		const context = normalizeContext({
 			messages: [
-				{ role: "developer", content: "Plan boundary", timestamp: 0 },
 				snapshot,
+				{ role: "developer", content: "Plan boundary", timestamp: 0 },
 				{ role: "user", content: "First", timestamp: 2 },
 			],
 		});
-		const options = { supportsMidConvoSystemMessages: true };
-		const withPrompt = convertResponsesMessages(model, context, new Set(), options);
+		const withPrompt = convertResponsesMessages(model, context, new Set());
 		expect(withPrompt.map((item) => ("role" in item ? item.role : item.type))).toEqual([
 			"developer",
 			"developer",
 			"user",
 		]);
-		expect(withPrompt[0]).toMatchObject({ content: [{ type: "input_text", text: "Plan boundary" }] });
-		expect(withPrompt[1]).toMatchObject({ content: "Base rules" });
-		const withoutPrompt = convertResponsesMessages(model, context, new Set(), {
-			...options,
-			includeSystemPrompt: false,
-		});
+		expect(withPrompt[0]).toMatchObject({ content: "Base rules" });
+		expect(withPrompt[1]).toMatchObject({ content: [{ type: "input_text", text: "Plan boundary" }] });
+		const withoutPrompt = convertResponsesMessages(model, context, new Set(), { includeSystemPrompt: false });
 		expect(withoutPrompt.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "user"]);
 	});
 
@@ -536,27 +532,24 @@ describe("mid-conversation instruction messages", () => {
 				],
 			}),
 			new Set(),
-			{ includeSystemPrompt: false, supportsMidConvoSystemMessages: true },
+			{ includeSystemPrompt: false },
 		);
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "developer", "user"]);
 		expect(input[1]).toMatchObject({ content: "Later update" });
 	});
 
-	it("keeps a leading snapshot out of Codex input when preceded by developers", () => {
+	it("keeps a leading snapshot out of Codex input when developers follow it", () => {
 		const model = openAIResponsesModel();
 		const context = normalizeContext({
 			messages: [
-				{ role: "developer", content: "Plan boundary", timestamp: 1 },
 				{ role: "system", content: "Base prompt", timestamp: 2 },
+				{ role: "developer", content: "Plan boundary", timestamp: 1 },
 				{ role: "user", content: "First", timestamp: 3 },
 				assistant(model.api, model.id),
 				{ role: "system", content: "Later update", timestamp: 4 },
 			],
 		});
-		const input = convertResponsesMessages(model, context, new Set(), {
-			includeSystemPrompt: false,
-			supportsMidConvoSystemMessages: true,
-		});
+		const input = convertResponsesMessages(model, context, new Set(), { includeSystemPrompt: false });
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual([
 			"developer",
 			"user",
@@ -575,9 +568,9 @@ describe("mid-conversation instruction messages", () => {
 		};
 		const context = normalizeContext({
 			messages: [
+				{ role: "system", content: "", sections: { rules: "Base rules" }, timestamp: 3 },
 				{ role: "developer", content: "Plan boundary", timestamp: 1 },
 				{ role: "developer", content: "No edits", timestamp: 2 },
-				{ role: "system", content: "", sections: { rules: "Base rules" }, timestamp: 3 },
 				{ role: "user", content: "First", timestamp: 4 },
 				{ role: "system", content: "Later update", timestamp: 5 },
 			],
@@ -599,6 +592,38 @@ describe("mid-conversation instruction messages", () => {
 		expect(payload?.input?.[1]).toMatchObject({ content: [{ text: "No edits" }] });
 		expect(payload?.input?.[3]).toMatchObject({ content: "Later update" });
 		expect(JSON.stringify(payload).match(/Base rules/g)).toHaveLength(1);
+	});
+
+	it("sends carried standing values as developer items right after the Codex instructions", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			...openAIResponsesModel(),
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			compat: { supportsMidConvoSystemMessages: true },
+		};
+		const context = normalizeContext({
+			messages: [
+				{ role: "system", content: "", sections: { rules: "Checkpoint rules" }, timestamp: 1 },
+				{ role: "developer", content: "Carried mode", timestamp: 1 },
+				{ role: "user", content: "Summary of earlier work", timestamp: 1 },
+				{ role: "user", content: "Next", timestamp: 2 },
+			],
+		});
+		const tokenPayload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test" } }),
+		).toString("base64");
+		let payload: { instructions?: string; input?: Array<{ role?: string; content?: unknown }> } | undefined;
+		await streamCodex(model, context, {
+			apiKey: `aaa.${tokenPayload}.bbb`,
+			onPayload: (params) => {
+				payload = params as typeof payload;
+				throw new Error("payload captured before network request");
+			},
+		}).result();
+		expect(payload?.instructions).toBe("Checkpoint rules");
+		expect(payload?.input?.map((item) => item.role)).toEqual(["developer", "user", "user"]);
+		expect(payload?.input?.[0]).toMatchObject({ content: [{ text: "Carried mode" }] });
+		expect(JSON.stringify(payload?.input?.[1])).toContain("Summary of earlier work");
 	});
 
 	it("skips blank instruction messages for OpenAI Responses", () => {
@@ -853,7 +878,7 @@ describe("mid-conversation instruction messages", () => {
 		expect(failures.slice(0, 10)).toEqual([]);
 	});
 
-	it("sends the snapshot after leading developers as the top-level prompt on first run and relaunch", async () => {
+	it("folds the developers after the snapshot into the top-level prompt on first run and relaunch", async () => {
 		const boundary: Message = { role: "developer", content: "Plan boundary", timestamp: 1 };
 		const secondBoundary: Message = { role: "developer", content: "No edits", timestamp: 1 };
 		const snapshot: Message = {
@@ -863,12 +888,12 @@ describe("mid-conversation instruction messages", () => {
 			timestamp: 2,
 		};
 		const user: Message = { role: "user", content: "First", timestamp: 3 };
-		const first = await captureAnthropicPayload([boundary, secondBoundary, snapshot, user]);
+		const first = await captureAnthropicPayload([snapshot, boundary, secondBoundary, user]);
 		const resumedMessages = JSON.parse(
 			JSON.stringify([
+				snapshot,
 				boundary,
 				secondBoundary,
-				snapshot,
 				user,
 				anthropicAssistant([{ type: "text", text: "Done." }]),
 				{ role: "user", content: "Continue", timestamp: 4 },
@@ -877,32 +902,25 @@ describe("mid-conversation instruction messages", () => {
 		const second = await captureAnthropicPayload(resumedMessages);
 		expect(first.system).toEqual(second.system);
 		expect(first.system).toEqual([
-			{
-				type: "text",
-				text: "You are pi.\n\nFollow the rules.",
-				cache_control: { type: "ephemeral" },
-			},
+			{ type: "text", text: "You are pi.\n\nFollow the rules." },
+			{ type: "text", text: "Plan boundary" },
+			{ type: "text", text: "No edits", cache_control: { type: "ephemeral" } },
 		]);
-		expect(first.messages.map((message) => message.role)).toEqual(["user", "system", "system"]);
+		expect(first.messages.map((message) => message.role)).toEqual(["user"]);
 		expect(first.messages[0]).toMatchObject({
 			role: "user",
 			content: [{ type: "text", text: "First", cache_control: { type: "ephemeral" } }],
 		});
+		expect(second.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
 		expect(second.messages[0]).toMatchObject({ role: "user", content: "First" });
-		expect(first.messages.slice(1)).toEqual(second.messages.slice(1, 3));
-		expect(first.messages.slice(1)).toEqual([
-			{ role: "system", content: [{ type: "text", text: "Plan boundary" }] },
-			{ role: "system", content: [{ type: "text", text: "No edits" }] },
-		]);
-		expect(second.messages.map((message) => message.role)).toEqual(["user", "system", "system", "assistant", "user"]);
 	});
 
 	it("keeps genuinely later snapshots as updates after a user/assistant/tool history", async () => {
 		const boundary: Message = { role: "developer", content: "Plan boundary", timestamp: 1 };
 		const initial: Message = { role: "system", content: "Base prompt", timestamp: 2 };
 		const messages: Message[] = [
-			boundary,
 			initial,
+			boundary,
 			{ role: "user", content: "First", timestamp: 3 },
 			anthropicAssistant([{ type: "text", text: "Done." }]),
 			{
@@ -916,14 +934,8 @@ describe("mid-conversation instruction messages", () => {
 			{ role: "system", content: "Updated rule", timestamp: 5 },
 		];
 		const payload = await captureAnthropicPayload(messages);
-		expect(payload.system).toMatchObject([{ text: "Base prompt" }]);
-		expect(payload.messages.map((message) => message.role)).toEqual([
-			"user",
-			"system",
-			"assistant",
-			"user",
-			"system",
-		]);
+		expect(payload.system).toMatchObject([{ text: "Base prompt" }, { text: "Plan boundary" }]);
+		expect(payload.messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "system"]);
 		expect(payload.messages.at(-1)).toMatchObject({
 			role: "system",
 			content: [{ type: "text", text: "Updated rule" }],

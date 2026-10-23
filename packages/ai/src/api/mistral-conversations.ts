@@ -21,7 +21,7 @@ import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
-import { getCurrentTools, resolveTranscript } from "../utils/transcript.ts";
+import { getCurrentTools } from "../utils/transcript.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
@@ -128,7 +128,7 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 	options?: MistralOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = context;
 
 	(async () => {
 		const output = createOutput(model);

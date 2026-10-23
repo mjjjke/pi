@@ -1,3 +1,4 @@
+import { assertSystemUpdatesSupported } from "../providers/instruction-messages.ts";
 import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderStreams } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 
@@ -73,10 +74,18 @@ export interface LazyApiCapabilities {
 
 export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: LazyApiCapabilities): ProviderStreams {
 	const api: ProviderStreams = {
+		// Refuse later system updates on models that cannot render them, before the module loads
+		// and before any payload is built (no provider request, no before_provider_request).
 		stream: (model, context, options) =>
-			lazyStream(model, async () => (await load()).stream(model, context, options)),
+			lazyStream(model, async () => {
+				assertSystemUpdatesSupported(model, context);
+				return (await load()).stream(model, context, options);
+			}),
 		streamSimple: (model, context, options) =>
-			lazyStream(model, async () => (await load()).streamSimple(model, context, options)),
+			lazyStream(model, async () => {
+				assertSystemUpdatesSupported(model, context);
+				return (await load()).streamSimple(model, context, options);
+			}),
 	};
 
 	if (capabilities?.fetchDeferred) {

@@ -1,7 +1,7 @@
-// Fork-only: model capabilities the fork adds to generated model data
-// (fast mode, mid-conversation developer instructions, progress updates). Shared by
-// generate-models.ts and pin-release-model-data.ts so live generation and
-// release pinning produce the same metadata. See FORK.md.
+// Fork-only: model capabilities and compat flags the fork adds to generated model data
+// (fast mode, mid-conversation developer instructions, progress updates, mid-conversation
+// system messages). Shared by generate-models.ts and pin-release-model-data.ts so live
+// generation and release pinning produce the same metadata. See FORK.md.
 import {
 	anthropicSupportsMidConversationInstructions,
 	openAiSupportsMidConversationInstructions,
@@ -62,4 +62,23 @@ export function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities |
 			break;
 	}
 	return Object.values(capabilities).some((value) => value !== undefined) ? capabilities : undefined;
+}
+
+// First-party OpenAI models whose upstream data lacks `supportsMidConvoSystemMessages` although
+// they accept developer messages mid-conversation, which is how their transport renders later
+// system updates. Without the flag the fork refuses those updates (assertSystemUpdatesSupported).
+const FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS = new Set(["openai:gpt-5.4-nano", "openai:gpt-5.5-pro"]);
+
+/** Fork compat patch: flags the fork sets on top of the upstream data. */
+export function getGeneratedCompat(model: Model<Api>): Model<Api>["compat"] {
+	if (!FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS.has(`${model.provider}:${model.id}`)) return model.compat;
+	return { ...model.compat, supportsMidConvoSystemMessages: true } as Model<Api>["compat"];
+}
+
+/** Apply every fork patch (capabilities and compat) to one generated or pinned model, in place. */
+export function applyForkModelData(model: Model<Api>): void {
+	const compat = getGeneratedCompat(model);
+	if (compat !== undefined) model.compat = compat;
+	const capabilities = getGeneratedCapabilities(model);
+	if (capabilities) model.capabilities = capabilities;
 }

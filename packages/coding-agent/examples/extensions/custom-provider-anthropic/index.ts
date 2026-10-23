@@ -27,8 +27,8 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	assertSystemUpdatesSupported,
 	calculateCost,
-	collapseSystemMessages,
 	createAssistantMessageEventStream,
 	getCurrentSystemPrompt,
 	getCurrentTools,
@@ -342,8 +342,10 @@ function streamCustomAnthropic(
 ): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	// The transcript carries the prompt and tools in its system messages. This provider sends
-	// one top-level system prompt, so fold later system messages into the leading one first.
-	const transcript = collapseSystemMessages(context);
+	// one top-level system prompt and cannot render later system messages, so it refuses a
+	// transcript that changed its prompt or tools after it started (registered transports are
+	// outside the lazyApi check). Without such updates the replayed prompt is the initial one.
+	const transcript = context;
 	const systemPrompt = getCurrentSystemPrompt(transcript.messages);
 	const tools = getCurrentTools(transcript.messages);
 
@@ -367,6 +369,7 @@ function streamCustomAnthropic(
 		};
 
 		try {
+			assertSystemUpdatesSupported(model, transcript);
 			const apiKey = options?.apiKey ?? "";
 			const isOAuth = isOAuthToken(apiKey);
 

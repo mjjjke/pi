@@ -37,7 +37,7 @@ import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
-import { markInitialSystemMessage, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { markInitialSystemMessage, resolveTranscriptTools } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	type GrammarToolInputJsonBuffer,
@@ -126,8 +126,6 @@ export interface OpenAIResponsesStreamOptions {
 export interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
-	/** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
-	supportsMidConvoSystemMessages?: boolean;
 	supportsAdditionalTools?: boolean;
 	supportsToolSearch?: boolean;
 	toolOptions?: ConvertResponsesToolsOptions;
@@ -160,7 +158,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	allowedToolCallProviders: ReadonlySet<string>,
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
-	const normalizedContext = resolveTranscript(context, options?.supportsMidConvoSystemMessages);
+	const normalizedContext = context;
 	const messages: ResponseInput = [];
 
 	const normalizeIdPart = (part: string): string => {

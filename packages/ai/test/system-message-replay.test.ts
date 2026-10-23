@@ -3,7 +3,6 @@ import { describe, expect, test } from "vitest";
 import type { Message, Tool, TranscriptContext } from "../src/types.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../src/utils/text.ts";
 import {
-	collapseSystemMessages,
 	declarationsEqual,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
@@ -56,17 +55,11 @@ describe("system message replay", () => {
 		expect(getCurrentSystemPrompt(transcript.messages)).toBe("base\n\nalso do this\n\n<a>2</a>\n\n<c>1</c>");
 	});
 
-	test("collapse keeps only non-system messages after the replayed head", () => {
-		const collapsed = collapseSystemMessages(transcript);
-		expect(collapsed.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
-		expect(collapseSystemMessages(collapsed)).toEqual(collapsed);
-	});
-
 	test("replay of a transcript without system messages is empty", () => {
 		const context = normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] });
 		expect(getCurrentSystemMessage(context.messages)).toBeUndefined();
 		expect(getCurrentSystemPrompt(context.messages)).toBe("");
-		expect(collapseSystemMessages(context).messages).toEqual(context.messages);
+		expect(getInitialSystemMessage(context.messages)).toBeUndefined();
 	});
 
 	test("a late full patch on a transcript without a leading message replays as the prompt", () => {
@@ -83,12 +76,11 @@ describe("system message replay", () => {
 			],
 		});
 		expect(getCurrentSystemPrompt(context.messages)).toBe("You are pi.");
-		expect(collapseSystemMessages(context).messages[0]).toMatchObject({ role: "system", toolsAdded: [tool("x")] });
+		expect(getCurrentSystemMessage(context.messages)).toMatchObject({ role: "system", toolsAdded: [tool("x")] });
 	});
 
-	test("recognizes an initial system snapshot after developer instructions but not after a turn", () => {
+	test("recognizes only an index-0 system message as the initial snapshot", () => {
 		const boundary: Message = { role: "developer", content: "Plan boundary", timestamp: 1 };
-		const second: Message = { role: "developer", content: "No edits", timestamp: 2 };
 		const initial: Message = {
 			role: "system",
 			content: "",
@@ -98,14 +90,12 @@ describe("system message replay", () => {
 		};
 		const user: Message = { role: "user", content: "Research", timestamp: 4 };
 		const update: Message = { role: "system", content: "Later update", timestamp: 5 };
-		const messages = [boundary, second, initial, user, update];
-		expect(getInitialSystemMessage(messages)).toBe(initial);
-		expect(withoutInitialSystemMessage(messages)).toEqual([boundary, second, user, update]);
-		expect(resolveTranscriptTools(messages, true).requestTools).toEqual([tool("read")]);
-		expect(getInitialSystemMessage([boundary, user, initial])).toBeUndefined();
-		expect(getInitialSystemMessage([boundary, { role: "toolResult" }, initial])).toBeUndefined();
-		expect(getInitialSystemMessage([boundary, { role: "assistant" }, initial])).toBeUndefined();
-		expect(withoutInitialSystemMessage([boundary, user, initial])).toEqual([boundary, user, initial]);
+		expect(getInitialSystemMessage([initial, boundary, user, update])).toBe(initial);
+		expect(withoutInitialSystemMessage([initial, boundary, user, update])).toEqual([boundary, user, update]);
+		expect(resolveTranscriptTools([initial, boundary, user], true).requestTools).toEqual([tool("read")]);
+		expect(getInitialSystemMessage([boundary, initial, user])).toBeUndefined();
+		expect(getInitialSystemMessage([user, initial])).toBeUndefined();
+		expect(withoutInitialSystemMessage([boundary, initial, user])).toEqual([boundary, initial, user]);
 	});
 
 	test("renders complete prompts and framed updates", () => {

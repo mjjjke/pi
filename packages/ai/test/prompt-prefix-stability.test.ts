@@ -56,7 +56,17 @@ function assistant(model: Model<Api>, id: string, timestamp: number): AssistantM
 	};
 }
 
-function turns(model: Model<Api>): [Context, Context] {
+const bootstrapPrefix: Context["messages"] = [
+	{ role: "developer", content: "<collaboration_mode>\n# Default\nMask — ñ\n</collaboration_mode>", timestamp: 0 },
+	{ role: "developer", content: "One-shot startup notice", timestamp: 0 },
+	{ role: "user", content: "Handoff snapshot — café", timestamp: 0 },
+];
+
+function withInstructions<T extends Model<Api>>(model: T): T {
+	return { ...model, capabilities: { midConversationInstructionMessages: true } };
+}
+
+function turns(model: Model<Api>, bootstrap = false): [Context, Context] {
 	const previous: Context = {
 		systemPrompt: "Keep history opaque — 日本語\nPreserve all earlier bytes.",
 		tools: [
@@ -68,6 +78,7 @@ function turns(model: Model<Api>): [Context, Context] {
 			{ name: "other", description: "Another stable declaration", parameters: Type.Object({}) },
 		],
 		messages: [
+			...(bootstrap ? bootstrapPrefix : []),
 			{ role: "user", content: "Read the captured request — é\nthen continue.", timestamp: 1 },
 			assistant(model, "call_old", 2),
 			{
@@ -132,15 +143,20 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-async function captureAnthropic(oauth: boolean, rewriteWire = (body: string) => body): Promise<string[]> {
+async function captureAnthropic(
+	oauth: boolean,
+	rewriteWire = (body: string) => body,
+	bootstrap = false,
+): Promise<string[]> {
+	const model = bootstrap ? withInstructions(anthropicModel) : anthropicModel;
 	const bodies: string[] = [];
 	const onPayload = vi.fn(async (value: unknown) => {
 		const payload = value as { system: { text: string }[] };
 		payload.system[oauth ? 1 : 0]!.text += hookText;
 		return payload;
 	});
-	for (const context of turns(anthropicModel)) {
-		const result = await streamAnthropic(anthropicModel, normalizeContext(context), {
+	for (const context of turns(model, bootstrap)) {
+		const result = await streamAnthropic(model, normalizeContext(context), {
 			apiKey: oauth ? "sk-ant-oat-offline-test" : "sk-ant-offline-test",
 			maxRetries: 0,
 			cacheRetention: "short",
@@ -192,54 +208,85 @@ describe("final-wire prompt prefix stability", () => {
 		expectPromptPrefixStable(before!, after!, anthropicPrefix(oauth));
 	});
 
-	it("preserves Codex instructions, tools and every old input item after onPayload and zstd serialization", async () => {
-		const tokenPayload = Buffer.from(
-			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "offline" } }),
-		).toString("base64url");
-		const bodies: string[] = [];
-		const onPayload = vi.fn(async (value: unknown) => {
-			const payload = value as { instructions: string };
-			return { ...payload, instructions: payload.instructions + hookText };
-		});
-		for (const context of turns(codexModel)) {
-			const result = await streamCodex(codexModel, normalizeContext(context), {
-				apiKey: `offline.${tokenPayload}.test`,
-				transport: "sse",
-				maxRetries: 0,
-				cacheRetention: "short",
-				sessionId: "offline-prefix-stability",
-				onPayload,
-				fetch: async (input, init) => {
-					const request = new Request(input, init);
-					expect(request.url).toBe("https://example.test/backend-api/codex/responses");
-					const bytes = Buffer.from(await request.arrayBuffer());
-					const encoding = request.headers.get("content-encoding");
-					expect(encoding).toBe("zstd");
-					bodies.push(zstdDecompressSync(bytes).toString("utf8"));
-					return new Response(
-						'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
-						{
-							headers: { "content-type": "text/event-stream" },
-						},
-					);
-				},
-			}).result();
-			expect(result.stopReason, result.errorMessage).toBe("stop");
-		}
-		expect(onPayload).toHaveBeenCalledTimes(2);
-		expect(bodies).toHaveLength(2);
-		for (const body of bodies) {
+	it.each([false, true])("keeps the folded v4 bootstrap prefix byte-stable on Anthropic (OAuth=%s)", async (oauth) => {
+		const [before, after] = await captureAnthropic(oauth, undefined, true);
+		for (const body of [before!, after!]) {
 			const payload = JSON.parse(body);
-			expect(payload.instructions).toContain(hookText);
-			expect(payload.input.find((item: { type: string }) => item.type === "function_call_output").output).toBe(
-				adversarial,
-			);
+			const offset = oauth ? 1 : 0;
+			expect(payload.system.slice(offset).map((block: { text: string }) => block.text)).toEqual([
+				expect.stringContaining("Keep history opaque"),
+				"<collaboration_mode>\n# Default\nMask — ñ\n</collaboration_mode>",
+				"One-shot startup notice",
+			]);
+			expect(payload.system.at(-1).cache_control).toEqual({ type: "ephemeral" });
+			expect(payload.system.slice(0, -1).some((block: object) => "cache_control" in block)).toBe(false);
+			expect(payload.messages[0].role).toBe("user");
+			expect(JSON.stringify(payload.messages)).not.toContain("collaboration_mode");
 		}
-		expectPromptPrefixStable(bodies[0]!, bodies[1]!, {
-			fixed: ["instructions", "tools", "prompt_cache_key"],
-			history: "input",
-		});
+		expectPromptPrefixStable(before!, after!, anthropicPrefix(oauth));
 	});
+
+	it.each([false, true])(
+		"preserves Codex instructions, tools and every old input item after onPayload and zstd serialization (v4 bootstrap=%s)",
+		async (bootstrap) => {
+			const model = bootstrap ? withInstructions(codexModel) : codexModel;
+			const tokenPayload = Buffer.from(
+				JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "offline" } }),
+			).toString("base64url");
+			const bodies: string[] = [];
+			const onPayload = vi.fn(async (value: unknown) => {
+				const payload = value as { instructions: string };
+				return { ...payload, instructions: payload.instructions + hookText };
+			});
+			for (const context of turns(model, bootstrap)) {
+				const result = await streamCodex(model, normalizeContext(context), {
+					apiKey: `offline.${tokenPayload}.test`,
+					transport: "sse",
+					maxRetries: 0,
+					cacheRetention: "short",
+					sessionId: "offline-prefix-stability",
+					onPayload,
+					fetch: async (input, init) => {
+						const request = new Request(input, init);
+						expect(request.url).toBe("https://example.test/backend-api/codex/responses");
+						const bytes = Buffer.from(await request.arrayBuffer());
+						const encoding = request.headers.get("content-encoding");
+						expect(encoding).toBe("zstd");
+						bodies.push(zstdDecompressSync(bytes).toString("utf8"));
+						return new Response(
+							'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n',
+							{
+								headers: { "content-type": "text/event-stream" },
+							},
+						);
+					},
+				}).result();
+				expect(result.stopReason, result.errorMessage).toBe("stop");
+			}
+			expect(onPayload).toHaveBeenCalledTimes(2);
+			expect(bodies).toHaveLength(2);
+			for (const body of bodies) {
+				const payload = JSON.parse(body);
+				expect(payload.instructions).toContain(hookText);
+				expect(payload.input.find((item: { type: string }) => item.type === "function_call_output").output).toBe(
+					adversarial,
+				);
+				if (bootstrap) {
+					expect(payload.instructions).not.toContain("collaboration_mode");
+					expect(payload.input.slice(0, 3).map((item: { role: string }) => item.role)).toEqual([
+						"developer",
+						"developer",
+						"user",
+					]);
+					expect(JSON.stringify(payload.input[0])).toContain("collaboration_mode");
+				}
+			}
+			expectPromptPrefixStable(bodies[0]!, bodies[1]!, {
+				fixed: ["instructions", "tools", "prompt_cache_key"],
+				history: "input",
+			});
+		},
+	);
 
 	it("rejects the incident's whole-body regex signer even with the legitimate OAuth/cache exceptions", async () => {
 		// Exact historical regex/placeholder/hash algorithm, kept test-local. Messages

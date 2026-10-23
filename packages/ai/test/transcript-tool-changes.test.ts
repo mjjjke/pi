@@ -23,6 +23,20 @@ async function capturePayload<T>(model: Model<Api>, context: Context): Promise<T
 	return captured;
 }
 
+async function captureRefusal(model: Model<Api>, context: Context): Promise<string | undefined> {
+	let payloadBuilt = false;
+	const result = await streamSimple(model, context, {
+		apiKey: "test-key",
+		onPayload: () => {
+			payloadBuilt = true;
+			throw new PayloadCaptured();
+		},
+	}).result();
+	expect(payloadBuilt).toBe(false);
+	expect(result.stopReason).toBe("error");
+	return result.errorMessage;
+}
+
 const modelBase = {
 	baseUrl: "http://127.0.0.1:9",
 	reasoning: true,
@@ -194,7 +208,7 @@ describe("transcript system messages", () => {
 		expect(payload.messages.at(-1)?.content.map((block) => block.type)).toEqual(["text"]);
 	});
 
-	test("folds Anthropic updates into the system prompt without native support", async () => {
+	test("refuses Anthropic updates without native support", async () => {
 		const model: Model<"anthropic-messages"> = {
 			...modelBase,
 			id: "claude-sonnet-4-5",
@@ -202,19 +216,7 @@ describe("transcript system messages", () => {
 			api: "anthropic-messages",
 			provider: "anthropic",
 		};
-		const payload = await capturePayload<{
-			betas?: string[];
-			system?: Array<{ text: string }>;
-			tools?: Array<{ name: string }>;
-			messages: Array<{ role: string }>;
-		}>(model, context);
-
-		expect(payload.betas ?? []).not.toContain("inline-tools-2026-09-15");
-		expect(payload.system?.map((block) => block.text)).toEqual([
-			"base prompt\n\nupdated guidance\n\n<rules>\nnew rules\n</rules>",
-		]);
-		expect(payload.tools?.map((value) => value.name)).toEqual(["late_tool"]);
-		expect(payload.messages.map((message) => message.role)).toEqual(["user"]);
+		expect(await captureRefusal(model, context)).toMatch(/does not support mid-conversation system messages/);
 	});
 
 	test("requires both Anthropic capabilities for native tool changes", async () => {
@@ -224,7 +226,7 @@ describe("transcript system messages", () => {
 			name: "Claude Opus 5",
 			api: "anthropic-messages",
 			provider: "anthropic",
-			compat: { supportsMidConvoToolChanges: true },
+			compat: { supportsMidConvoSystemMessages: true },
 		};
 		const payload = await capturePayload<{
 			betas?: string[];
@@ -234,7 +236,7 @@ describe("transcript system messages", () => {
 
 		expect(payload.betas ?? []).not.toContain("inline-tools-2026-09-15");
 		expect(payload.tools?.map((value) => value.name)).toEqual(["late_tool"]);
-		expect(payload.messages.map((message) => message.role)).toEqual(["user"]);
+		expect(payload.messages.map((message) => message.role)).toEqual(["user", "system"]);
 	});
 
 	test("anchors OpenAI additions at their developer message", async () => {
@@ -283,7 +285,7 @@ describe("transcript system messages", () => {
 		).toEqual(["late_tool"]);
 	});
 
-	test("folds OpenAI updates into the leading developer message without native support", async () => {
+	test("refuses OpenAI updates without native support", async () => {
 		const model: Model<"openai-responses"> = {
 			...modelBase,
 			id: "gpt-4.1",
@@ -292,14 +294,7 @@ describe("transcript system messages", () => {
 			provider: "openai",
 			compat: { supportsAdditionalTools: true },
 		};
-		const payload = await capturePayload<{
-			tools?: Array<{ name: string }>;
-			input: Array<{ type?: string; role?: string; content?: string }>;
-		}>(model, context);
-
-		expect(payload.tools?.map((value) => value.name)).toEqual(["late_tool"]);
-		expect(payload.input.map((item) => item.type ?? item.role)).toEqual(["developer", "user"]);
-		expect(payload.input[0]?.content).toBe("base prompt\n\nupdated guidance\n\n<rules>\nnew rules\n</rules>");
+		expect(await captureRefusal(model, context)).toMatch(/does not support mid-conversation system messages/);
 	});
 
 	test("falls back to the complete current tool state when removals are unsupported", async () => {
@@ -321,7 +316,7 @@ describe("transcript system messages", () => {
 		expect(payload.input.filter((item) => item.role === "developer")).toHaveLength(2);
 	});
 
-	test("keeps a developer-preceded snapshot's sections and tools initial in Chat Completions", async () => {
+	test("treats a developer-preceded snapshot as an update in Chat Completions", async () => {
 		const model: Model<"openai-completions"> = {
 			...modelBase,
 			id: "custom-additions",
@@ -359,22 +354,12 @@ describe("transcript system messages", () => {
 				},
 			],
 		});
-		expect(payload.tools?.map((value) => value.function?.name)).toEqual(["base_tool"]);
-		expect(payload.messages.map((message) => message.role)).toEqual([
-			"developer",
-			"developer",
-			"developer",
-			"user",
-			"system",
-			"developer",
-		]);
-		expect(payload.messages.slice(0, 3).map((message) => message.content)).toEqual([
-			"Plan boundary",
-			"No edits",
-			"Base rules",
-		]);
-		expect(payload.messages[4]?.tools?.map((value) => value.function?.name)).toEqual(["late_tool"]);
-		expect(payload.messages[5]?.content).toBe('Updated system prompt section "more":\n\nLater rules');
+		expect(payload.tools).toBeUndefined();
+		expect(payload.messages.slice(0, 2).map((message) => message.content)).toEqual(["Plan boundary", "No edits"]);
+		const update = payload.messages.find(
+			(message) => typeof message.content === "string" && message.content.includes("Base rules"),
+		);
+		expect(update?.content).toBe('Updated system prompt section "rules":\n\nBase rules');
 		expect(JSON.stringify(payload).match(/Base rules/g)).toHaveLength(1);
 		expect(JSON.stringify(payload).match(/Later rules/g)).toHaveLength(1);
 	});
@@ -449,7 +434,7 @@ describe("transcript system messages", () => {
 		);
 	});
 
-	test("folds OpenAI-compatible updates into the system prompt without native support", async () => {
+	test("refuses OpenAI-compatible updates without native support", async () => {
 		const model: Model<"openai-completions"> = {
 			...modelBase,
 			id: "custom-model",
@@ -458,13 +443,6 @@ describe("transcript system messages", () => {
 			provider: "custom-provider",
 			reasoning: false,
 		};
-		const payload = await capturePayload<{
-			tools?: Array<{ function?: { name: string } }>;
-			messages: Array<{ role: string; content?: string }>;
-		}>(model, context);
-
-		expect(payload.tools?.map((value) => value.function?.name)).toEqual(["late_tool"]);
-		expect(payload.messages.map((message) => message.role)).toEqual(["system", "user"]);
-		expect(payload.messages[0]?.content).toBe("base prompt\n\nupdated guidance\n\n<rules>\nnew rules\n</rules>");
+		expect(await captureRefusal(model, context)).toMatch(/does not support mid-conversation system messages/);
 	});
 });

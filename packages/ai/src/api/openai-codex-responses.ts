@@ -36,7 +36,6 @@ import {
 	getDeclaredTools,
 	getInitialSystemMessage,
 	normalizeContext,
-	resolveTranscript,
 	resolveTranscriptTools,
 } from "../utils/transcript.ts";
 import { uuidv7 } from "../utils/uuid.ts";
@@ -241,7 +240,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = context;
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -543,7 +542,6 @@ function buildRequestBody(
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 		grammarToolInputProperties,
-		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsAdditionalTools,
 		supportsToolSearch,
 		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },

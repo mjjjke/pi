@@ -38,7 +38,7 @@ import {
 	validateGeneratedModelData,
 	validateModelDataDirectory,
 } from "./model-data.ts";
-import { getGeneratedCapabilities } from "./fork-model-capabilities.ts";
+import { applyForkModelData } from "./fork-model-capabilities.ts";
 import {
 	DEFAULT_RADIUS_GATEWAY,
 	getRadiusModelsFromConfig,
@@ -3405,8 +3405,7 @@ async function generateModels() {
 		applyOpenAIMidConvoEffortMetadata(model);
 		applyPromptCacheMetadata(model);
 		applyImageInputMetadata(model);
-		const capabilities = getGeneratedCapabilities(model);
-		if (capabilities) model.capabilities = capabilities;
+		applyForkModelData(model);
 	}
 	applyAnthropicAllowedFallbackModelMetadata(allModels.filter(isAnthropicFallbackMetadataModel));
 

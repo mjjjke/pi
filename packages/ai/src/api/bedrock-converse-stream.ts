@@ -59,7 +59,6 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText } from "../utils/text.ts";
 import {
-	collapseSystemMessages,
 	getCurrentTools,
 	getInitialSystemMessage,
 	type TranscriptContext,
@@ -130,8 +129,9 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	// Bedrock has no mid-conversation system messages; fold them into the leading prompt.
-	const normalizedContext = collapseSystemMessages(context);
+	// Bedrock has no mid-conversation system messages; later updates are refused before the
+	// request (assertSystemUpdatesSupported in lazyApi).
+	const normalizedContext = context;
 
 	(async () => {
 		const output: AssistantMessage = {

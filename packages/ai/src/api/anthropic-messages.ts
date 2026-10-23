@@ -9,6 +9,7 @@ import type {
 	BetaMessageParam as MessageParam,
 	BetaRawMessageStreamEvent as RawMessageStreamEvent,
 	BetaRefusalStopDetails as RefusalStopDetails,
+	BetaTextBlockParam as TextBlockParam,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import {
 	ANTHROPIC_FEDERATION_RULE_ID_ENV,
@@ -51,8 +52,8 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
 	getCurrentTools,
+	getInitialInstructionPrefix,
 	getInitialSystemMessage,
-	resolveTranscript,
 	type TranscriptContext,
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
@@ -645,7 +646,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, getAnthropicCompat(model).supportsMidConvoSystemMessages);
+	const normalizedContext = context;
 	const currentTools = getCurrentTools(normalizedContext.messages);
 
 	(async () => {
@@ -1264,11 +1265,21 @@ function buildParams(
 	const compat = getAnthropicCompat(model);
 	const initialSystemMessage = getInitialSystemMessage(context.messages);
 	const initialSystemText = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
-	const conversationMessages = transformMessages(
+	const transformedMessages = transformMessages(
 		withoutInitialSystemMessage(context.messages),
 		model,
 		normalizeToolCallId,
 	);
+	// The developers directly after the initial snapshot (startup standing values and one-shots,
+	// or the values a compaction carried) are folded into top-level `system`, one block each.
+	// Read after transformMessages: models without developer support drop them, so nothing folds.
+	const foldedDevelopers = initialSystemMessage
+		? getInitialInstructionPrefix([initialSystemMessage, ...transformedMessages]).developers
+		: [];
+	const conversationMessages = transformedMessages.slice(foldedDevelopers.length);
+	const foldedTexts = foldedDevelopers
+		.map((message) => sanitizeSurrogates(instructionContentToText(message.content)))
+		.filter((text) => text.trim().length > 0);
 	// Native tool changes keep the request-level tool list fixed and define every later tool
 	// by value in a `tool_addition` block, which also expresses same-name redefinitions.
 	// Anthropic rejects a tool list where every tool is deferred, so there must be an initial
@@ -1338,25 +1349,25 @@ function buildParams(
 		...(betaFeatures.length > 0 ? { betas: betaFeatures } : {}),
 	};
 
+	const systemBlocks: TextBlockParam[] = [];
 	if (isOAuthToken) {
 		const identity = anthropicModelIdentity(model);
-		params.system = [
+		systemBlocks.push(
 			{ type: "text", text: buildBillingHeaderValue(getClaudeCodeVersion(options?.env)) },
 			{
 				type: "text",
 				text: sanitizeSurrogates(initialSystemText ? `${identity}\n\n${initialSystemText}` : identity),
-				...(cacheControl ? { cache_control: cacheControl } : {}),
 			},
-		];
+		);
 	} else if (initialSystemText) {
-		// Add cache control to system prompt for non-OAuth tokens
-		params.system = [
-			{
-				type: "text",
-				text: sanitizeSurrogates(initialSystemText),
-				...(cacheControl ? { cache_control: cacheControl } : {}),
-			},
-		];
+		systemBlocks.push({ type: "text", text: sanitizeSurrogates(initialSystemText) });
+	}
+	for (const text of foldedTexts) systemBlocks.push({ type: "text", text });
+	if (systemBlocks.length > 0) {
+		// One breakpoint on the last system block, so the count is the same with or without folds.
+		const last = systemBlocks.length - 1;
+		if (cacheControl) systemBlocks[last] = { ...systemBlocks[last]!, cache_control: cacheControl };
+		params.system = systemBlocks;
 	}
 
 	// Temperature is incompatible with extended thinking and unsupported on Claude Opus 4.7+.

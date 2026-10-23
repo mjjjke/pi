@@ -49,7 +49,6 @@ import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.t
 import {
 	getDeclaredTools,
 	markInitialSystemMessage,
-	resolveTranscript,
 	resolveTranscriptTools,
 	type TranscriptContext,
 } from "../utils/transcript.ts";
@@ -309,7 +308,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 	options?: OpenAICompletionsOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
+	const normalizedContext = context;
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -1200,7 +1199,7 @@ export function convertMessages(
 	compat: ResolvedOpenAICompletionsCompat,
 	options?: ConvertCompletionsMessagesOptions,
 ): ChatCompletionMessageParam[] {
-	const normalizedContext = resolveTranscript(context, compat.supportsMidConvoSystemMessages);
+	const normalizedContext = context;
 	const params: ChatCompletionMessageParam[] = [];
 
 	const normalizeToolCallId = (id: string): string => {

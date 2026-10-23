@@ -1,4 +1,12 @@
-import type { Context, Message, SystemMessage, Tool, ToolReference, TranscriptContext } from "../types.ts";
+import type {
+	Context,
+	DeveloperMessage,
+	Message,
+	SystemMessage,
+	Tool,
+	ToolReference,
+	TranscriptContext,
+} from "../types.ts";
 import { contentText, getSystemMessageText } from "./text.ts";
 
 export type { TranscriptContext } from "../types.ts";
@@ -43,13 +51,32 @@ function isSystemMessage(message: { role: string }): message is SystemMessage {
 	return message.role === "system";
 }
 
-/** Return the first system snapshot if only developer instructions precede it. Never promote an update past a turn. */
+/**
+ * Return the initial system snapshot: the first message, when it is a system message.
+ * Any later system message is an update, even after only developer instructions.
+ */
 export function getInitialSystemMessage(messages: TranscriptMessages): SystemMessage | undefined {
-	for (const message of messages) {
-		if (isSystemMessage(message)) return message;
-		if (message.role !== "developer") break;
+	const first = messages[0];
+	return first && isSystemMessage(first) ? first : undefined;
+}
+
+/**
+ * The initial instruction prefix: the initial system snapshot and the developer messages
+ * directly after it, up to the first message that is not a developer message. Empty
+ * without an initial snapshot.
+ */
+export function getInitialInstructionPrefix<T extends { role: string }>(
+	messages: readonly T[],
+): { system: (T & SystemMessage) | undefined; developers: (T & DeveloperMessage)[] } {
+	const system = getInitialSystemMessage(messages) as (T & SystemMessage) | undefined;
+	const developers: (T & DeveloperMessage)[] = [];
+	if (!system) return { system, developers };
+	for (let index = 1; index < messages.length; index++) {
+		const message = messages[index];
+		if (message?.role !== "developer") break;
+		developers.push(message as T & DeveloperMessage);
 	}
-	return undefined;
+	return { system, developers };
 }
 
 /** Drop only the initial snapshot for APIs that carry the prompt outside the message list. */
@@ -125,24 +152,6 @@ export function getCurrentSystemMessage(messages: TranscriptMessages): SystemMes
 export function getCurrentSystemPrompt(messages: TranscriptMessages): string {
 	const message = getCurrentSystemMessage(messages);
 	return message ? getSystemMessageText(message) : "";
-}
-
-/**
- * Rebuild the transcript for APIs without mid-conversation system messages: the replayed
- * system message leads, and every later system message is dropped.
- */
-export function collapseSystemMessages(context: TranscriptContext): TranscriptContext {
-	const head = getCurrentSystemMessage(context.messages);
-	const messages = context.messages.filter((message) => message.role !== "system");
-	return { messages: head ? [head, ...messages] : messages } as TranscriptContext;
-}
-
-/** Keep later system messages in place when the model accepts them; otherwise collapse them. */
-export function resolveTranscript(
-	context: TranscriptContext,
-	supportsMidConvoSystemMessages: boolean | undefined,
-): TranscriptContext {
-	return supportsMidConvoSystemMessages ? context : collapseSystemMessages(context);
 }
 
 /** Strip executable and display-only fields from a tool before transcript comparison or persistence. */

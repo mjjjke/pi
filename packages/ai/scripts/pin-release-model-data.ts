@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, Model } from "../src/types.ts";
-import { getGeneratedCapabilities } from "./fork-model-capabilities.ts";
+import { applyForkModelData } from "./fork-model-capabilities.ts";
 import {
 	assertExactModelIds,
 	createModelDataManifest,
@@ -61,8 +61,7 @@ export function buildPinnedModelData(sourceDataDir: string, providerIds: readonl
 		structure[providerId] = {};
 		for (const [api, models] of Object.entries(groups)) {
 			for (const [modelId, model] of Object.entries(models)) {
-				const capabilities = getGeneratedCapabilities(model);
-				if (capabilities) model.capabilities = capabilities;
+				applyForkModelData(model);
 				structure[providerId][modelId] = api;
 			}
 		}
