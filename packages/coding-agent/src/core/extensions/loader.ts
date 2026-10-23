@@ -173,6 +173,9 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		appendDeveloperMessage: notInitialized,
 		queueDeveloperMessage: notInitialized,
 		cancelQueuedDeveloperMessage: notInitialized,
+		setStandingInstruction: notInitialized,
+		clearStandingInstruction: notInitialized,
+		getStandingInstruction: notInitialized,
 		appendEntry: notInitialized,
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
@@ -439,6 +442,21 @@ function createExtensionAPI(
 		cancelQueuedDeveloperMessage(pendingId) {
 			assertActive();
 			return runtime.cancelQueuedDeveloperMessage(pendingId);
+		},
+
+		setStandingInstruction(key, content, options) {
+			assertActive();
+			runtime.setStandingInstruction(key, content, options);
+		},
+
+		clearStandingInstruction(key) {
+			assertActive();
+			runtime.clearStandingInstruction(key);
+		},
+
+		getStandingInstruction(key) {
+			assertActive();
+			return runtime.getStandingInstruction(key);
 		},
 
 		appendEntry(customType: string, data?: unknown): void {

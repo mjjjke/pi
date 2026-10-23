@@ -108,6 +108,7 @@ import {
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
+	type StandingInstructionInfo,
 	type ToolDefinition,
 	type ToolExecutionEndEvent,
 	type ToolExecutionStartEvent,
@@ -350,6 +351,26 @@ interface PreparedRun {
 	returned: AgentMessage[];
 }
 
+/** One delivered standing value (keyed developer). */
+interface StandingDelivery {
+	key: string;
+	content: string | TextContent[];
+	message: DeveloperMessage;
+	entryId: string;
+}
+
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, item: unknown) =>
+		item && typeof item === "object" && !Array.isArray(item)
+			? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
+			: item,
+	);
+}
+
+function sameStandingContent(a: string | TextContent[], b: string | TextContent[]): boolean {
+	return canonicalJson(a) === canonicalJson(b);
+}
+
 /** Content held until the bootstrap commit (B). */
 interface StagedContent {
 	message: CustomMessage | BashExecutionMessage;
@@ -459,6 +480,10 @@ export class AgentSession {
 	private _stagedInstructions: PendingInstruction[] = [];
 	/** Custom and bash content held until B, in ingress order. */
 	private _stagedContent: StagedContent[] = [];
+	/** The loop persisted a user or custom message since the previous request boundary (§7.3). */
+	private _inputArrived = false;
+	/** Standing keys selected for delivery that are still pending: later boundaries must deliver them (fail closed). */
+	private _standingDue = new Set<string>();
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -930,12 +955,16 @@ export class AgentSession {
 		const previousGetInstructionMessages = this.agent.getInstructionMessages;
 		this.agent.getInstructionMessages = async (context) => {
 			const previous = (await previousGetInstructionMessages?.(context)) ?? [];
-			if (this._pendingInstructions.length === 0) return previous;
+			const inputArrived = this._inputArrived;
+			this._inputArrived = false;
 			const anchor = convertToLlm(context.messages)
 				.filter((message) => message.role !== "system" && message.role !== "developer")
 				.at(-1)?.role;
 			if (anchor !== "user" && anchor !== "toolResult") return previous;
-			const committed: AgentMessage[] = [];
+			// Standing values first (fail closed); one-shots queued by their delivered handlers follow.
+			const standing = await this._deliverStandingAtBoundary(inputArrived);
+			if (this._pendingInstructions.length === 0) return [...previous, ...standing];
+			const committed: AgentMessage[] = [...standing];
 			for (const pending of this._pendingInstructions.slice()) {
 				// A previous item's onCommit may have cancelled this snapshot item.
 				if (!this._pendingInstructions.includes(pending)) continue;
@@ -1013,13 +1042,14 @@ export class AgentSession {
 	 * synchronously and in order. Events and deferred onCommit callbacks run afterwards from the receipts
 	 * of the appends that succeeded, also when a later append threw (which is rethrown).
 	 */
-	private _bootstrapCommit(
+	private async _bootstrapCommit(
 		snapshotPatch: SystemMessage | undefined,
 		needsSnapshot: boolean,
 		includePreflightCustom: boolean,
-	): void {
+	): Promise<void> {
 		const events: AgentSessionEvent[] = [];
 		const callbacks: Array<() => void> = [];
+		const standing: StandingDelivery[] = [];
 		try {
 			if (needsSnapshot) {
 				const toolsAdded = getToolStateChanges([], this.agent.state.tools).toolsAdded;
@@ -1029,6 +1059,13 @@ export class AgentSession {
 				};
 				this.sessionManager.appendMessage(snapshot);
 				events.push({ type: "message_start", message: snapshot }, { type: "message_end", message: snapshot });
+			}
+			// Step 1b: one keyed developer per pending standing value, in key order (both apply values).
+			for (const state of this.sessionManager.getStandingState()) {
+				if (!state.pending || !state.desired) continue;
+				this._standingDue.add(state.key);
+				standing.push(this._appendStandingValue(state.key, state.desired.content));
+				this._standingDue.delete(state.key);
 			}
 			for (const pending of this._stagedInstructions.slice()) {
 				this._commitInstruction(pending, { deferOnCommit: true });
@@ -1059,7 +1096,10 @@ export class AgentSession {
 			}
 		} finally {
 			this._refreshFinalizedContext();
-			for (const event of events) this._emitIsolated(event);
+			const snapshotEvents = events.filter((event) => "message" in event && event.message.role === "system");
+			for (const event of snapshotEvents) this._emitIsolated(event);
+			await this._emitStandingDelivered(standing);
+			for (const event of events) if (!snapshotEvents.includes(event)) this._emitIsolated(event);
 			for (const callback of callbacks) {
 				try {
 					callback();
@@ -1068,6 +1108,123 @@ export class AgentSession {
 				}
 			}
 		}
+	}
+
+	/** Append one keyed developer for a standing value, frozen and marked committed. */
+	private _appendStandingValue(key: string, content: string | TextContent[]): StandingDelivery {
+		const copy = structuredClone(content);
+		if (Array.isArray(copy)) {
+			for (const part of copy) Object.freeze(part);
+			Object.freeze(copy);
+		}
+		const message: DeveloperMessage = Object.freeze({ role: "developer", content: copy, timestamp: Date.now() });
+		const entryId = this.sessionManager.appendMessage(message, { standingKey: key });
+		this._entryIdsByMessage.set(message, entryId);
+		this._committedInstructions.add(message);
+		return { key, content: copy, message, entryId };
+	}
+
+	/** Emit standing_instruction_delivered per delivery, in order; handler errors are reported by the runner. */
+	private async _emitStandingDelivered(deliveries: StandingDelivery[]): Promise<void> {
+		for (const { key, content, entryId } of deliveries) {
+			try {
+				await this._extensionRunner.emit({ type: "standing_instruction_delivered", key, content, entryId });
+			} catch (error) {
+				this._reportBootstrapError(error);
+			}
+		}
+	}
+
+	/**
+	 * Deliver eligible standing values at a request boundary (§7.3): pending values whose apply is
+	 * `next-request`, or `next-input` after an input, or due after a failed delivery. The whole
+	 * eligible batch is latched as due before the first append; any failure fails the request.
+	 */
+	private async _deliverStandingAtBoundary(inputArrived: boolean): Promise<AgentMessage[]> {
+		const states = this.sessionManager.getStandingState();
+		for (const key of [...this._standingDue]) {
+			if (!states.some((state) => state.key === key && state.pending)) this._standingDue.delete(key);
+		}
+		const eligible = states.filter(
+			(state) =>
+				state.pending &&
+				state.desired !== undefined &&
+				(state.desired.apply === "next-request" || inputArrived || this._standingDue.has(state.key)),
+		);
+		if (eligible.length === 0) return [];
+		for (const state of eligible) this._standingDue.add(state.key);
+		const delivered: StandingDelivery[] = [];
+		let failure: { key: string; error: unknown } | undefined;
+		for (const state of eligible) {
+			try {
+				delivered.push(this._appendStandingValue(state.key, state.desired!.content));
+				this._standingDue.delete(state.key);
+			} catch (error) {
+				failure = { key: state.key, error };
+				break;
+			}
+		}
+		if (delivered.length > 0) this._refreshFinalizedContext();
+		await this._emitStandingDelivered(delivered);
+		if (failure) {
+			const cause = failure.error instanceof Error ? failure.error.message : String(failure.error);
+			throw new Error(`Standing instruction "${failure.key}" could not be delivered: ${cause}`);
+		}
+		return delivered.map((delivery) => delivery.message);
+	}
+
+	setStandingInstruction(
+		key: string,
+		content: string | TextContent[],
+		options?: { apply?: "next-input" | "next-request" },
+	): void {
+		this._assertStandingWritable(key);
+		if (isBlankInstruction(content)) throw new Error("setStandingInstruction() requires non-blank content.");
+		const desired = this.sessionManager.getStandingState().find((state) => state.key === key)?.desired;
+		if (
+			desired &&
+			sameStandingContent(desired.content, content) &&
+			(options?.apply === undefined || options.apply === desired.apply)
+		) {
+			return;
+		}
+		const apply =
+			options?.apply ?? (desired && sameStandingContent(desired.content, content) ? desired.apply : "next-input");
+		this._appendStandingEntry(key, content, apply);
+	}
+
+	clearStandingInstruction(key: string): void {
+		this._assertStandingWritable(key);
+		if (!this.sessionManager.getStandingState().some((state) => state.key === key && state.desired)) return;
+		this._appendStandingEntry(key, undefined, undefined);
+	}
+
+	getStandingInstruction(key: string): StandingInstructionInfo | undefined {
+		const state = this.sessionManager.getStandingState().find((item) => item.key === key);
+		if (!state?.desired) return undefined;
+		return {
+			content: structuredClone(state.desired.content),
+			apply: state.desired.apply,
+			delivered: !state.pending,
+			...(!state.pending && state.delivered ? { deliveredEntryId: state.delivered.entryId } : {}),
+		};
+	}
+
+	private _assertStandingWritable(key: string): void {
+		if (this._disposed) throw new Error("Standing instructions cannot be changed after the session is disposed.");
+		if (!key) throw new Error("Standing instruction key must not be empty.");
+		const persistenceError = this.sessionManager.getPersistenceError();
+		if (persistenceError) throw persistenceError;
+	}
+
+	private _appendStandingEntry(
+		key: string,
+		content: string | TextContent[] | undefined,
+		apply: "next-input" | "next-request" | undefined,
+	): void {
+		const entryId = this.sessionManager.appendStandingInstruction(key, content, apply);
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) this._emit({ type: "entry_appended", entry });
 	}
 
 	private _appendContentMessage(message: CustomMessage | BashExecutionMessage): void {
@@ -1527,6 +1684,7 @@ export class AgentSession {
 				entryId = this.sessionManager.appendMessage(event.message);
 			}
 			if (entryId) this._entryIdsByMessage.set(event.message, entryId);
+			if (entryId && (event.message.role === "user" || event.message.role === "custom")) this._inputArrived = true;
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			if (event.message.role === "assistant") {
@@ -2341,7 +2499,11 @@ export class AgentSession {
 		let update = prepared.update;
 		if (bootstrap) {
 			try {
-				this._bootstrapCommit(needsSnapshot ? update : undefined, needsSnapshot, trigger.messageType === "user");
+				await this._bootstrapCommit(
+					needsSnapshot ? update : undefined,
+					needsSnapshot,
+					trigger.messageType === "user",
+				);
 				// A callback of B may have disposed the session or closed admission.
 				this._throwIfAdmissionChanged(admissionGen);
 			} catch (error) {
@@ -2378,6 +2540,7 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
+			this._inputArrived = false;
 			if (!this._disposed) this._commitPendingInstructionsAtRunEnd();
 			if (this._agentRunAbortRequested) this._finishCancelledRetry();
 			this._failedResponse = undefined;
@@ -4186,6 +4349,9 @@ export class AgentSession {
 				},
 				queueDeveloperMessage: (content, options) => this._queueDeveloperMessage(content, options, runner),
 				cancelQueuedDeveloperMessage: (pendingId) => this.cancelQueuedDeveloperMessage(pendingId),
+				setStandingInstruction: (key, content, options) => this.setStandingInstruction(key, content, options),
+				clearStandingInstruction: (key) => this.clearStandingInstruction(key),
+				getStandingInstruction: (key) => this.getStandingInstruction(key),
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);
 					const entry = this.sessionManager.getEntry(entryId);

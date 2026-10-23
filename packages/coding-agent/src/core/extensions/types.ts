@@ -892,6 +892,15 @@ export interface SessionBeforeCompactEvent {
 }
 
 /** Fired after context compaction succeeds */
+/** A standing value was delivered: a keyed developer was written, or a compaction carried a pending value. */
+export interface StandingInstructionDeliveredEvent {
+	type: "standing_instruction_delivered";
+	key: string;
+	content: string | TextContent[];
+	/** The keyed developer, or the compaction that carried it. */
+	entryId: string;
+}
+
 export interface SessionCompactEvent {
 	type: "session_compact";
 	compactionEntry: CompactionEntry;
@@ -963,6 +972,7 @@ export type SessionEvent =
 	| SessionBeforeForkEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
+	| StandingInstructionDeliveredEvent
 	| SessionCompactFailedEvent
 	| SessionShutdownEvent
 	| SessionBeforeTreeEvent
@@ -1895,6 +1905,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): () => void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): () => void;
+	on(
+		event: "standing_instruction_delivered",
+		handler: ExtensionHandler<StandingInstructionDeliveredEvent>,
+	): () => void;
 	on(event: "session_compact_failed", handler: ExtensionHandler<SessionCompactFailedEvent>): () => void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): () => void;
 	on(event: "mcp_servers_change", handler: ExtensionHandler<McpServersChangeEvent>): () => void;
@@ -2065,6 +2079,21 @@ export interface ExtensionAPI {
 	 * Stale extension APIs throw, like queueDeveloperMessage().
 	 */
 	cancelQueuedDeveloperMessage(pendingId: string): boolean;
+
+	/**
+	 * Set the desired value of a keyed standing instruction. Core delivers it as a keyed developer
+	 * message (at the first run's bootstrap, else at the request boundary `apply` selects), carries
+	 * the value in effect across compaction and derives its state per branch. Writes a non-context
+	 * state entry unless the content and apply equal the desired value. Throws for an empty key,
+	 * blank content, a disposed session or a session with a persistence error.
+	 */
+	setStandingInstruction(key: string, content: string | TextContent[], options?: StandingInstructionOptions): void;
+
+	/** Clear a standing instruction: nothing is sent; it is no longer carried at compaction. */
+	clearStandingInstruction(key: string): void;
+
+	/** The desired value of a standing instruction on the active branch, or undefined. */
+	getStandingInstruction(key: string): StandingInstructionInfo | undefined;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -2444,6 +2473,30 @@ export type QueueDeveloperMessageHandler = (
 
 export type CancelQueuedDeveloperMessageHandler = (pendingId: string) => boolean;
 
+/** Options of {@link ExtensionAPI.setStandingInstruction}. */
+export interface StandingInstructionOptions {
+	/** `next-input` (default for new content): first request boundary after an input; `next-request`: next boundary. */
+	apply?: "next-input" | "next-request";
+}
+
+/** The desired value of a standing instruction on the active branch. */
+export interface StandingInstructionInfo {
+	content: string | TextContent[];
+	apply: "next-input" | "next-request";
+	/** The desired content is the content in effect for the model. */
+	delivered: boolean;
+	/** The keyed developer, or the compaction that carried it, when delivered. */
+	deliveredEntryId?: string;
+}
+
+export type SetStandingInstructionHandler = (
+	key: string,
+	content: string | TextContent[],
+	options?: StandingInstructionOptions,
+) => void;
+export type ClearStandingInstructionHandler = (key: string) => void;
+export type GetStandingInstructionHandler = (key: string) => StandingInstructionInfo | undefined;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -2526,6 +2579,9 @@ export interface ExtensionActions {
 	appendDeveloperMessage: AppendDeveloperMessageHandler;
 	queueDeveloperMessage: QueueDeveloperMessageHandler;
 	cancelQueuedDeveloperMessage: CancelQueuedDeveloperMessageHandler;
+	setStandingInstruction: SetStandingInstructionHandler;
+	clearStandingInstruction: ClearStandingInstructionHandler;
+	getStandingInstruction: GetStandingInstructionHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

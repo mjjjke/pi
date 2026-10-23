@@ -448,6 +448,9 @@ export class ExtensionRunner {
 		this.runtime.appendDeveloperMessage = actions.appendDeveloperMessage;
 		this.runtime.queueDeveloperMessage = actions.queueDeveloperMessage;
 		this.runtime.cancelQueuedDeveloperMessage = actions.cancelQueuedDeveloperMessage;
+		this.runtime.setStandingInstruction = actions.setStandingInstruction;
+		this.runtime.clearStandingInstruction = actions.clearStandingInstruction;
+		this.runtime.getStandingInstruction = actions.getStandingInstruction;
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
