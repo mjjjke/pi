@@ -1,7 +1,9 @@
 import type {
+	Api,
 	Context,
 	DeveloperMessage,
 	Message,
+	Model,
 	SystemMessage,
 	Tool,
 	ToolReference,
@@ -77,6 +79,51 @@ export function getInitialInstructionPrefix<T extends { role: string }>(
 		developers.push(message as T & DeveloperMessage);
 	}
 	return { system, developers };
+}
+
+/** APIs that never render a system message after the first one. */
+const NO_MID_CONVERSATION_SYSTEM_APIS = new Set<Api>([
+	"google-generative-ai",
+	"google-vertex",
+	"bedrock-converse-stream",
+]);
+
+/**
+ * Whether a model accepts later `system` messages (section patches, tool deltas) in place.
+ * Google, Vertex and Bedrock never do; `pi-messages` forwards the transcript to its backend;
+ * every other API follows `compat.supportsMidConvoSystemMessages` (detected defaults are false).
+ */
+export function supportsMidConversationSystemMessages(model: Model<Api>): boolean {
+	if (NO_MID_CONVERSATION_SYSTEM_APIS.has(model.api)) return false;
+	if (model.api === "pi-messages") return true;
+	return (
+		(model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)?.supportsMidConvoSystemMessages ===
+		true
+	);
+}
+
+function isSystemUpdate(message: SystemMessage): boolean {
+	const content = message.content as SystemMessage["content"] | null | undefined;
+	if (content != null && contentText(content).length > 0) return true;
+	if (message.sections && Object.keys(message.sections).length > 0) return true;
+	return (message.toolsAdded?.length ?? 0) > 0 || (message.toolsRemoved?.length ?? 0) > 0;
+}
+
+/**
+ * Refuse a request whose transcript changes the system prompt or tools after it started on a
+ * model that cannot render later system messages. Index 0 is the initial snapshot or a
+ * compaction checkpoint and never counts. Transports outside `lazyApi` call this themselves.
+ */
+export function assertSystemUpdatesSupported(model: Model<Api>, context: Pick<TranscriptContext, "messages">): void {
+	if (supportsMidConversationSystemMessages(model)) return;
+	const messages = context.messages;
+	for (let index = 1; index < messages.length; index++) {
+		const message = messages[index];
+		if (message?.role !== "system" || !isSystemUpdate(message)) continue;
+		throw new Error(
+			`Model ${model.provider}/${model.id} does not support mid-conversation system messages, and this conversation changed its system prompt or tools after it started. Switch to a model that supports them, compact the conversation, or start a new one.`,
+		);
+	}
 }
 
 /** Drop only the initial snapshot for APIs that carry the prompt outside the message list. */

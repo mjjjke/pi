@@ -1,6 +1,6 @@
-import { assertSystemUpdatesSupported } from "../providers/instruction-messages.ts";
 import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderStreams } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { assertSystemUpdatesSupported } from "../utils/transcript.ts";
 
 function createSetupErrorMessage(model: Model<Api>, error: unknown, timestamp: number): AssistantMessage {
 	return {

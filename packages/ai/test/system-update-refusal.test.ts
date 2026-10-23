@@ -2,14 +2,14 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { lazyApi } from "../src/api/lazy.ts";
 import { getModel, streamSimple } from "../src/compat.ts";
-import {
-	assertSystemUpdatesSupported,
-	supportsMidConversationSystemMessages,
-} from "../src/providers/instruction-messages.ts";
 import type { Api, AssistantMessage, Message, Model, ProviderStreams, Tool } from "../src/types.ts";
 import { isContextOverflow } from "../src/utils/overflow.ts";
 import { isRetryableAssistantError } from "../src/utils/retry.ts";
-import { normalizeContext } from "../src/utils/transcript.ts";
+import {
+	assertSystemUpdatesSupported,
+	normalizeContext,
+	supportsMidConversationSystemMessages,
+} from "../src/utils/transcript.ts";
 
 function tool(name: string): Tool {
 	return { name, description: `${name} tool`, parameters: Type.Object({}) };

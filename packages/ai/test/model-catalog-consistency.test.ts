@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { getModels } from "../src/compat.ts";
-import {
-	supportsMidConversationInstructionMessages,
-	supportsMidConversationSystemMessages,
-} from "../src/providers/instruction-messages.ts";
+import { supportsMidConversationInstructionMessages } from "../src/providers/instruction-messages.ts";
 import type { Api, Model } from "../src/types.ts";
+import { supportsMidConversationSystemMessages } from "../src/utils/transcript.ts";
 
 const FIRST_PARTY = ["openai", "openai-codex", "azure", "anthropic"] as const;
 
