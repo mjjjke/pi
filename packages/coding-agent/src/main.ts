@@ -707,6 +707,9 @@ export async function main(args: string[], options?: MainOptions) {
 			process.exit(1);
 		}
 	}
+	for (const warning of sessionManager.getLoadWarnings()) {
+		console.error(chalk.yellow(`Warning: ${warning}`));
+	}
 	if (parsed.name !== undefined) {
 		const name = normalizeSessionName(parsed.name);
 		if (name === undefined) {

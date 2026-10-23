@@ -1,10 +1,36 @@
-import { describe, expect, it } from "vitest";
+import * as realFs from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildSessionProjection,
 	type FileEntry,
 	migrateSessionEntries,
 	type SessionEntry,
+	SessionManager,
 } from "../../src/core/session-manager.ts";
+
+// Pass-through fs with fault hooks for the stray-file cases (§4.3).
+const fsHooks = vi.hoisted(() => ({
+	beforeFsync: undefined as undefined | (() => void),
+	failTempWrite: false,
+}));
+vi.mock("fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("fs")>();
+	return {
+		...actual,
+		fsyncSync: (fd: number) => {
+			fsHooks.beforeFsync?.();
+			return actual.fsyncSync(fd);
+		},
+		writeFileSync: (target: unknown, ...rest: unknown[]) => {
+			if (fsHooks.failTempWrite && typeof target === "number") {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			}
+			return (actual.writeFileSync as (...args: unknown[]) => void)(target, ...rest);
+		},
+	};
+});
 
 type Raw = Record<string, unknown> & { id: string; parentId: string | null };
 
@@ -199,5 +225,114 @@ describe("migrateSessionEntries v3 -> v4", () => {
 		const report = migrateSessionEntries(entries);
 		expect(JSON.stringify(entries.slice(1))).toBe(before);
 		expect(report.skipped).toEqual([]);
+	});
+});
+
+describe("stray v3 file opened by SessionManager (§4.3)", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = realFs.mkdtempSync(join(tmpdir(), "pi-stray-"));
+	});
+	afterEach(() => {
+		fsHooks.beforeFsync = undefined;
+		fsHooks.failTempWrite = false;
+		realFs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	const writeV3 = () => {
+		const file = join(dir, "s.jsonl");
+		const entries = [header(), ...chain(dev("d1"), sys("S"), user("u1"), assistant("a1"))];
+		realFs.writeFileSync(file, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+		return file;
+	};
+	const readLines = (file: string) =>
+		realFs
+			.readFileSync(file, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as FileEntry);
+	const otherFiles = () => realFs.readdirSync(dir).filter((name) => name !== "s.jsonl");
+
+	it("rewrites it through a temp file and rename, leaving no temp behind", () => {
+		const file = writeV3();
+		const inode = realFs.statSync(file).ino;
+		const manager = SessionManager.open(file);
+		const lines = readLines(file);
+		expect((lines[0] as { version: number }).version).toBe(4);
+		expect(shape(lines)).toEqual(["system:S<-", "developer:d1<S", "user:u1<d1", "assistant:a1<u1"]);
+		expect(realFs.statSync(file).ino).not.toBe(inode);
+		expect(otherFiles()).toEqual([]);
+		expect(manager.getLoadWarnings()).toEqual([]);
+		expect(manager.buildSessionContext().messages[0]?.role).toBe("system");
+	});
+
+	it("aborts the rewrite when size or mtime changed since the read, and opens the migrated view", () => {
+		const file = writeV3();
+		const concurrent = `${JSON.stringify({ type: "custom", id: "x1", parentId: "a1", timestamp: "t", customType: "c" })}\n`;
+		fsHooks.beforeFsync = () => {
+			fsHooks.beforeFsync = undefined;
+			realFs.appendFileSync(file, concurrent);
+		};
+		const manager = SessionManager.open(file);
+		const lines = readLines(file);
+		expect((lines[0] as { version: number }).version).toBe(3);
+		expect(lines.at(-1)).toMatchObject({ id: "x1" });
+		expect(otherFiles()).toEqual([]);
+		expect(manager.getLoadWarnings()).toEqual([expect.stringContaining("changed while it was being migrated")]);
+		expect(manager.buildSessionContext().messages.map((message) => message.role)).toEqual([
+			"system",
+			"developer",
+			"user",
+			"assistant",
+		]);
+	});
+
+	it("falls back to the in-memory view when the temp write fails, leaving the original untouched", () => {
+		const file = writeV3();
+		const before = realFs.readFileSync(file, "utf8");
+		fsHooks.failTempWrite = true;
+		const manager = SessionManager.open(file);
+		fsHooks.failTempWrite = false;
+		expect(realFs.readFileSync(file, "utf8")).toBe(before);
+		expect(otherFiles()).toEqual([]);
+		expect(manager.getLoadWarnings()).toEqual([expect.stringContaining("ENOSPC")]);
+		expect(manager.buildSessionContext().messages[0]?.role).toBe("system");
+	});
+
+	it("deletes a leftover temp file of a dead process on the next attempt", () => {
+		const file = writeV3();
+		const leftover = join(dir, ".s.jsonl.999999999.tmp");
+		realFs.writeFileSync(leftover, "partial");
+		SessionManager.open(file);
+		expect(otherFiles()).toEqual([]);
+		expect((readLines(file)[0] as { version: number }).version).toBe(4);
+	});
+
+	it("warns once at open for a skipped prefix and bumps the file to v4", () => {
+		const file = join(dir, "s.jsonl");
+		const entries = [header(), ...chain(user("u0"), assistant("a0"), sys("S"), user("u1"))];
+		realFs.writeFileSync(file, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+		const first = SessionManager.open(file);
+		expect(first.getLoadWarnings()).toEqual([expect.stringContaining("not-startup-prefix")]);
+		const second = SessionManager.open(file);
+		expect(second.getLoadWarnings()).toEqual([]);
+		expect((readLines(file)[0] as { version: number }).version).toBe(4);
+	});
+});
+
+describe("old reader (version-3 gate) on a v4 file", () => {
+	it("leaves a v4 file unmigrated and projects it unchanged", () => {
+		const entries = [header(4), ...chain(sys("S"), dev("d1"), custom("h1"), user("u1"), assistant("a1"))];
+		const before = JSON.stringify(entries);
+		// Old builds skip files whose version is >= 3; the current build skips >= 4. Either way nothing changes.
+		migrateSessionEntries(entries);
+		expect(JSON.stringify(entries)).toBe(before);
+		expect(buildSessionProjection(sessionEntries(entries), "a1").messages.map((message) => message.role)).toEqual([
+			"system",
+			"developer",
+			"custom",
+			"user",
+			"assistant",
+		]);
 	});
 });

@@ -17,16 +17,21 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fstatSync,
+	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
 	type Stats,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { readdir, stat } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -772,13 +777,25 @@ function parseSessionEntryLine(line: string): FileEntry | null {
 
 /** Exported for testing */
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
+	return loadSessionFile(filePath).entries;
+}
+
+/** Entries of a session file plus its size/mtime as read (after any torn-tail repair). */
+interface LoadedSessionFile {
+	entries: FileEntry[];
+	stat?: Stats;
+}
+
+function loadSessionFile(filePath: string): LoadedSessionFile {
 	const resolvedFilePath = normalizePath(filePath);
-	if (!existsSync(resolvedFilePath)) return [];
+	if (!existsSync(resolvedFilePath)) return { entries: [] };
 
 	const entries: FileEntry[] = [];
 	let pending = "";
+	let fileStat: Stats;
 	const fd = openSync(resolvedFilePath, "r");
 	try {
+		fileStat = fstatSync(fd);
 		const decoder = new StringDecoder("utf8");
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 
@@ -806,14 +823,106 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	}
 
 	// Validate session header before repairing the file.
-	if (entries.length === 0) return entries;
+	if (entries.length === 0) return { entries, stat: fileStat };
 	const header = entries[0];
 	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return [];
+		return { entries: [] };
 	}
 
-	if (pending) appendFileSync(resolvedFilePath, "\n");
-	return entries;
+	if (pending) {
+		appendFileSync(resolvedFilePath, "\n");
+		fileStat = statSync(resolvedFilePath);
+	}
+	return { entries, stat: fileStat };
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Temp file for a whole-file session write: same directory, never `.jsonl`. */
+function sessionTempPath(target: string, pid: number = process.pid): string {
+	return join(dirname(target), `.${basename(target)}.${pid}.tmp`);
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** Delete leftover temp files of this target written by this process or by a process that no longer runs. */
+function removeStaleSessionTemps(target: string): void {
+	const dir = dirname(target);
+	const prefix = `.${basename(target)}.`;
+	let names: string[];
+	try {
+		names = readdirSync(dir);
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+		const pid = Number(name.slice(prefix.length, -".tmp".length));
+		if (!Number.isInteger(pid) || pid <= 0) continue;
+		if (pid !== process.pid && isProcessAlive(pid)) continue;
+		try {
+			unlinkSync(join(dir, name));
+		} catch {
+			// Best effort: a leftover temp is never read.
+		}
+	}
+}
+
+export interface AtomicSessionWriteOptions {
+	/** `create` publishes with a hard link and fails like `"wx"` if the target exists; `replace` renames over it. */
+	mode: "create" | "replace";
+	/** Called after the temp file is synced and before it is published; throwing aborts the write. */
+	beforePublish?: () => void;
+}
+
+/**
+ * Write a whole session file atomically: temp file in the same directory, fsync, then link (create) or
+ * rename (replace). A failure leaves the target as it was and no temp file behind.
+ */
+export function writeSessionFileAtomic(
+	target: string,
+	entries: readonly FileEntry[],
+	options: AtomicSessionWriteOptions,
+): void {
+	removeStaleSessionTemps(target);
+	const temp = sessionTempPath(target);
+	let tempExists = false;
+	try {
+		const fd = openSync(temp, "wx");
+		tempExists = true;
+		try {
+			for (const entry of entries) {
+				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			}
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		options.beforePublish?.();
+		if (options.mode === "create") {
+			linkSync(temp, target);
+		} else {
+			renameSync(temp, target);
+			tempExists = false;
+		}
+	} finally {
+		if (tempExists) {
+			try {
+				unlinkSync(temp);
+			} catch {
+				// Best effort; removeStaleSessionTemps() deletes it on the next attempt.
+			}
+		}
+	}
 }
 
 /**
@@ -1143,6 +1252,7 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private loadWarnings: string[] = [];
 
 	private constructor(
 		cwd: string,
@@ -1150,7 +1260,7 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
-		preloadedFileEntries?: FileEntry[],
+		preloaded?: LoadedSessionFile,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
@@ -1160,9 +1270,9 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this._setSessionFile(sessionFile, preloadedFileEntries);
-		} else if (preloadedFileEntries?.length) {
-			this._loadEntries(preloadedFileEntries, newSessionOptions);
+			this._setSessionFile(sessionFile, preloaded);
+		} else if (preloaded?.entries.length) {
+			this._loadEntries(preloaded.entries, newSessionOptions);
 		} else {
 			this.newSession(newSessionOptions);
 		}
@@ -1173,10 +1283,12 @@ export class SessionManager {
 		this._setSessionFile(sessionFile);
 	}
 
-	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
+	private _setSessionFile(sessionFile: string, preloaded?: LoadedSessionFile): void {
 		this.sessionFile = resolvePath(sessionFile);
+		this.loadWarnings = [];
 		if (existsSync(this.sessionFile)) {
-			const entries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
+			const loaded = preloaded ?? loadSessionFile(this.sessionFile);
+			const entries = loaded.entries;
 
 			// If file was empty, initialize it with a valid session header. If it was
 			// non-empty but did not parse as a pi session, fail without modifying it.
@@ -1187,13 +1299,13 @@ export class SessionManager {
 				}
 				this.newSession();
 				this.sessionFile = explicitPath;
-				this._rewriteFile();
+				this._writeWholeFile("replace");
 				this.flushed = true;
 				return;
 			}
 
-			this._loadEntries(entries);
 			this.flushed = true;
+			this._loadEntries(entries, undefined, loaded.stat);
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1221,6 +1333,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.loadWarnings = [];
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1229,16 +1342,13 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions): void {
+	private _loadEntries(entries: FileEntry[], options?: NewSessionOptions, fileStat?: Stats): void {
 		const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
 
 		if (header) {
 			this.fileEntries = entries;
 			this.sessionId = header.id;
-
-			if (migrateToCurrentVersion(this.fileEntries).migrated) {
-				this._rewriteFile();
-			}
+			if ((header.version ?? 1) < CURRENT_SESSION_VERSION) this._migrateStrayFile(entries, fileStat);
 		} else {
 			this.newSession(options);
 			this.fileEntries = this.fileEntries.concat(entries);
@@ -1268,16 +1378,55 @@ export class SessionManager {
 		}
 	}
 
-	private _rewriteFile(): void {
-		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
+	/**
+	 * Migrate an older file in memory and rewrite it atomically (§4.3 stray-file rule). The rewrite is
+	 * abandoned when the file changed since it was read; the session then uses the migrated in-memory
+	 * view (or the raw entries if migrating threw), with a load warning.
+	 */
+	private _migrateStrayFile(entries: FileEntry[], fileStat: Stats | undefined): void {
+		const label = this.sessionFile ?? "in-memory session";
+		let migrated: FileEntry[];
 		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			migrated = structuredClone(entries);
+			const report = migrateToCurrentVersion(migrated);
+			for (const skip of report.skipped) {
+				this.loadWarnings.push(
+					`Session ${label}: startup prefix ending at ${skip.systemEntryId} left unchanged (${skip.reason}).`,
+				);
 			}
-		} finally {
-			closeSync(fd);
+		} catch (error) {
+			this.loadWarnings.push(`Session ${label}: migration failed, opened unmigrated: ${errorMessage(error)}`);
+			return;
 		}
+		this.fileEntries = migrated;
+		if (!this.persist || !this.sessionFile || !fileStat) return;
+		const file = this.sessionFile;
+		try {
+			writeSessionFileAtomic(file, migrated, {
+				mode: "replace",
+				beforePublish: () => {
+					const now = statSync(file);
+					if (now.size !== fileStat.size || now.mtimeMs !== fileStat.mtimeMs) {
+						throw new Error("the file changed while it was being migrated");
+					}
+				},
+			});
+		} catch (error) {
+			this.loadWarnings.push(
+				`Session ${label}: not rewritten as v${CURRENT_SESSION_VERSION}, using the migrated view in memory: ${errorMessage(error)}`,
+			);
+		}
+	}
+
+	/** Atomically write all file entries (whole-file writes only; appends go through `_persist`). */
+	private _writeWholeFile(mode: AtomicSessionWriteOptions["mode"]): void {
+		if (!this.persist || !this.sessionFile) return;
+		writeSessionFileAtomic(this.sessionFile, this.fileEntries, { mode });
+	}
+
+	/** Warnings from opening the current file (stray-file migration skips or a failed rewrite). */
+	getLoadWarnings(): string[] {
+		return [...this.loadWarnings];
 	}
 
 	isPersisted(): boolean {
@@ -1864,7 +2013,7 @@ export class SessionManager {
 			// Use the same rule as _persist(): write now if the branched path already
 			// has a conversation, otherwise let _persist() create the file later.
 			if (this._hasConversation()) {
-				this._rewriteFile();
+				this._writeWholeFile("create");
 				this.flushed = true;
 			} else {
 				this.flushed = false;
@@ -1913,7 +2062,7 @@ export class SessionManager {
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const resolvedPath = resolvePath(path);
 		let header: SessionHeader | null = null;
-		let preloadedFileEntries: FileEntry[] | undefined;
+		let preloaded: LoadedSessionFile | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
 			try {
 				header = readSessionHeader(resolvedPath);
@@ -1921,15 +2070,15 @@ export class SessionManager {
 				if (!(error instanceof SessionHeaderScanLimitError)) throw error;
 				// The bounded scan is only a discovery optimization. A full load remains
 				// authoritative for legacy files with very large headers or prefixes.
-				preloadedFileEntries = loadEntriesFromFile(resolvedPath);
-				const firstEntry = preloadedFileEntries[0];
+				preloaded = loadSessionFile(resolvedPath);
+				const firstEntry = preloaded.entries[0];
 				header = firstEntry?.type === "session" ? firstEntry : null;
 			}
 		}
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries);
+		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloaded);
 	}
 
 	/**
@@ -1949,7 +2098,7 @@ export class SessionManager {
 
 	/** Create an in-memory session (no file persistence), optionally from entries held outside the filesystem. */
 	static inMemory(cwd: string = process.cwd(), options?: NewSessionOptions, entries?: FileEntry[]): SessionManager {
-		return new SessionManager(cwd, "", undefined, false, options, entries);
+		return new SessionManager(cwd, "", undefined, false, options, entries ? { entries } : undefined);
 	}
 
 	/**
