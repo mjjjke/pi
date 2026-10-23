@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
+	type DeveloperMessage,
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Message,
@@ -69,6 +70,38 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Set on a developer message that delivers the standing instruction with this key (a keyed developer). */
+	standingKey?: string;
+}
+
+/** When a pending standing instruction is delivered: after the next input (default) or at the next request. */
+export type StandingInstructionApply = "next-input" | "next-request";
+export type StandingInstructionContent = string | TextContent[];
+
+/** Desired value of a standing instruction (non-context state entry). Absent content clears the key. */
+export interface StandingInstructionEntry extends SessionEntryBase {
+	type: "standing_instruction";
+	key: string;
+	content?: StandingInstructionContent;
+	/** Absent: next-input. */
+	apply?: StandingInstructionApply;
+}
+
+/** A standing value carried by a compaction into its new epoch. */
+export interface CompactionStandingItem {
+	key: string;
+	message: DeveloperMessage;
+}
+
+/** Derived per-branch state of one standing-instruction key (§7.2). */
+export interface StandingInstructionState {
+	key: string;
+	/** Undefined: no desired value on this branch (never set, or cleared). */
+	desired?: { content: StandingInstructionContent; apply: StandingInstructionApply };
+	/** The value currently in effect for the model, and the keyed developer or compaction that delivered it. */
+	delivered?: { content: StandingInstructionContent; entryId: string };
+	/** A desired value whose content differs from the delivered content. */
+	pending: boolean;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -106,6 +139,12 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	fromHook?: boolean;
 	/** Complete prompt and tool state at this compaction boundary. */
 	systemMessage?: SystemMessage;
+	/**
+	 * Standing values in effect for the next request, carried into the new epoch after the checkpoint.
+	 * Present (possibly empty) on every compaction written by a standing-aware build; its kept range then
+	 * hides keyed developers.
+	 */
+	standing?: CompactionStandingItem[];
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -201,7 +240,8 @@ export type SessionEntry =
 	| CustomMessageEntry
 	| ContextEditEntry
 	| LabelEntry
-	| SessionInfoEntry;
+	| SessionInfoEntry
+	| StandingInstructionEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -269,6 +309,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getSessionName"
+	| "getStandingState"
 >;
 
 function createSessionId(): string {
@@ -526,6 +567,102 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	return entries;
 }
 
+/** JSON with sorted object keys, for content comparison. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, item: unknown) =>
+		item && typeof item === "object" && !Array.isArray(item)
+			? Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
+			: item,
+	);
+}
+
+function isKeyedDeveloper(
+	entry: SessionEntry,
+): entry is SessionMessageEntry & { standingKey: string; message: DeveloperMessage } {
+	return entry.type === "message" && entry.standingKey !== undefined && entry.message.role === "developer";
+}
+
+/**
+ * Derive desired, delivered and pending standing values from a branch (root to leaf, in order), in key order
+ * (first appearance on the branch). Pure; nothing is cached (§7.2).
+ */
+export function getStandingState(branch: readonly SessionEntry[]): StandingInstructionState[] {
+	const order: string[] = [];
+	const note = (key: string) => {
+		if (!order.includes(key)) order.push(key);
+	};
+	const states = new Map<string, StandingInstructionState["desired"] | null>();
+	const latestKeyed = new Map<string, StandingInstructionContent>();
+	let delivered = new Map<string, NonNullable<StandingInstructionState["delivered"]>>();
+
+	branch.forEach((entry, index) => {
+		if (entry.type === "standing_instruction") {
+			note(entry.key);
+			states.set(
+				entry.key,
+				entry.content === undefined ? null : { content: entry.content, apply: entry.apply ?? "next-input" },
+			);
+		} else if (isKeyedDeveloper(entry)) {
+			const content = entry.message.content as StandingInstructionContent;
+			note(entry.standingKey);
+			delivered.set(entry.standingKey, { content, entryId: entry.id });
+			latestKeyed.set(entry.standingKey, content);
+		} else if (entry.type === "compaction") {
+			delivered = new Map();
+			if (Array.isArray(entry.standing)) {
+				for (const item of entry.standing) {
+					const content = item.message.content as StandingInstructionContent;
+					note(item.key);
+					delivered.set(item.key, { content, entryId: entry.id });
+					latestKeyed.set(item.key, content);
+				}
+				return;
+			}
+			// Older compaction: the keyed developers its kept range retains stay delivered (Astra recheck 3 F2).
+			const start = branch.findIndex((candidate) => candidate.id === entry.firstKeptEntryId);
+			if (start < 0 || start >= index) return;
+			for (const kept of branch.slice(start, index)) {
+				if (isKeyedDeveloper(kept)) {
+					delivered.set(kept.standingKey, {
+						content: kept.message.content as StandingInstructionContent,
+						entryId: kept.id,
+					});
+				}
+			}
+		}
+	});
+
+	return order.map((key): StandingInstructionState => {
+		const state = states.get(key);
+		const legacy = latestKeyed.get(key);
+		// Without a state entry, the latest keyed value is desired (legacy tags, §7.9).
+		const desired =
+			state === undefined
+				? legacy === undefined
+					? undefined
+					: { content: legacy, apply: "next-input" as const }
+				: (state ?? undefined);
+		const current = delivered.get(key);
+		const pending =
+			desired !== undefined &&
+			(current === undefined || canonicalJson(desired.content) !== canonicalJson(current.content));
+		return {
+			key,
+			...(desired ? { desired } : {}),
+			...(current ? { delivered: current } : {}),
+			pending,
+		};
+	});
+}
+
+function deepFreeze<T>(value: T): T {
+	if (value && typeof value === "object") {
+		for (const item of Object.values(value)) deepFreeze(item);
+		Object.freeze(value);
+	}
+	return value;
+}
+
 export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
@@ -619,7 +756,8 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	}
 	if (entry.type === "compaction") {
 		const summary = createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-		return entry.systemMessage ? [entry.systemMessage, summary] : [summary];
+		const carried = entry.standing?.map((item) => item.message) ?? [];
+		return entry.systemMessage ? [entry.systemMessage, ...carried, summary] : [...carried, summary];
 	}
 	return [];
 }
@@ -655,6 +793,8 @@ export function buildContextEntries(
 		return path;
 	}
 
+	// A standing-aware compaction carries the values in effect; its kept keyed copies are hidden.
+	const hideKeyed = Array.isArray(compaction.standing);
 	const contextEntries: SessionEntry[] = [compaction];
 	let foundFirstKept = false;
 	for (let i = 0; i < compactionIdx; i++) {
@@ -662,9 +802,13 @@ export function buildContextEntries(
 		if (entry.id === compaction.firstKeptEntryId) {
 			foundFirstKept = true;
 		}
-		if (foundFirstKept && !(entry.type === "message" && entry.message.role === "system")) {
-			contextEntries.push(entry);
+		if (!foundFirstKept || entry.type !== "message") {
+			if (foundFirstKept) contextEntries.push(entry);
+			continue;
 		}
+		if (entry.message.role === "system") continue;
+		if (hideKeyed && entry.standingKey !== undefined) continue;
+		contextEntries.push(entry);
 	}
 	contextEntries.push(...path.slice(compactionIdx + 1));
 	return contextEntries;
@@ -1542,13 +1686,18 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	appendMessage(message: Message | CustomMessage | BashExecutionMessage, options?: { standingKey?: string }): string {
+		const standingKey = options?.standingKey;
+		if (standingKey !== undefined && (message.role !== "developer" || !standingKey)) {
+			throw new Error("standingKey requires a developer message and a non-empty key");
+		}
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
+			...(standingKey !== undefined ? { standingKey } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1606,9 +1755,11 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		usage?: Usage,
+		options?: { carry?: "desired" | "delivered" },
 	): string {
 		const timestamp = new Date().toISOString();
 		const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
+		const standing = this._buildStandingCarry(options?.carry ?? "delivered", new Date(timestamp).getTime());
 		const id = generateId(this.byId);
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1622,9 +1773,53 @@ export class SessionManager {
 			usage,
 			fromHook,
 			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			standing,
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	/**
+	 * Standing values in effect for the next request, in key order (§7.4): `desired` between runs (a pending
+	 * value counts as delivered), `delivered` mid-run (a pending value stays pending). Cleared keys carry nothing.
+	 */
+	private _buildStandingCarry(carry: "desired" | "delivered", timestamp: number): CompactionStandingItem[] {
+		const items: CompactionStandingItem[] = [];
+		for (const state of getStandingState(this.getBranch())) {
+			if (!state.desired) continue;
+			const content = carry === "desired" ? state.desired.content : state.delivered?.content;
+			if (content === undefined) continue;
+			items.push({
+				key: state.key,
+				message: deepFreeze({ role: "developer", content: structuredClone(content), timestamp }),
+			});
+		}
+		return items;
+	}
+
+	/** Append the desired value of a standing instruction (non-context state entry); undefined content clears it. */
+	appendStandingInstruction(
+		key: string,
+		content: StandingInstructionContent | undefined,
+		apply?: StandingInstructionApply,
+	): string {
+		if (!key) throw new Error("Standing instruction key must not be empty");
+		const entry: StandingInstructionEntry = {
+			type: "standing_instruction",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			key,
+			...(content !== undefined ? { content: structuredClone(content) } : {}),
+			...(content !== undefined && apply ? { apply } : {}),
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Derived standing-instruction state of the active branch (§7.2). */
+	getStandingState(): StandingInstructionState[] {
+		return getStandingState(this.getBranch());
 	}
 
 	/** Append a custom entry (for extensions) as child of current leaf, then advance leaf. Returns entry id. */
