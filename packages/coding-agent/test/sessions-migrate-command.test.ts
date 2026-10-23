@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	mkdirSync,
@@ -320,6 +320,38 @@ describe("pi sessions migrate data safety (review A)", () => {
 		expect(statSync(join(store, "z-later-created.jsonl")).mtimeMs).toBe(200_000);
 		expect(findMostRecentSession(store)).toBe(before);
 	});
+	it("recheck N2: mtimes that differ within 1 ms keep their order, so pi -c resumes the same session", async () => {
+		const root = tempDir();
+		const store = join(root, "copies");
+		for (const [name, seconds] of [
+			["a-older", 200.0001],
+			["z-newer", 200.0004],
+		] as const) {
+			utimesSync(writeV3(join(store, `${name}.jsonl`)), seconds, seconds);
+		}
+		const before = findMostRecentSession(store);
+		expect(before).toBe(join(store, "z-newer.jsonl"));
+		expect((await run(["migrate", "--dir", store], { agentDir: join(root, "agent") })).code).toBe(0);
+		expect(versionOf(join(store, "a-older.jsonl"))).toBe(4);
+		expect(findMostRecentSession(store)).toBe(before);
+	});
+
+	it.skipIf(process.platform !== "linux" || spawnSync("setfacl", ["--version"]).status !== 0)(
+		"recheck N1: a store with a default ACL is reported failed and left untouched",
+		async () => {
+			const root = tempDir();
+			const store = join(root, "copies");
+			const file = writeV3(join(store, "a.jsonl"));
+			chmodSync(file, 0o640);
+			const acl = spawnSync("setfacl", ["-d", "-m", "u:65534:r", store]);
+			if (acl.status !== 0) return; // filesystem without ACL support
+			const content = readFileSync(file, "utf8");
+			const result = await run(["migrate", "--dir", store], { agentDir: join(root, "agent") });
+			expect(result.code).toBe(1);
+			expect(result.out).toContain(`Failed: 1\n  ${file}: refusing to rewrite`);
+			expect(readFileSync(file, "utf8")).toBe(content);
+		},
+	);
 });
 
 describe("live pi process probe", () => {

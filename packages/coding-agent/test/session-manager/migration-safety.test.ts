@@ -3,6 +3,7 @@
  * non-context block slots, read-only loading, concurrent appends during a stray rewrite, failed branched
  * files, permissions and mtimes of rewritten files, and unparseable journal lines.
  */
+import { execFileSync } from "node:child_process";
 import * as realFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -217,6 +218,71 @@ describe("finding 5: rewrites keep the original permissions", () => {
 		SessionManager.open(file);
 		expect(JSON.parse(realFs.readFileSync(file, "utf8").split("\n")[0]!).version).toBe(4);
 		expect(realFs.statSync(file).mode & 0o777).toBe(0o640);
+	});
+});
+
+/** True when this filesystem accepts POSIX ACLs and the acl tools are installed (Linux only). */
+function aclsSupported(): boolean {
+	if (process.platform !== "linux") return false;
+	const probe = realFs.mkdtempSync(join(tmpdir(), "pi-acl-probe-"));
+	try {
+		execFileSync("setfacl", ["-d", "-m", "u:65534:r", probe], { stdio: "ignore" });
+		execFileSync("getfacl", ["-s", "-p", probe], { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	} finally {
+		realFs.rmSync(probe, { recursive: true, force: true });
+	}
+}
+
+describe.skipIf(!aclsSupported())("recheck N1: a rewrite never lets inherited ACL grants through", () => {
+	it("a directory default ACL refuses the replacement and leaves the file untouched", () => {
+		const aclDir = join(dir, "acl");
+		realFs.mkdirSync(aclDir);
+		const file = join(aclDir, "s.jsonl");
+		realFs.writeFileSync(file, line(header()));
+		realFs.chmodSync(file, 0o640);
+		execFileSync("setfacl", ["-d", "-m", "u:65534:r", aclDir]);
+		const before = realFs.readFileSync(file, "utf8");
+		expect(() => writeSessionFileAtomic(file, [header(4)], { mode: "replace" })).toThrow(/ACL/);
+		expect(realFs.readFileSync(file, "utf8")).toBe(before);
+		expect(execFileSync("getfacl", ["-s", "-p", file], { encoding: "utf8" })).toBe("");
+		expect(realFs.readdirSync(aclDir)).toEqual(["s.jsonl"]);
+	});
+
+	it("an extended ACL on the file refuses the replacement; a stray open warns and keeps the file", () => {
+		const file = join(dir, "acl-file.jsonl");
+		realFs.writeFileSync(
+			file,
+			[header(), ...chain(msg("s", "system", "p"), msg("u", "user", "u"))].map(line).join(""),
+		);
+		execFileSync("setfacl", ["-m", "u:65534:r", file]);
+		const before = realFs.readFileSync(file, "utf8");
+		const manager = SessionManager.open(file);
+		expect(realFs.readFileSync(file, "utf8")).toBe(before);
+		expect(manager.getLoadWarnings()).toEqual([expect.stringContaining("ACL")]);
+	});
+});
+
+describe("recheck N2: rewrites keep sub-millisecond mtimes", () => {
+	it("two files whose mtimes differ within 1 ms keep their order after migration", () => {
+		const older = join(dir, "a-older.jsonl");
+		const newer = join(dir, "z-newer.jsonl");
+		for (const file of [older, newer]) {
+			realFs.writeFileSync(file, [header(), ...chain(msg("s", "system", "p"))].map(line).join(""));
+		}
+		realFs.utimesSync(older, 200.0001, 200.0001);
+		realFs.utimesSync(newer, 200.0004, 200.0004);
+		const olderMs = realFs.statSync(older).mtimeMs;
+		const newerMs = realFs.statSync(newer).mtimeMs;
+		expect(olderMs).toBeLessThan(newerMs);
+		for (const file of [older, newer]) {
+			writeSessionFileAtomic(file, [header(4)], { mode: "replace", preserveTimes: true });
+		}
+		expect(realFs.statSync(older).mtimeMs).toBeCloseTo(olderMs, 3);
+		expect(realFs.statSync(newer).mtimeMs).toBeCloseTo(newerMs, 3);
+		expect(realFs.statSync(older).mtimeMs).toBeLessThan(realFs.statSync(newer).mtimeMs);
 	});
 });
 

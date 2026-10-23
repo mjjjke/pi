@@ -12,6 +12,7 @@ import {
 	type UserMessage,
 	uuidv7,
 } from "@earendil-works/pi-ai";
+import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -1121,12 +1122,40 @@ export interface AtomicSessionWriteOptions {
 }
 
 /**
+ * Refuse a replacement whose temp could get access the original lacks (Linux, POSIX ACLs): the temp
+ * inherits the directory's default ACL, and restoring the original's group bits would enable its named
+ * grants; an extended ACL on the original would be lost. Without `getfacl` installed nothing is checked.
+ */
+function assertNoExtendedAcls(target: string, targetExists: boolean): void {
+	if (process.platform !== "linux") return;
+	const paths = targetExists ? [dirname(target), target] : [dirname(target)];
+	let listing: string;
+	try {
+		// -s lists only paths with ACL entries beyond the mode bits (a default ACL counts).
+		listing = execFileSync("getfacl", ["-s", "-p", ...paths], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw new Error(`cannot check ACLs before rewriting ${target}, left unchanged: ${errorMessage(error)}`);
+	}
+	if (listing.trim()) {
+		throw new Error(
+			`refusing to rewrite ${target}: its directory has a default ACL or the file has an extended ACL, which a replacement cannot keep exactly; the file is left unchanged (remove the ACL, or rewrite the file manually)`,
+		);
+	}
+}
+
+/**
  * Write a whole session file atomically: temp file in the same directory, fsync, then link (create) or
  * rename (replace). A failure leaves the target as it was and no temp file behind.
  *
  * `create` gives the file the default permissions (as a `"wx"` write would). `replace` creates the temp
- * owner-only, then copies the target's permission bits and (best effort) its owner and group before
- * publishing, so a rewrite never broadens access. ACLs and extended attributes are not copied.
+ * owner-only, then copies the target's permission bits, (best effort) its owner and group, and with
+ * `preserveTimes` its atime/mtime at full precision before publishing. ACLs and extended attributes are
+ * not copied, so on Linux `replace` refuses (throws, target untouched) when the directory has a default
+ * ACL or the target an extended ACL: the temp would inherit grants the original lacks.
  */
 export function writeSessionFileAtomic(
 	target: string,
@@ -1144,6 +1173,7 @@ export function writeSessionFileAtomic(
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			}
+			assertNoExtendedAcls(target, original !== undefined);
 		}
 		const fd = openSync(temp, "wx", options.mode === "replace" ? 0o600 : 0o666);
 		tempExists = true;
@@ -1161,7 +1191,8 @@ export function writeSessionFileAtomic(
 					}
 				}
 				fchmodSync(fd, stats.mode & 0o7777);
-				if (options.preserveTimes) futimesSync(fd, stats.atime, stats.mtime);
+				// Numeric seconds keep sub-millisecond precision (Date rounds to ms and could reorder `pi -c`).
+				if (options.preserveTimes) futimesSync(fd, stats.atimeMs / 1000, stats.mtimeMs / 1000);
 			}
 			fsyncSync(fd);
 		} finally {
