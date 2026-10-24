@@ -964,7 +964,9 @@ export class AgentSession {
 			this._failedResponse = undefined;
 			const prepare = async () => {
 				// Notices of a compaction run by the virtual routing below (the boundary hook wrote earlier ones).
-				this._flushCompactionNotices();
+				// Checked on every call: the compaction or a notice observer may have refused writes since the
+				// guard above, and no request goes out then (§3.6).
+				this._flushCompactionNoticesBeforeRequest();
 				const projection = this.sessionManager.buildSessionProjection();
 				const canonicalContext = {
 					...request.context,
@@ -1028,7 +1030,7 @@ export class AgentSession {
 		const previousGetInstructionMessages = this.agent.getInstructionMessages;
 		this.agent.getInstructionMessages = async (context) => {
 			// Compaction notices go after this boundary's input and before its instructions.
-			const notices = this._flushCompactionNotices();
+			const notices = this._flushCompactionNoticesBeforeRequest();
 			const previous = (await previousGetInstructionMessages?.(context)) ?? [];
 			const inputArrived = this._inputArrived;
 			this._inputArrived = false;
@@ -3523,6 +3525,17 @@ export class AgentSession {
 			this._announceCustomMessage(appMessage);
 			written.push(appMessage);
 		}
+		return written;
+	}
+
+	/**
+	 * `_flushCompactionNotices()` at a request boundary, then refuse the request when writes are refused:
+	 * an announcement listener can hit a sticky append failure and swallow its error (§3.6).
+	 */
+	private _flushCompactionNoticesBeforeRequest(): CustomMessage[] {
+		const written = this._flushCompactionNotices();
+		const persistenceError = this.sessionManager.getPersistenceError();
+		if (persistenceError) throw persistenceError;
 		return written;
 	}
 

@@ -105,20 +105,58 @@ function noticeEntries(harness: Harness): number {
 		.filter((entry) => entry.type === "custom_message" && entry.customType === NOTICE).length;
 }
 
-/** Each request's messages, recorded at the provider. */
-function recorder() {
+/** Complete provider messages of a request and the journal projection at the same instant, as JSON. */
+interface RecordedRequest {
+	request: string[];
+	journal: string[];
+}
+
+const recorded = new WeakMap<string[], RecordedRequest>();
+
+function messageJson(messages: Array<Message | AgentMessage>): string[] {
+	return messages.map((message) => JSON.stringify(message));
+}
+
+/**
+ * Each request's messages, recorded at the provider: readable labels (diagnostics) plus the complete
+ * messages, system/developer and tool ids included, and the journal projection when it was sent.
+ */
+function recorder(harness: Harness) {
 	const requests: string[][] = [];
 	const answer =
 		(text: string): FauxResponseStep =>
 		(context: Context) => {
-			requests.push(labels(context.messages));
+			const requestLabels = labels(context.messages);
+			recorded.set(requestLabels, {
+				request: messageJson(context.messages),
+				journal: messageJson(convertToLlm(harness.sessionManager.buildSessionProjection().messages)),
+			});
+			requests.push(requestLabels);
 			return fauxAssistantMessage(text);
 		};
 	return { requests, answer };
 }
 
+function complete(requestLabels: string[]): RecordedRequest {
+	const entry = recorded.get(requestLabels);
+	if (!entry) throw new Error("request was not recorded");
+	return entry;
+}
+
+/** Both requests sent exactly the journal, and the later one repeats the earlier one unchanged. */
 function expectPrefix(earlier: string[], later: string[]): void {
 	expect(later.slice(0, earlier.length)).toEqual(earlier);
+	const first = complete(earlier);
+	const second = complete(later);
+	expect(first.request).toEqual(first.journal);
+	expect(second.request).toEqual(second.journal);
+	expect(second.request.slice(0, first.request.length)).toEqual(first.request);
+}
+
+/** The final journal starts with the complete messages of `last`. */
+function expectJournalExtends(harness: Harness, last: string[]): void {
+	const journal = messageJson(convertToLlm(harness.sessionManager.buildSessionProjection().messages));
+	expect(journal.slice(0, complete(last).request.length)).toEqual(complete(last).request);
 }
 
 const largeTool: AgentTool = {
@@ -173,7 +211,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 			},
 			(harness) => harness.session.followUp("FOLLOW-UP"),
 		);
-		const { requests, answer } = recorder();
+		const { requests, answer } = recorder(harness);
 		harness.setResponses([
 			fauxAssistantMessage("SEED-ANSWER"),
 			answer("FIRST-ANSWER"),
@@ -193,6 +231,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 		expectPrefix(second, third);
 		expect(third.slice(second.length)).toEqual(["assistant:FOLLOW-UP-ANSWER", "user:LATE", "user:FINAL-PROMPT"]);
 		expect(journalLabels(harness)).toEqual([...third, "assistant:FINAL-ANSWER"]);
+		expectJournalExtends(harness, third);
 		expect(noticeEvents(harness)).toBe(1);
 		expect(noticeEntries(harness)).toBe(1);
 	});
@@ -203,7 +242,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 			settings: { compaction: { enabled: true, reserveTokens: 400, keepRecentTokens: 1750 } },
 			tools: [largeTool],
 		});
-		const { requests, answer } = recorder();
+		const { requests, answer } = recorder(harness);
 		harness.setResponses([
 			fauxAssistantMessage(`OLD ${"a".repeat(800)}`),
 			fauxAssistantMessage(`RECENT ${"b".repeat(800)}`),
@@ -223,6 +262,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 		expectPrefix(resumed, final);
 		expect(final.slice(resumed.length)).toEqual(["assistant:RESUMED-ANSWER", "user:FINAL-PROMPT"]);
 		expect(journalLabels(harness)).toEqual([...final, "assistant:FINAL-ANSWER"]);
+		expectJournalExtends(harness, final);
 		expect(noticeEvents(harness)).toBe(1);
 		expect(noticeEntries(harness)).toBe(1);
 	});
@@ -232,7 +272,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 			models: [{ id: "faux-1", contextWindow: 4000 }],
 			settings: { compaction: { enabled: false, reserveTokens: 2000, keepRecentTokens: 10 } },
 		});
-		const { requests, answer } = recorder();
+		const { requests, answer } = recorder(harness);
 		harness.setResponses([
 			fauxAssistantMessage("SEED-ANSWER"),
 			answer("FIRST-ANSWER"),
@@ -254,6 +294,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 		expect(triggered.slice(-2)).toEqual(["user:TRIGGER", "user:SNAPSHOT snap-1"]);
 		expectPrefix(triggered, final);
 		expect(journalLabels(harness)).toEqual([...final, "assistant:FINAL-ANSWER"]);
+		expectJournalExtends(harness, final);
 		expect(noticeEvents(harness)).toBe(1);
 	});
 
@@ -262,7 +303,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 			models: [{ id: "faux-1", contextWindow: 4000 }],
 			settings: { compaction: { enabled: true, reserveTokens: 2000, keepRecentTokens: 10 } },
 		});
-		const { requests, answer } = recorder();
+		const { requests, answer } = recorder(harness);
 		harness.setResponses([fauxAssistantMessage("SEED-ANSWER"), answer("FIRST-ANSWER"), answer("FINAL-ANSWER")]);
 		await harness.session.prompt("SEED");
 
@@ -272,6 +313,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 		await harness.session.prompt("FINAL-PROMPT");
 
 		expect(requests[1].slice(-2)).toEqual(["user:SNAPSHOT snap-1", "user:FINAL-PROMPT"]);
+		expect(complete(requests[1]).request).toEqual(complete(requests[1]).journal);
 		expect(noticeEvents(harness)).toBe(1);
 	});
 
@@ -302,7 +344,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 		harness.session.agent.streamFunction = (model, context, options) => runtime.streamSimple(model, context, options);
 		await harness.session.setModel(runtime.getModel("router", "auto")!);
 		harness.session.setThinkingLevel("high");
-		const { requests, answer } = recorder();
+		const { requests, answer } = recorder(harness);
 		harness.setResponses([fauxAssistantMessage("y".repeat(8000)), answer("SMALL-ANSWER"), answer("FINAL-ANSWER")]);
 		await harness.session.prompt("hello");
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
@@ -317,8 +359,117 @@ describe("AgentSession: passive messages from session_compact keep request order
 		expect(small.slice(-2)).toEqual(["user:NEXT-PROMPT", "user:SNAPSHOT snap-1"]);
 		expectPrefix(small, final);
 		expect(journalLabels(harness)).toEqual([...final, "assistant:FINAL-ANSWER"]);
+		expectJournalExtends(harness, final);
 		expect(noticeEvents(harness)).toBe(1);
 	});
+
+	/** A file-backed session whose snapshot observer makes the next append fail and swallows the error. */
+	async function setupObserverFailure(options: HarnessOptions, onCompact?: (harness: Harness) => unknown) {
+		const dir = mkdtempSync(join(tmpdir(), "pi-compaction-notice-"));
+		const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
+		let file = "";
+		cleanups.push(() => {
+			if (file) chmodSync(file, 0o644);
+			rmSync(dir, { recursive: true, force: true });
+		});
+		const harness = await setup({ ...options, sessionManager }, onCompact);
+		harness.session.subscribe((event) => {
+			if (event.type !== "message_end" || event.message.role !== "custom" || event.message.customType !== NOTICE) {
+				return;
+			}
+			file = sessionManager.getSessionFile()!;
+			chmodSync(file, 0o444);
+			// An SDK observer persists a delivery receipt; it catches its own failure.
+			try {
+				sessionManager.appendCustomEntry("notice-delivery-receipt", {});
+			} catch {}
+		});
+		const refusedAtProvider: boolean[] = [];
+		const answer =
+			(text: string): FauxResponseStep =>
+			() => {
+				refusedAtProvider.push(sessionManager.getPersistenceError() !== undefined);
+				return fauxAssistantMessage(text);
+			};
+		return { harness, sessionManager, refusedAtProvider, answer };
+	}
+
+	it.skipIf(process.getuid?.() === 0)(
+		"virtual routing: no request leaves after a snapshot observer hit a sticky write failure",
+		async () => {
+			const { harness, sessionManager, refusedAtProvider, answer } = await setupObserverFailure({
+				models: [
+					{ id: "small", contextWindow: 1000 },
+					{ id: "large", contextWindow: 50_000, maxTokens: 4000, reasoning: true },
+				],
+				settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
+				extensionFactories: [
+					(pi) => {
+						pi.registerVirtualModel({
+							provider: "router",
+							id: "auto",
+							name: "Auto",
+							thinkingLevels: ["low", "high"],
+							contextWindow: 1000,
+							route: (request, ctx) =>
+								request.thinkingLevel === "high"
+									? { model: ctx.modelRegistry.find("faux", "large")!, thinkingLevel: "high" }
+									: { model: ctx.modelRegistry.find("faux", "small")!, thinkingLevel: "off" },
+						});
+					},
+				],
+			});
+			const runtime = harness.session.modelRuntime;
+			harness.session.agent.streamFunction = (model, context, options) =>
+				runtime.streamSimple(model, context, options);
+			await harness.session.setModel(runtime.getModel("router", "auto")!);
+			harness.session.setThinkingLevel("high");
+			harness.setResponses([fauxAssistantMessage("y".repeat(8000)), answer("UNEXPECTED")]);
+			await harness.session.prompt("hello");
+			harness.session.setThinkingLevel("low");
+			harness.events.length = 0;
+
+			await expect(harness.session.prompt("NEXT-PROMPT")).resolves.toBeUndefined();
+
+			expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+			expect(sessionManager.getPersistenceError()?.code).toBe("EACCES");
+			expect(refusedAtProvider).toEqual([]);
+			expect(noticeEvents(harness)).toBe(1);
+			const types = harness.events.map((event) => event.type);
+			expect(types.filter((type) => type === "agent_settled")).toEqual(["agent_settled"]);
+			expect(harness.session.isStreaming).toBe(false);
+		},
+	);
+
+	it.skipIf(process.getuid?.() === 0)(
+		"queued follow-up: no request leaves after a snapshot observer hit a sticky write failure",
+		async () => {
+			const { harness, sessionManager, refusedAtProvider, answer } = await setupObserverFailure(
+				{
+					models: [{ id: "faux-1", contextWindow: 4000 }],
+					settings: { compaction: { enabled: true, reserveTokens: 2000, keepRecentTokens: 10 } },
+				},
+				(harness) => harness.session.followUp("FOLLOW-UP"),
+			);
+			harness.setResponses([
+				fauxAssistantMessage("SEED-ANSWER"),
+				fauxAssistantMessage("FIRST-ANSWER"),
+				answer("UNEXPECTED"),
+			]);
+			await harness.session.prompt("SEED");
+			harness.events.length = 0;
+
+			await expect(harness.session.prompt(`FIRST-PROMPT ${"x".repeat(12000)}`)).resolves.toBeUndefined();
+
+			expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+			expect(sessionManager.getPersistenceError()?.code).toBe("EACCES");
+			expect(refusedAtProvider).toEqual([]);
+			expect(noticeEvents(harness)).toBe(1);
+			const types = harness.events.map((event) => event.type);
+			expect(types.filter((type) => type === "agent_settled")).toEqual(["agent_settled"]);
+			expect(harness.session.isStreaming).toBe(false);
+		},
+	);
 
 	it.skipIf(process.getuid?.() === 0)(
 		"a failed write of the snapshot at the request boundary refuses the request and keeps it buffered",
@@ -346,7 +497,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 				if (message.role === "user" && getMessageText(message) === "FOLLOW-UP") chmodSync(file, 0o444);
 				return id;
 			});
-			const { requests, answer } = recorder();
+			const { requests, answer } = recorder(harness);
 			harness.setResponses([fauxAssistantMessage("SEED-ANSWER"), answer("FIRST-ANSWER"), answer("UNEXPECTED")]);
 			await harness.session.prompt("SEED");
 			harness.events.length = 0;
