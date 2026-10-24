@@ -923,6 +923,18 @@ export interface SessionCompactEvent {
 	willRetry: boolean;
 }
 
+/**
+ * Fired once per committed context change that core makes without `session_compact`: a compaction or
+ * `context_edit` drafted by a `turn_end` / `agent_before_settle` handler, and each recovery omission (retry or
+ * overflow recovery). Emitted after the whole batch is committed, on the real commit path only (never for
+ * previews). Like `session_compact`, a passive `pi.sendMessage(..., { triggerTurn: false })` from a handler
+ * during a run is written at the next provider request boundary. Not replayed after a crash.
+ */
+export interface SessionContextChangeEvent {
+	type: "session_context_change";
+	entry: CompactionEntry | ContextEditEntry;
+}
+
 /** Fired after context compaction fails or is aborted */
 export interface SessionCompactFailedEvent {
 	type: "session_compact_failed";
@@ -984,6 +996,7 @@ export type SessionEvent =
 	| SessionBeforeForkEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
+	| SessionContextChangeEvent
 	| StandingInstructionDeliveredEvent
 	| SessionCompactFailedEvent
 	| SessionShutdownEvent
@@ -1917,6 +1930,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): () => void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): () => void;
+	on(event: "session_context_change", handler: ExtensionHandler<SessionContextChangeEvent>): () => void;
 	on(
 		event: "standing_instruction_delivered",
 		handler: ExtensionHandler<StandingInstructionDeliveredEvent>,

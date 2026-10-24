@@ -179,6 +179,7 @@ export type {
 	SessionBoundaryDraft,
 	SessionCompactEvent,
 	SessionCompactFailedEvent,
+	SessionContextChangeEvent,
 	SessionEvent,
 	SessionInfoChangedEvent,
 	SessionShutdownEvent,

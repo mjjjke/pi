@@ -884,7 +884,8 @@ describe("AgentSession.queueDeveloperMessage", () => {
 			},
 		};
 		const harness: Harness = await setup({
-			models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+			// 2700: room for the compaction boundary in the resumed request (the faux usage counts it).
+			models: [{ id: "faux-1", contextWindow: 2700, maxTokens: 100 }],
 			settings: { compaction: { enabled: true, reserveTokens: 400, keepRecentTokens: 1750 } },
 			tools: [largeTool],
 			extensionFactories: [

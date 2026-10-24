@@ -84,6 +84,7 @@ export {
 	type SessionBeforeTreeEvent,
 	type SessionBoundaryDraft,
 	type SessionCompactEvent,
+	type SessionContextChangeEvent,
 	type SessionShutdownEvent,
 	type SessionStartEvent,
 	type SessionTreeEvent,

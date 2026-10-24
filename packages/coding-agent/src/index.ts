@@ -178,6 +178,7 @@ export type {
 	SessionBeforeTreeResult,
 	SessionBoundaryDraft,
 	SessionCompactEvent,
+	SessionContextChangeEvent,
 	SessionCompactFailedEvent,
 	SessionInfoChangedEvent,
 	SessionShutdownEvent,

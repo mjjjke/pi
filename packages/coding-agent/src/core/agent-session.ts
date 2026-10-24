@@ -1507,7 +1507,7 @@ export class AgentSession {
 			},
 			(entries) => this._buildBoundaryContext(entries, "turn_end"),
 		);
-		this._commitBoundaryDrafts(boundary.entries);
+		await this._commitBoundaryDrafts(boundary.entries);
 		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
 			this._reportInvalidBoundaryContinuation("turn_end");
 			return false;
@@ -1655,10 +1655,14 @@ export class AgentSession {
 		};
 	}
 
-	private _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): void {
+	private async _commitBoundaryDrafts(drafts: SessionBoundaryDraft[]): Promise<void> {
 		const appended = this._applyBoundaryDrafts(this.sessionManager, drafts);
 		this._refreshFinalizedContext();
 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
+		// After the whole batch is committed and the context refreshed: one event per change.
+		for (const entry of appended) {
+			if (entry.type === "compaction" || entry.type === "context_edit") await this._emitSessionContextChange(entry);
+		}
 	}
 
 	private _reportInvalidBoundaryContinuation(event: "turn_end" | "agent_before_settle"): void {
@@ -1689,6 +1693,17 @@ export class AgentSession {
 		this._sessionCompactDepth++;
 		try {
 			await this._extensionRunner.emit(event);
+		} finally {
+			this._sessionCompactDepth--;
+		}
+	}
+
+	/** Like `session_compact`, passive sends of its handlers are compaction notices (next request boundary). */
+	private async _emitSessionContextChange(entry: CompactionEntry | ContextEditEntry): Promise<void> {
+		if (!this._extensionRunner.hasHandlers("session_context_change")) return;
+		this._sessionCompactDepth++;
+		try {
+			await this._extensionRunner.emit({ type: "session_context_change", entry });
 		} finally {
 			this._sessionCompactDepth--;
 		}
@@ -1991,7 +2006,7 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private _omitRecoveryAttempt(message: AssistantMessage, toolResults: AgentMessage[] = []): void {
+	private async _omitRecoveryAttempt(message: AssistantMessage, toolResults: AgentMessage[] = []): Promise<void> {
 		const targets = [message, ...toolResults];
 		const targetIds = targets.map((target) => this._findPersistedMessageEntryId(target));
 		const unresolvedProjectedTarget = targets.some(
@@ -2000,13 +2015,18 @@ export class AgentSession {
 		if (unresolvedProjectedTarget) {
 			throw new Error("Cannot persist recovery omission because a projected message has no source entry");
 		}
+		const edits: ContextEditEntry[] = [];
 		for (const targetId of targetIds) {
 			if (!targetId) continue;
 			const editId = this.sessionManager.appendContextEdit(targetId, null);
 			const entry = this.sessionManager.getEntry(editId);
-			if (entry) this._emit({ type: "entry_appended", entry });
+			if (entry) {
+				this._emit({ type: "entry_appended", entry });
+				if (entry.type === "context_edit") edits.push(entry);
+			}
 		}
 		this._refreshFinalizedContext();
+		for (const entry of edits) await this._emitSessionContextChange(entry);
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
@@ -2860,7 +2880,7 @@ export class AgentSession {
 				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
 				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
 			);
-			this._commitBoundaryDrafts(result.entries);
+			await this._commitBoundaryDrafts(result.entries);
 			this._flushPendingCustomMessages();
 			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
 			if (this._abortDuringBeforeSettle) return false;
@@ -4285,7 +4305,10 @@ export class AgentSession {
 
 			// Persistently omit the selected final attempt before post-run recovery compaction.
 			this._overflowRecoveryAttempted = true;
-			this._omitRecoveryAttempt(assistantMessage, toolResults);
+			await this._omitRecoveryAttempt(assistantMessage, toolResults);
+			// The omission's context-change handlers are awaited: an abort, disposal or refused write meanwhile
+			// must not start the recovery compaction.
+			if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) return false;
 			const retry = await this._runAutoCompaction("overflow", willRetry);
 			if (retry) this._failedResponse = assistantMessage;
 			return retry;
@@ -5113,19 +5136,34 @@ export class AgentSession {
 			errorMessage: message.errorMessage || "Unknown error",
 		});
 
-		// Keep the failed attempt in raw history while durably omitting it from model projection.
-		this._omitRecoveryAttempt(message);
-
-		// Wait with exponential backoff (abortable)
-		this._retryAbortController = new AbortController();
+		// The retry is cancellable from here on (abortRetry), also while the omission's handlers run.
+		const controller = new AbortController();
+		this._retryAbortController = controller;
 		try {
-			await sleep(delayMs, this._retryAbortController.signal);
-		} catch {
-			// Aborted during sleep - emit end event so UI can clean up
-			this._finishCancelledRetry();
-			return false;
+			// Keep the failed attempt in raw history while durably omitting it from model projection.
+			await this._omitRecoveryAttempt(message);
+			// Its context-change handlers are awaited: on an abort, disposal or refused write meanwhile, finish
+			// the cancelled retry instead of arming its backoff.
+			if (
+				controller.signal.aborted ||
+				this._agentRunAbortRequested ||
+				this._disposed ||
+				this._isSessionWriteBlocked()
+			) {
+				this._finishCancelledRetry();
+				return false;
+			}
+
+			// Wait with exponential backoff (abortable)
+			try {
+				await sleep(delayMs, controller.signal);
+			} catch {
+				// Aborted during sleep - emit end event so UI can clean up
+				this._finishCancelledRetry();
+				return false;
+			}
 		} finally {
-			this._retryAbortController = undefined;
+			if (this._retryAbortController === controller) this._retryAbortController = undefined;
 		}
 
 		return true;
