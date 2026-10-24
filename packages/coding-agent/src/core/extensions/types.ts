@@ -902,6 +902,11 @@ export interface StandingInstructionDeliveredEvent {
 	entryId: string;
 }
 
+/**
+ * Fired after a compaction entry is written. A passive `pi.sendMessage(..., { triggerTurn: false })` from
+ * a handler during a run is written at the next provider request boundary (after its input and tool
+ * results, before `context` handlers), not at the turn end, so that request already contains it.
+ */
 export interface SessionCompactEvent {
 	type: "session_compact";
 	compactionEntry: CompactionEntry;

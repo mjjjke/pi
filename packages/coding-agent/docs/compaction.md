@@ -367,6 +367,10 @@ pi.on("session_before_compact", async (event, ctx) => {
 
 See [custom-compaction.ts](../examples/extensions/custom-compaction.ts) for a complete example using a different model.
 
+### session_compact
+
+Fired after the compaction entry is written, with that entry (`compactionEntry`), `fromExtension`, `reason` and `willRetry`. A passive message sent from a handler while a run is active (`pi.sendMessage(message, { triggerTurn: false })`, e.g. a state snapshot for the new epoch) is written at the next provider request boundary: after that request's queued input, steering and tool results, and before its queued developer instructions (for a compaction that virtual-model routing runs inside the request preparation: after them) and its `context` handlers. The first request after the compaction therefore contains it, in the position it keeps in the session file, so later requests repeat that request as an unchanged prefix. With no further request in the run (no queued input), it is written at run end. Other passive messages sent during a run still wait for the end of the turn.
+
 ### session_compact_failed
 
 Fired when manual or automatic compaction fails or is aborted. This is useful for telemetry extensions that need to pair `session_before_compact` attempts with terminal outcomes.

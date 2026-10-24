@@ -106,6 +106,7 @@ import {
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionBoundaryDraft,
+	type SessionCompactEvent,
 	type SessionCompactFailedEvent,
 	type SessionStartEvent,
 	type ShutdownHandler,
@@ -532,6 +533,13 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
+	/** Nesting depth of `session_compact` dispatch; passive messages buffered meanwhile are compaction notices. */
+	private _sessionCompactDepth = 0;
+	/**
+	 * Buffered passive messages sent by `session_compact` handlers during a run. They are written at the next
+	 * provider request boundary instead of the turn end, so the request sends them where the journal has them.
+	 */
+	private _compactionNotices = new WeakSet<CustomMessage>();
 	/** One-shot developer instructions held until B (status `staged`), FIFO. No drain but B commits them. */
 	private _stagedInstructions: PendingInstruction[] = [];
 	/** Custom and bash content held until B, in ingress order. */
@@ -955,6 +963,8 @@ export class AgentSession {
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
+				// Notices of a compaction run by the virtual routing below (the boundary hook wrote earlier ones).
+				this._flushCompactionNotices();
 				const projection = this.sessionManager.buildSessionProjection();
 				const canonicalContext = {
 					...request.context,
@@ -1017,10 +1027,12 @@ export class AgentSession {
 	private _installAgentInstructionBoundary(): void {
 		const previousGetInstructionMessages = this.agent.getInstructionMessages;
 		this.agent.getInstructionMessages = async (context) => {
+			// Compaction notices go after this boundary's input and before its instructions.
+			const notices = this._flushCompactionNotices();
 			const previous = (await previousGetInstructionMessages?.(context)) ?? [];
 			const inputArrived = this._inputArrived;
 			this._inputArrived = false;
-			const anchor = convertToLlm(context.messages)
+			const anchor = convertToLlm([...context.messages, ...notices])
 				.filter((message) => message.role !== "system" && message.role !== "developer")
 				.at(-1)?.role;
 			if (anchor !== "user" && anchor !== "toolResult") return previous;
@@ -1664,6 +1676,16 @@ export class AgentSession {
 			steering: [...this._steeringMessages],
 			followUp: [...this._followUpMessages],
 		});
+	}
+
+	/** Passive messages its handlers send during a run are compaction notices (`_flushCompactionNotices`). */
+	private async _emitSessionCompact(event: SessionCompactEvent): Promise<void> {
+		this._sessionCompactDepth++;
+		try {
+			await this._extensionRunner.emit(event);
+		} finally {
+			this._sessionCompactDepth--;
+		}
 	}
 
 	private async _emitSessionCompactFailed(event: Omit<SessionCompactFailedEvent, "type">): Promise<void> {
@@ -3373,7 +3395,8 @@ export class AgentSession {
 	 *
 	 * Handles four cases:
 	 * - Streaming: queues message, processed when loop pulls from queue
-	 * - Streaming + triggerTurn false: appended to state/session once the current turn ends
+	 * - Streaming + triggerTurn false: appended to state/session once the current turn ends (sent from a
+	 *   `session_compact` handler: at the next provider request boundary instead)
 	 * - Not streaming + triggerTurn: appends to state/session, starts new turn
 	 * - Not streaming + no trigger: appends to state/session, no turn
 	 *
@@ -3418,6 +3441,7 @@ export class AgentSession {
 			// to the end of the turn. Nothing is emitted yet: message events must not
 			// describe messages the session tree does not contain.
 			this._pendingCustomMessages.push(appMessage);
+			if (this._sessionCompactDepth > 0) this._compactionNotices.add(appMessage);
 		} else if (this._isStagingBranch()) {
 			// Before B: held after the snapshot, announced now (#5943).
 			this._stagedContent.push({ message: structuredClone(appMessage), announced: true });
@@ -3476,6 +3500,30 @@ export class AgentSession {
 					: "";
 			this._extensionRunner.emitError({ ...SESSION_PERSISTENCE_REPORT, error: `${message}${lost}` });
 		}
+	}
+
+	/**
+	 * Write the buffered compaction notices at a provider request boundary, before the projection and the
+	 * `context` hooks: after the boundary's input and tool results, so tool-call adjacency holds, and
+	 * where the request sends them (F2). Other buffered passive messages keep waiting for the turn end.
+	 * Skipped while writes are refused (the request is refused too); a failed append throws, which
+	 * refuses the request, and keeps that notice and the later ones buffered (§3.6).
+	 */
+	private _flushCompactionNotices(): CustomMessage[] {
+		const written: CustomMessage[] = [];
+		if (this._isSessionWriteBlocked()) return written;
+		for (const appMessage of this._pendingCustomMessages.slice()) {
+			if (!this._compactionNotices.has(appMessage)) continue;
+			// A listener of an earlier announcement may have flushed the buffer.
+			const index = this._pendingCustomMessages.indexOf(appMessage);
+			if (index === -1) continue;
+			this._writeCustomMessage(appMessage);
+			this._pendingCustomMessages.splice(index, 1);
+			this._compactionNotices.delete(appMessage);
+			this._announceCustomMessage(appMessage);
+			written.push(appMessage);
+		}
+		return written;
 	}
 
 	private _flushPendingCustomMessages(): void {
@@ -4034,7 +4082,7 @@ export class AgentSession {
 
 			await this._emitStandingDelivered(delivered);
 			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
+				await this._emitSessionCompact({
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
 					fromExtension,
@@ -4367,7 +4415,7 @@ export class AgentSession {
 
 			await this._emitStandingDelivered(delivered);
 			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
+				await this._emitSessionCompact({
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
 					fromExtension,
