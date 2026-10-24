@@ -73,12 +73,14 @@ After compaction (new entry appended):
 
 What the LLM sees:
 
-  ┌────────┬─────────┬─────┬─────┬──────┬──────┬─────┬──────┐
-  │ system │ summary │ usr │ ass │ tool │ tool │ ass │ tool │
-  └────────┴─────────┴─────┴─────┴──────┴──────┴─────┴──────┘
-       ↑         ↑      └─────────────────┬────────────────┘
-    prompt   from cmp          messages from firstKeptEntryId
+  ┌────────┬─────────┬─────┬─────┬──────┬──────┬─────┬──────┬──────────┐
+  │ system │ summary │ usr │ ass │ tool │ tool │ ass │ tool │ boundary │
+  └────────┴─────────┴─────┴─────┴──────┴──────┴─────┴──────┴──────────┘
+       ↑         ↑      └─────────────────┬────────────────┘      ↑
+    prompt   from cmp          messages from firstKeptEntryId   from cmp
 ```
+
+Projection order after a compaction is `[checkpoint, carried standing, summary, kept…, boundary, new…]`. The boundary (this fork) is the compaction's stored `boundary` text, projected once after the kept range (directly after the summary when nothing is kept) as user-role text: kept messages are older than the summary, their state describes when they were sent, earlier context-size readings no longer apply, messages after it are new. It is context, never input: no turn, no input events, no `next-input` standing delivery, not counted by `pendingMessageCount`; a transcript that ends with it still ends with the message before it, so after a final reply queued input runs after it and nothing else continues (`Agent.isContextMarker`). It can be the last message before a reply when a compaction runs mid-run or for overflow recovery, which is why it says it is not a request. It is never summarized and never a cut point. Compactions written before it existed carry no `boundary` and project as before.
 
 On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. A retain-none compaction records its own ID as `firstKeptEntryId`; repeated compaction starts after that entry. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Pi also recalculates `tokensBefore` from the rebuilt, context-edited session projection before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced. Omitted raw entries remain stored but do not affect cut selection, summaries, checkpoints, or token estimates.
 
@@ -370,6 +372,10 @@ See [custom-compaction.ts](../examples/extensions/custom-compaction.ts) for a co
 ### session_compact
 
 Fired after the compaction entry is written, with that entry (`compactionEntry`), `fromExtension`, `reason` and `willRetry`. A passive message sent from a handler while a run is active (`pi.sendMessage(message, { triggerTurn: false })`, e.g. a state snapshot for the new epoch) is written at the next provider request boundary: after that request's queued input, steering and tool results, and before its queued developer instructions (for a compaction that virtual-model routing runs inside the request preparation: after them) and its `context` handlers. The first request after the compaction therefore contains it, in the position it keeps in the session file, so later requests repeat that request as an unchanged prefix. With no further request in the run (no queued input), it is written at run end. Other passive messages sent during a run still wait for the end of the turn.
+
+### session_context_change
+
+Fired once per context change that core commits without `session_compact` (this fork): each compaction or `context_edit` drafted by a `turn_end` / `agent_before_settle` handler, and each recovery omission (`context_edit` with `replacement: null`) written for a retry or overflow recovery. `event.entry` is the committed entry; handlers run after the whole batch is committed and the context refreshed, so `ctx.sessionManager.getBranch()` and the projection already include every change of the batch. Previews of drafts never emit it; it is not replayed after a crash (derive missed changes from the branch). Passive sends from its handlers are written at the next provider request boundary, like `session_compact` notices. The handlers are awaited: an abort, disposal or refused write meanwhile cancels the pending retry or recovery compaction.
 
 ### session_compact_failed
 

@@ -274,6 +274,18 @@ interface CompactionSummaryMessage {
 
 Pi creates this context message from a persisted `compaction` entry.
 
+### CompactionBoundaryMessage
+
+```typescript
+interface CompactionBoundaryMessage {
+  role: "compactionBoundary";
+  text: string;
+  timestamp: number;
+}
+```
+
+This fork projects it once after the kept range of the newest compaction that stores a `boundary` text (timestamp = the compaction's). It reaches the model as user-role text and is never input. It exists only in the projection (`session.messages`, RPC `get_messages`), not as a session entry.
+
 ## AgentMessage union
 
 In the coding agent, the union is equivalent to:
@@ -288,7 +300,8 @@ type AgentMessage =
   | BashExecutionMessage
   | CustomMessage
   | BranchSummaryMessage
-  | CompactionSummaryMessage;
+  | CompactionSummaryMessage
+  | CompactionBoundaryMessage;
 ```
 
 At the lower-level agent package, `AgentMessage` is `Message | CustomAgentMessages[keyof CustomAgentMessages]`. Applications can add roles through TypeScript declaration merging, so consumers should tolerate unknown custom roles when they accept messages from an augmented host.
