@@ -430,6 +430,77 @@ describe("session_context_change (A8)", () => {
 			expect(journalTexts(harness).slice(-2)).toEqual(["DONE", "PASSIVE NOTICE"]);
 		});
 	}
+
+	for (const variant of ["explicit continuation", "queued follow-up", "draft compaction"] as const) {
+		it(`dispose while the agent_before_settle change event is awaited (${variant}): no request after disposal`, async () => {
+			let armed = true;
+			let enter!: () => void;
+			let release!: () => void;
+			const entered = new Promise<void>((resolve) => {
+				enter = resolve;
+			});
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			let calls = 0;
+			const harness = await setup({
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("agent_before_settle", (event, ctx) => {
+							if (!armed) return;
+							armed = false;
+							const target = ctx.sessionManager
+								.getBranch()
+								.find((entry) => entry.type === "message" && entry.message.role === "user")!.id;
+							if (variant === "queued follow-up") pi.sendUserMessage("FOLLOWUP", { deliverAs: "followUp" });
+							const change =
+								variant === "draft compaction"
+									? { type: "compaction" as const, summary: "DRAFT", firstKeptEntryId: target }
+									: { type: "context_edit" as const, targetId: target, replacement: { content: "EDITED" } };
+							return {
+								entries: [
+									...event.entries,
+									change,
+									...(variant === "queued follow-up"
+										? []
+										: [
+												{
+													type: "custom_message" as const,
+													customType: "continue",
+													content: "CONTINUE",
+													display: false,
+												},
+											]),
+								],
+								continue: variant !== "queued follow-up",
+							};
+						});
+						pi.on("session_context_change", async () => {
+							enter();
+							await gate;
+						});
+					},
+				],
+			});
+			cleanups.push(() => release());
+			harness.setResponses([
+				fauxAssistantMessage("DONE"),
+				() => {
+					calls++;
+					return fauxAssistantMessage("UNEXPECTED");
+				},
+			]);
+			const run = harness.session.prompt("WORK");
+			await entered;
+			harness.session.dispose();
+			release();
+			await run;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(calls).toBe(0);
+			expect(harness.session.isStreaming).toBe(false);
+		});
+	}
 });
 
 type SessionEntryLike = { id: string; type: string; message?: { role: string } };

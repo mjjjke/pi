@@ -1508,6 +1508,7 @@ export class AgentSession {
 			(entries) => this._buildBoundaryContext(entries, "turn_end"),
 		);
 		await this._commitBoundaryDrafts(boundary.entries);
+		if (this._disposed) return false;
 		if (boundary.continue && !this._buildBoundaryContext([], "turn_end").canContinue) {
 			this._reportInvalidBoundaryContinuation("turn_end");
 			return false;
@@ -1662,6 +1663,8 @@ export class AgentSession {
 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
 		// After the whole batch is committed and the context refreshed: one event per change.
 		for (const entry of appended) {
+			// A handler may dispose the session: its runtime is invalidated, so no later event goes out.
+			if (this._disposed) return;
 			if (entry.type === "compaction" || entry.type === "context_edit") await this._emitSessionContextChange(entry);
 		}
 	}
@@ -2729,13 +2732,14 @@ export class AgentSession {
 				// Each await below may hit the first refused write (e.g. a failed replacement's flush):
 				// recheck before anything that would start another run.
 				if (this._isSessionWriteBlocked()) break;
+				// dispose() during an await below cannot cancel a run that has not started: recheck it too.
 				if (await this._handlePostAgentRun()) {
-					if (this._agentRunAbortRequested || this._isSessionWriteBlocked()) break;
+					if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) break;
 					await this.agent.continue();
 					continue;
 				}
 				if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary())) break;
-				if (this._agentRunAbortRequested || this._isSessionWriteBlocked()) break;
+				if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) break;
 				await this.agent.continue();
 			}
 		} finally {
@@ -2881,7 +2885,10 @@ export class AgentSession {
 				{ type: "agent_before_settle", outcome: this._lastActivityOutcome },
 				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
 			);
+			if (this._disposed) return false;
 			await this._commitBoundaryDrafts(result.entries);
+			// A change handler may have disposed the session: settle without another run.
+			if (this._disposed) return false;
 			this._flushPendingCustomMessages({ keepCompactionNotices: true });
 			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
 			if (this._abortDuringBeforeSettle) return false;
