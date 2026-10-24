@@ -1730,6 +1730,9 @@ export class AgentSession {
 			let entryId: string | undefined;
 			if (this._committedInstructions.has(event.message)) {
 				// Queued developer instructions are committed before their lifecycle events.
+			} else if (this._isPersistenceFailureReport(event.message)) {
+				// The loop's failure message for a failed append cannot be written either (§3.6). Throwing
+				// here would skip turn_end/agent_end and leave the run without its end events.
 			} else if (event.message.role === "custom") {
 				// Custom message from extensions
 				// Persist as CustomMessageEntry
@@ -1783,6 +1786,16 @@ export class AgentSession {
 			this._flushPendingCustomMessages();
 		}
 	};
+
+	/** The assistant error message the agent loop emits for the sticky persistence error itself. */
+	private _isPersistenceFailureReport(message: AgentMessage): boolean {
+		const persistenceError = this.sessionManager.getPersistenceError();
+		return (
+			persistenceError !== undefined &&
+			message.role === "assistant" &&
+			message.errorMessage === persistenceError.message
+		);
+	}
 
 	private async _requestNewSession(options?: RequestNewSessionOptions): Promise<RequestNewSessionResult> {
 		if (this._pendingNewSessionRequest) {
