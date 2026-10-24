@@ -344,6 +344,8 @@ export function estimateTokens(message: AgentMessage): number {
 			chars = message.summary.length;
 			return Math.ceil(chars / 4);
 		}
+		case "compactionBoundary":
+			return Math.ceil(message.text.length / 4);
 	}
 
 	return 0;

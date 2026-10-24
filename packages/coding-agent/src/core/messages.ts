@@ -73,6 +73,17 @@ export interface CompactionSummaryMessage {
 	timestamp: number;
 }
 
+/**
+ * Marks where the kept range of the newest compaction ends (projection only, never journaled on its own).
+ * Rendered as user-role text; it is not input: no turn, no input events, no `next-input` delivery.
+ */
+export interface CompactionBoundaryMessage {
+	role: "compactionBoundary";
+	text: string;
+	/** The compaction entry's timestamp. */
+	timestamp: number;
+}
+
 // Extend CustomAgentMessages via declaration merging
 declare module "@earendil-works/pi-agent-core" {
 	interface CustomAgentMessages {
@@ -80,6 +91,7 @@ declare module "@earendil-works/pi-agent-core" {
 		custom: CustomMessage;
 		branchSummary: BranchSummaryMessage;
 		compactionSummary: CompactionSummaryMessage;
+		compactionBoundary: CompactionBoundaryMessage;
 	}
 }
 
@@ -124,6 +136,10 @@ export function createCompactionSummaryMessage(
 		tokensBefore,
 		timestamp: new Date(timestamp).getTime(),
 	};
+}
+
+export function createCompactionBoundaryMessage(text: string, timestamp: string): CompactionBoundaryMessage {
+	return { role: "compactionBoundary", text, timestamp: new Date(timestamp).getTime() };
 }
 
 /** Convert CustomMessageEntry to AgentMessage format */
@@ -186,6 +202,12 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						content: [
 							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
 						],
+						timestamp: m.timestamp,
+					};
+				case "compactionBoundary":
+					return {
+						role: "user",
+						content: [{ type: "text" as const, text: m.text }],
 						timestamp: m.timestamp,
 					};
 				case "system":

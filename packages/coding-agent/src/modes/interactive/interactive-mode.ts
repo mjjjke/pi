@@ -4035,6 +4035,8 @@ export class InteractiveMode {
 				this.chatContainer.addChild(component);
 				break;
 			}
+			// Model-facing marker after the kept range; the compaction summary already shows the event.
+			case "compactionBoundary":
 			case "system":
 			case "developer":
 				break;
