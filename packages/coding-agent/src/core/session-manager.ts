@@ -43,6 +43,7 @@ import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
+	COMPACTION_BOUNDARY_TEXT_V1,
 	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -149,6 +150,12 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	 * hides keyed developers.
 	 */
 	standing?: CompactionStandingItem[];
+	/**
+	 * Literal text projected once after the kept range (`compactionBoundary` message): kept messages are older
+	 * than the summary, earlier context-size readings no longer apply. Absent on compactions written before it
+	 * existed; those project as before.
+	 */
+	boundary?: string;
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -1937,6 +1944,7 @@ export class SessionManager {
 			fromHook,
 			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
 			standing,
+			boundary: COMPACTION_BOUNDARY_TEXT_V1,
 		};
 		this._appendEntry(entry);
 		return entry.id;
