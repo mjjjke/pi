@@ -11,7 +11,7 @@ type FakeExtensionRunner = {
 };
 
 type FakeSession = {
-	sessionManager: { getHeader: () => object | undefined };
+	sessionManager: { getHeader: () => object | undefined; getPersistenceError: () => undefined };
 	agent: { waitForIdle: () => Promise<void>; subscribe: ReturnType<typeof vi.fn> };
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
@@ -66,7 +66,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	const state = { messages: [assistantMessage] };
 
 	const session: FakeSession = {
-		sessionManager: { getHeader: () => undefined },
+		sessionManager: { getHeader: () => undefined, getPersistenceError: () => undefined },
 		agent: { waitForIdle: async () => {}, subscribe: vi.fn(() => () => {}) },
 		state,
 		extensionRunner,
@@ -107,7 +107,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.prompt).toHaveBeenCalledWith("Say done", { images });
+		expect(session.prompt).toHaveBeenCalledWith("Say done", { images, startPersisted: expect.any(Function) });
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
@@ -122,7 +122,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.prompt).toHaveBeenCalledWith("hello");
+		expect(session.prompt).toHaveBeenCalledWith("hello", { startPersisted: expect.any(Function) });
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});

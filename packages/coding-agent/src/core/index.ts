@@ -10,6 +10,7 @@ export {
 	type ModelCycleResult,
 	type PromptOptions,
 	type SessionStats,
+	type StartPersistedReceipt,
 } from "./agent-session.ts";
 export {
 	AgentSessionRuntime,

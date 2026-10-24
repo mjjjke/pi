@@ -7,6 +7,7 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { StartPersistedReceipt } from "../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -136,13 +137,20 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		// input-hook or auth preflight when binding returned.
 		await session.waitForDeferredPrompts();
 
+		// A prompt whose starting message never reached the journal, or a session that can no longer
+		// write, fails the command in every output mode (its run reports the error and still resolves).
+		let unsent = false;
+		const startPersisted = (receipt: StartPersistedReceipt) => {
+			if (!receipt.persisted) unsent = true;
+		};
 		if (initialMessage) {
-			await session.prompt(initialMessage, { images: initialImages });
+			await session.prompt(initialMessage, { images: initialImages, startPersisted });
 		}
 
 		for (const message of messages) {
-			await session.prompt(message);
+			await session.prompt(message, { startPersisted });
 		}
+		if (unsent || session.sessionManager.getPersistenceError()) exitCode = 1;
 
 		if (mode === "text") {
 			const state = session.state;
