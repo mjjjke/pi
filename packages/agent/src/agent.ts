@@ -127,6 +127,11 @@ export interface AgentOptions {
 	prepareRequest?: PrepareRequest;
 	getInstructionMessages?: AgentLoopConfig["getInstructionMessages"];
 	getTools?: AgentLoopConfig["getTools"];
+	/**
+	 * Context markers: messages that are model context but never input (e.g. a compaction boundary).
+	 * `continue()` skips them when it decides what the transcript ends with.
+	 */
+	isContextMarker?: (message: AgentMessage) => boolean;
 	prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -186,10 +191,13 @@ function isInstructionMessage(message: AgentMessage): boolean {
 	return message.role === "system" || message.role === "developer";
 }
 
-function findLastNonInstructionMessage(messages: AgentMessage[]): AgentMessage | undefined {
+function findLastNonInstructionMessage(
+	messages: AgentMessage[],
+	isContextMarker?: (message: AgentMessage) => boolean,
+): AgentMessage | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
-		if (!isInstructionMessage(message)) return message;
+		if (!isInstructionMessage(message) && !isContextMarker?.(message)) return message;
 	}
 	return undefined;
 }
@@ -227,6 +235,8 @@ export class Agent {
 	public getInstructionMessages?: AgentLoopConfig["getInstructionMessages"];
 	/** Live tool loadout refreshed at every request boundary; see {@link AgentLoopConfig.getTools}. Unset by default. */
 	public getTools?: AgentLoopConfig["getTools"];
+	/** See `AgentOptions.isContextMarker`. */
+	public isContextMarker?: (message: AgentMessage) => boolean;
 	public prepareNextTurn?: (
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
@@ -263,6 +273,7 @@ export class Agent {
 		this.prepareRequest = runtimeOptions.prepareRequest;
 		this.getInstructionMessages = runtimeOptions.getInstructionMessages;
 		this.getTools = runtimeOptions.getTools;
+		this.isContextMarker = runtimeOptions.isContextMarker;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
 		this.steeringQueue = new PendingMessageQueue(runtimeOptions.steeringMode ?? "one-at-a-time");
@@ -407,7 +418,7 @@ export class Agent {
 			throw new Error("Agent is already processing. Wait for completion before continuing.");
 		}
 
-		const lastMessage = findLastNonInstructionMessage(this._state.messages);
+		const lastMessage = findLastNonInstructionMessage(this._state.messages, this.isContextMarker);
 		if (!lastMessage) {
 			throw new Error("No messages to continue from");
 		}

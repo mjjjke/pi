@@ -820,6 +820,52 @@ describe("Agent", () => {
 		expect(agent.state.messages[agent.state.messages.length - 1].role).toBe("assistant");
 	});
 
+	describe("context markers (isContextMarker)", () => {
+		const marker = { role: "user" as const, content: "MARKER", timestamp: 0 };
+		const isMarker = (message: unknown) => message === marker;
+		const requests: string[][] = [];
+		const streamFn: StreamFn = (_model, context) => {
+			requests.push(
+				context.messages.map((message) =>
+					typeof message.content === "string"
+						? message.content
+						: message.content.map((part) => (part.type === "text" ? part.text : part.type)).join(""),
+				),
+			);
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Processed") });
+			});
+			return stream;
+		};
+
+		it("a marker after an assistant message does not anchor a continuation: queued follow-ups run", async () => {
+			requests.length = 0;
+			const agent = new Agent({ streamFn, isContextMarker: isMarker });
+			agent.state.messages = [createUserMessage("Initial"), createAssistantMessage("Initial response"), marker];
+			agent.followUp(createUserMessage("Queued follow-up"));
+			await agent.continue();
+			expect(requests).toEqual([["Initial", "Initial response", "MARKER", "Queued follow-up"]]);
+		});
+
+		it("a marker after an assistant message without queued input cannot be continued", async () => {
+			requests.length = 0;
+			const agent = new Agent({ streamFn });
+			agent.isContextMarker = isMarker;
+			agent.state.messages = [createUserMessage("Initial"), createAssistantMessage("Initial response"), marker];
+			await expect(agent.continue()).rejects.toThrow("Cannot continue from message role: assistant");
+			expect(requests).toEqual([]);
+		});
+
+		it("a marker after a user message continues from it", async () => {
+			requests.length = 0;
+			const agent = new Agent({ streamFn, isContextMarker: isMarker });
+			agent.state.messages = [createUserMessage("Initial"), marker];
+			await agent.continue();
+			expect(requests).toEqual([["Initial", "MARKER"]]);
+		});
+	});
+
 	it.each([
 		{ mode: "one-at-a-time" as const, expectedRequests: 2 },
 		{ mode: "all" as const, expectedRequests: 1 },
