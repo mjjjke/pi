@@ -4,7 +4,9 @@ import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { StartMessagePersistence } from "../../src/core/agent-session.ts";
+import type { AgentSession, StartMessagePersistence } from "../../src/core/agent-session.ts";
+import { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
+import type { AgentSessionServices } from "../../src/core/agent-session-services.ts";
 import type { ExtensionAPI, ExtensionError } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { runPrintMode } from "../../src/modes/print-mode.ts";
@@ -303,7 +305,7 @@ describe.skipIf(runsAsRoot)("AgentSession: a session write fails during a run (Â
 				expect.objectContaining({
 					extensionPath: "<runtime>",
 					event: "session_persistence",
-					error: sessionManager.getPersistenceError()?.message,
+					error: `${sessionManager.getPersistenceError()?.message} 1 buffered message of this run (bash result or extension message) was not written and is lost when the session is resumed or restarted.`,
 				}),
 			]);
 			await expect(harness.session.prompt("tres")).rejects.toThrow(/^Session file write failed \(EACCES\)/);
@@ -380,6 +382,69 @@ describe.skipIf(runsAsRoot)("AgentSession: a session write fails during a run (Â
 			.map((line) => JSON.parse(line) as { message?: { role: string; command?: string } })
 			.flatMap((entry) => (entry.message?.role === "bashExecution" ? [entry.message.command] : []));
 		expect(commands).toEqual(["echo one"]);
+	});
+
+	it("a deferred replacement that fails on the first refused write does not continue into queued input", async () => {
+		let active = false;
+		let completion: Promise<string> | undefined;
+		let factoryCalls = 0;
+		let file = "";
+		let session: AgentSession | undefined;
+		const { harness, sessionManager, errors } = await setup({
+			readOnly: false,
+			extensionFactories: [
+				(pi) =>
+					pi.on("agent_end", async (_event, ctx) => {
+						if (!active || !session) return;
+						active = false;
+						session.recordBashResult("printf pending", {
+							output: "pending",
+							exitCode: 0,
+							cancelled: false,
+							truncated: false,
+						});
+						await session.followUp("queued-after-end");
+						chmodSync(file, 0o444);
+						const request = await ctx.requestNewSession();
+						if (request.queued) {
+							completion = request.completion.then(
+								() => "replaced",
+								(error: Error) => error.message,
+							);
+						}
+					}),
+			],
+		});
+		session = harness.session;
+		file = sessionManager.getSessionFile() ?? "";
+		const runtime = new AgentSessionRuntime(
+			harness.session,
+			{ cwd: sessionManager.getCwd(), agentDir: sessionManager.getCwd() } as unknown as AgentSessionServices,
+			async () => {
+				factoryCalls++;
+				throw new Error("factory should not run");
+			},
+		);
+		await harness.session.bindExtensions({
+			onError: (error) => errors.push(error),
+			commandContextActions: {
+				newSession: (options: Parameters<AgentSessionRuntime["newSession"]>[0]) => runtime.newSession(options),
+			} as never,
+		});
+		harness.events.length = 0;
+		active = true;
+
+		await harness.session.prompt("dos");
+
+		expect(await completion).toMatch(/^Session file write failed \(EACCES\)/);
+		expect(factoryCalls).toBe(0);
+		const types = eventTypes(harness);
+		expect(types.filter((type) => type === "agent_start")).toHaveLength(1);
+		expect(types.filter((type) => type === "agent_end")).toHaveLength(1);
+		expect(types.at(-1)).toBe("agent_settled");
+		expect(harness.session.getFollowUpMessages()).toEqual(["queued-after-end"]);
+		expect(harness.session.hasPendingBashMessages).toBe(true);
+		expect(harness.session.isStreaming).toBe(false);
 	});
 
 	it("agent_end does not advertise a retry once the session cannot write", async () => {

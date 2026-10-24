@@ -68,6 +68,7 @@ import {
 import {
 	type AgentSession,
 	type AgentSessionEvent,
+	isSessionPersistenceReport,
 	type PromptOptions,
 	parseSkillBlock,
 	type StartMessagePersistence,
@@ -90,6 +91,7 @@ import type {
 	EditorFactory,
 	ExtensionCommandContext,
 	ExtensionContext,
+	ExtensionError,
 	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -2100,9 +2102,7 @@ export class InteractiveMode {
 					void this.shutdown();
 				}
 			},
-			onError: (error) => {
-				this.showExtensionError(error.extensionPath, error.error, error.stack);
-			},
+			onError: (error) => this.reportExtensionError(error),
 		});
 
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
@@ -3119,6 +3119,12 @@ export class InteractiveMode {
 					reject(err);
 				});
 		});
+	}
+
+	/** Route an error from the extension runner: core's own session write failure is not an extension's. */
+	private reportExtensionError(error: ExtensionError): void {
+		if (isSessionPersistenceReport(error)) this.showError(error.error);
+		else this.showExtensionError(error.extensionPath, error.error, error.stack);
 	}
 
 	/**

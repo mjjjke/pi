@@ -88,6 +88,7 @@ import {
 	type ContextUsage,
 	type ExecuteToolOptions,
 	type ExtensionCommandContextActions,
+	type ExtensionError,
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
@@ -318,6 +319,20 @@ export interface ExtensionBindings {
 
 export type QueuedInputDisposition = "handled" | "queued";
 export type PromptDisposition = QueuedInputDisposition | "started";
+
+/**
+ * Owner and event of the runtime error reported when a session write fails after a run's terminal
+ * events (its run-end flush, §3.6). Not an extension failure: UIs label it as a plain error.
+ */
+export const SESSION_PERSISTENCE_REPORT = { extensionPath: "<runtime>", event: "session_persistence" } as const;
+
+/** Whether a reported error is the core session write failure (`SESSION_PERSISTENCE_REPORT`). */
+export function isSessionPersistenceReport(error: Pick<ExtensionError, "extensionPath" | "event">): boolean {
+	return (
+		error.extensionPath === SESSION_PERSISTENCE_REPORT.extensionPath &&
+		error.event === SESSION_PERSISTENCE_REPORT.event
+	);
+}
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
@@ -2662,13 +2677,16 @@ export class AgentSession {
 			// each would start another refused run; queued input stays queued (§3.6).
 			while (!this._agentRunAbortRequested && !this._disposed && !this._isSessionWriteBlocked()) {
 				if ((await this._drainPendingNewSessionRequest()) === "replaced" || this._disposed) break;
+				// Each await below may hit the first refused write (e.g. a failed replacement's flush):
+				// recheck before anything that would start another run.
+				if (this._isSessionWriteBlocked()) break;
 				if (await this._handlePostAgentRun()) {
-					if (this._agentRunAbortRequested) break;
+					if (this._agentRunAbortRequested || this._isSessionWriteBlocked()) break;
 					await this.agent.continue();
 					continue;
 				}
 				if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary())) break;
-				if (this._agentRunAbortRequested) break;
+				if (this._agentRunAbortRequested || this._isSessionWriteBlocked()) break;
 				await this.agent.continue();
 			}
 		} finally {
@@ -3446,11 +3464,17 @@ export class AgentSession {
 			this._flushPendingBashMessages();
 			this._flushPendingCustomMessages();
 		} catch (error) {
-			this._extensionRunner.emitError({
-				extensionPath: "<runtime>",
-				event: "session_persistence",
-				error: error instanceof Error ? error.message : String(error),
-			});
+			const message = error instanceof Error ? error.message : String(error);
+			// Once writes are refused, these items live only in this session object: /resume and a
+			// restart build a new session from the file, so they are lost (a transient failure retries).
+			const kept = this._pendingBashMessages.length + this._pendingCustomMessages.length;
+			const lost =
+				kept > 0 && this._isSessionWriteBlocked()
+					? kept === 1
+						? " 1 buffered message of this run (bash result or extension message) was not written and is lost when the session is resumed or restarted."
+						: ` ${kept} buffered messages of this run (bash results or extension messages) were not written and are lost when the session is resumed or restarted.`
+					: "";
+			this._extensionRunner.emitError({ ...SESSION_PERSISTENCE_REPORT, error: `${message}${lost}` });
 		}
 	}
 

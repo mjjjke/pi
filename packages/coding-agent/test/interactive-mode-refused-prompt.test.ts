@@ -202,3 +202,37 @@ describe("InteractiveMode: no /bug hint while the session cannot write", () => {
 		expect(context.maybeShowInstallChangeWarning).not.toHaveBeenCalled();
 	});
 });
+
+describe("InteractiveMode: runtime error reports", () => {
+	function reportContext() {
+		return { showError: vi.fn(), showExtensionError: vi.fn() };
+	}
+
+	it("shows a session write failure from the run-end flush as a plain Error, not an extension error", () => {
+		const context = reportContext();
+		const error = "Session file write failed (EACCES): the last entry may be missing or partial.";
+
+		call("reportExtensionError", context, { extensionPath: "<runtime>", event: "session_persistence", error });
+
+		expect(context.showError).toHaveBeenCalledWith(error);
+		expect(context.showExtensionError).not.toHaveBeenCalled();
+	});
+
+	it("keeps the extension label for other errors, including other runtime events", () => {
+		const context = reportContext();
+
+		call("reportExtensionError", context, {
+			extensionPath: "/ext/a.ts",
+			event: "turn_end",
+			error: "boom",
+			stack: "s",
+		});
+		call("reportExtensionError", context, { extensionPath: "<runtime>", event: "session_bootstrap", error: "b" });
+
+		expect(context.showError).not.toHaveBeenCalled();
+		expect(context.showExtensionError.mock.calls).toEqual([
+			["/ext/a.ts", "boom", "s"],
+			["<runtime>", "b", undefined],
+		]);
+	});
+});

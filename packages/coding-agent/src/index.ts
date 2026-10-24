@@ -17,10 +17,12 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	isSessionPersistenceReport,
 	type ModelCycleResult,
 	type ParsedSkillBlock,
 	type PromptOptions,
 	parseSkillBlock,
+	SESSION_PERSISTENCE_REPORT,
 	type SessionStats,
 	type StartMessagePersistence,
 } from "./core/agent-session.ts";

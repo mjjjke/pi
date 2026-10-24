@@ -7,8 +7,10 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	isSessionPersistenceReport,
 	type ModelCycleResult,
 	type PromptOptions,
+	SESSION_PERSISTENCE_REPORT,
 	type SessionStats,
 	type StartMessagePersistence,
 } from "./agent-session.ts";
