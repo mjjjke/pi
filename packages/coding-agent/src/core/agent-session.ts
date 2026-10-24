@@ -942,6 +942,8 @@ export class AgentSession {
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
 		const projection = this.sessionManager.buildSessionProjection();
+		// No compaction after disposal: its fresh controller would be beyond dispose()'s abort.
+		if (this._disposed) return { ...context, messages: projection.messages };
 		// A virtual selection is checked in prepareRequest, against the model the request is routed to.
 		const model = this.model;
 		if (!model || isVirtualModel(model) || !this._exceedsCompactionThreshold(model, projection)) {
@@ -960,6 +962,8 @@ export class AgentSession {
 		this.agent.isContextMarker = (message) => message.role === "compactionBoundary";
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
+			// Nothing reaches the provider adapter after dispose(), not even an aborted stream.
+			if (this._disposed) throw new Error("The session was disposed; no request is sent.");
 			// No request goes out on a session whose file may hold a partial entry (§3.6).
 			const persistenceError = this.sessionManager.getPersistenceError();
 			if (persistenceError) throw persistenceError;
@@ -1521,8 +1525,12 @@ export class AgentSession {
 		this.agent.finishTurn = async (turn, signal) => {
 			this._boundaryDispatchedMessages.add(turn.message);
 			const extensionContinue = await this._dispatchTurnEndBoundary(turn.message, turn.toolResults);
+			// dispose() during an awaited turn_end handler: abort() cannot stop natural continuations (queued
+			// follow-ups, tool results), so end the low-level loop here, before any further hook, compaction or request.
+			if (this._disposed) return { action: "end" };
 			const previousDecision = await previousFinishTurn?.(turn, signal);
 			if (previousDecision?.action === "end") return previousDecision;
+			if (this._disposed) return { action: "end" };
 			if (extensionContinue || previousDecision?.action === "continue") return { action: "continue" };
 			return undefined;
 		};
@@ -4394,7 +4402,8 @@ export class AgentSession {
 		let cancelledByExtension = false;
 
 		try {
-			if (!model) {
+			// After dispose() nothing would cancel the fresh controller below, and the session must not change.
+			if (!model || this._disposed) {
 				return false;
 			}
 

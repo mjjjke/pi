@@ -1,7 +1,9 @@
 import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Context, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { ExtensionAPI, SessionContextChangeEvent } from "../../src/index.ts";
@@ -498,6 +500,104 @@ describe("session_context_change (A8)", () => {
 			await run;
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			expect(calls).toBe(0);
+			expect(harness.session.isStreaming).toBe(false);
+		});
+	}
+
+	const turnEndDisposalVariants = [
+		"queued follow-up",
+		"queued follow-up, threshold compaction with an extension summary",
+		"queued follow-up, threshold compaction with the default summarizer",
+		"natural tool continuation",
+	] as const;
+	for (const variant of turnEndDisposalVariants) {
+		it(`dispose while the turn_end change event is awaited (${variant}): the loop ends, no compaction, no adapter call`, async () => {
+			let armed = true;
+			let enter!: () => void;
+			let release!: () => void;
+			const entered = new Promise<void>((resolve) => {
+				enter = resolve;
+			});
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const compacting = variant.includes("compaction");
+			const tool: AgentTool = {
+				name: "noop",
+				label: "Noop",
+				description: "Noop",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+			};
+			let compactions = 0;
+			let calls = 0;
+			const harness = await setup({
+				tools: [tool],
+				// 20k window, threshold 2k: the ~2.5k-token reply fits the model but crosses the threshold.
+				models: [{ id: "faux-1", contextWindow: 20000, maxTokens: 4000 }],
+				settings: {
+					compaction: compacting
+						? { enabled: true, reserveTokens: 18000, keepRecentTokens: 10 }
+						: { enabled: false },
+				},
+				extensionFactories: [
+					(pi) => {
+						pi.on("turn_end", (event, ctx) => {
+							if (!armed) return;
+							armed = false;
+							if (variant !== "natural tool continuation")
+								pi.sendUserMessage("FOLLOWUP", { deliverAs: "followUp" });
+							const targetId = ctx.sessionManager
+								.getBranch()
+								.find((entry) => entry.type === "message" && entry.message.role === "user")!.id;
+							return {
+								entries: [
+									...event.entries,
+									{ type: "context_edit", targetId, replacement: { content: "EDITED" } },
+								],
+							};
+						});
+						pi.on("session_context_change", async () => {
+							enter();
+							await gate;
+						});
+						pi.on("session_before_compact", (event) => {
+							compactions++;
+							if (!variant.includes("extension summary")) return;
+							return {
+								compaction: {
+									summary: "SUMMARY",
+									firstKeptEntryId: event.preparation.firstKeptEntryId,
+									tokensBefore: event.preparation.tokensBefore,
+								},
+							};
+						});
+					},
+				],
+			});
+			cleanups.push(() => release());
+			harness.setResponses([
+				variant === "natural tool continuation"
+					? fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })
+					: fauxAssistantMessage(`DONE ${"x".repeat(10000)}`),
+				...Array.from({ length: 4 }, () => () => {
+					calls++;
+					return fauxAssistantMessage("UNEXPECTED");
+				}),
+			]);
+			const run = harness.session.prompt("WORK");
+			await entered;
+			harness.session.dispose();
+			const adapterCalls = harness.faux.state.callCount;
+			const journal = harness.sessionManager.getBranch().map((entry) => entry.id);
+			release();
+			await run;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(compactions).toBe(0);
+			expect(calls).toBe(0);
+			// Not even an aborted stream reaches the adapter after disposal.
+			expect(harness.faux.state.callCount).toBe(adapterCalls);
+			expect(harness.sessionManager.getBranch().map((entry) => entry.id)).toEqual(journal);
 			expect(harness.session.isStreaming).toBe(false);
 		});
 	}
