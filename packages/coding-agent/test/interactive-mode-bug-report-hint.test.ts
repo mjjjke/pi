@@ -5,7 +5,10 @@ import { formatCrashExtensionHint, InteractiveMode } from "../src/modes/interact
 type BugReportHintContext = {
 	suggestBugReport(): void;
 	maybeShowInstallChangeWarning(): boolean;
+	sessionManager: { getPersistenceError(): undefined };
 };
+
+const writable = { getPersistenceError: () => undefined };
 
 const maybeSuggestBugReport = Reflect.get(InteractiveMode.prototype, "maybeSuggestBugReport") as (
 	this: BugReportHintContext,
@@ -25,7 +28,11 @@ describe("InteractiveMode bug report hints", () => {
 	});
 
 	test("does not suggest reports for retryable provider failures", () => {
-		const context = { suggestBugReport: vi.fn(), maybeShowInstallChangeWarning: vi.fn(() => false) };
+		const context = {
+			suggestBugReport: vi.fn(),
+			maybeShowInstallChangeWarning: vi.fn(() => false),
+			sessionManager: writable,
+		};
 		const failures = [
 			"500 Internal Server Error",
 			"502 Bad Gateway",
@@ -43,7 +50,11 @@ describe("InteractiveMode bug report hints", () => {
 	});
 
 	test("does not suggest reports for cancellations", () => {
-		const context = { suggestBugReport: vi.fn(), maybeShowInstallChangeWarning: vi.fn(() => false) };
+		const context = {
+			suggestBugReport: vi.fn(),
+			maybeShowInstallChangeWarning: vi.fn(() => false),
+			sessionManager: writable,
+		};
 
 		maybeSuggestBugReport.call(context, errorMessage("This operation was aborted"));
 		maybeSuggestBugReport.call(context, errorMessage("Request cancelled"));
@@ -53,7 +64,11 @@ describe("InteractiveMode bug report hints", () => {
 	});
 
 	test("suggests reports for unexpected errors", () => {
-		const context = { suggestBugReport: vi.fn(), maybeShowInstallChangeWarning: vi.fn(() => false) };
+		const context = {
+			suggestBugReport: vi.fn(),
+			maybeShowInstallChangeWarning: vi.fn(() => false),
+			sessionManager: writable,
+		};
 
 		maybeSuggestBugReport.call(context, errorMessage("Unexpected internal state"));
 
@@ -61,7 +76,11 @@ describe("InteractiveMode bug report hints", () => {
 	});
 
 	test("shows the install change warning instead of a bug report hint", () => {
-		const context = { suggestBugReport: vi.fn(), maybeShowInstallChangeWarning: vi.fn(() => true) };
+		const context = {
+			suggestBugReport: vi.fn(),
+			maybeShowInstallChangeWarning: vi.fn(() => true),
+			sessionManager: writable,
+		};
 
 		maybeSuggestBugReport.call(context, errorMessage("Cannot find module './worker.js'"));
 

@@ -1,19 +1,19 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import type { PromptOptions } from "../src/core/agent-session.ts";
 import { SessionPersistenceError } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
-type Entry = { type: "message"; message: AgentMessage };
+type Scenario = (context: Context, text: string, options: PromptOptions | undefined) => Promise<void>;
+type Context = ReturnType<typeof createContext>;
 
-/** A fake InteractiveMode `this` with a chat, an editor and a session journal. */
-function createContext(prompt: (context: ReturnType<typeof createContext>, text: string) => Promise<void>) {
-	const entries: Entry[] = [];
+/** A fake InteractiveMode `this`: chat, editor and a session whose prompt() runs a scenario. */
+function createContext(scenario: Scenario) {
 	let persistenceError: SessionPersistenceError | undefined;
 	let editorText = "";
 	const children: object[] = [];
 	const context = {
-		entries,
 		children,
 		failWrites: () => {
 			persistenceError = new SessionPersistenceError(Object.assign(new Error("denied"), { code: "EACCES" }));
@@ -34,21 +34,25 @@ function createContext(prompt: (context: ReturnType<typeof createContext>, text:
 			}),
 		},
 		ui: { requestRender: vi.fn() },
-		sessionManager: {
-			getEntries: () => entries,
-			getPersistenceError: () => persistenceError,
+		sessionManager: { getPersistenceError: () => persistenceError },
+		session: {
+			prompt: vi.fn(async (text: string, options?: PromptOptions) => scenario(context, text, options)),
+			clearQueue: vi.fn(() => ({ steering: [], followUp: [] })),
+			followUp: vi.fn(async () => {}),
+			steer: vi.fn(async () => {}),
 		},
-		session: { prompt: vi.fn(async (text: string) => prompt(context, text)) },
 		showError: vi.fn(),
+		updatePendingMessagesDisplay: vi.fn(),
+		isExtensionCommand: () => false,
+		compactionQueuedMessages: [] as Array<{ text: string; mode: "steer" | "followUp" }>,
+		userMessageComponents: new WeakMap<AgentMessage, object[]>(),
 		addMessageToChat: (message: AgentMessage) => {
 			children.push({ spacer: true }, { message });
 		},
-		lastUserMessageRender: undefined as unknown,
-		renderUserMessageStart: undefined as unknown as (message: AgentMessage) => void,
-		restorePromptToEditor: undefined as unknown as (text: string) => void,
 	};
-	context.renderUserMessageStart = (message) => call("renderUserMessageStart", context, message);
-	context.restorePromptToEditor = (text) => call("restorePromptToEditor", context, text);
+	for (const method of ["renderUserMessageStart", "restorePromptToEditor", "promptAndTrackStart"]) {
+		Reflect.set(context, method, (...args: unknown[]) => call(method, context, ...args));
+	}
 	return context;
 }
 
@@ -62,26 +66,42 @@ function userMessage(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: 1 };
 }
 
+function render(context: Context, message: AgentMessage): void {
+	call("renderUserMessageStart", context, message);
+}
+
+/** A started run whose start message reaches the chat; `persisted` is core's receipt. */
+function startedRun(persisted: boolean, extra?: (context: Context) => void): Scenario {
+	return async (context, text, options) => {
+		options?.preflightResult?.("started");
+		const start = userMessage(text);
+		render(context, start);
+		extra?.(context);
+		if (!persisted) context.children.push({ assistantError: context.failWrites().message });
+		options?.startPersisted?.({ message: start, persisted });
+	};
+}
+
 const submitPrompt = (context: unknown, text: string) => call("submitPrompt", context, text) as Promise<void>;
 
 describe("InteractiveMode: a prompt that never reaches the journal goes back to the editor", () => {
-	it("W4: a write that fails on the start message removes the shown prompt and restores it, with no extra error", async () => {
-		const context = createContext(async (self, text) => {
-			// The loop shows the start message, its append fails, and the run ends with an error message.
-			self.renderUserMessageStart(userMessage(text));
-			const error = self.failWrites();
-			self.children.push({ assistantError: error.message });
-		});
+	it("W4: core reports the start unsent; only its own bubble is removed (not a later queued one)", async () => {
+		const context = createContext(startedRun(false, (self) => render(self, userMessage("queued"))));
 		context.children.push({ earlier: true });
 
 		await submitPrompt(context, "Responde solo: dos");
 
-		expect(context.children).toEqual([{ earlier: true }, { assistantError: expect.any(String) }]);
+		expect(context.children).toEqual([
+			{ earlier: true },
+			{ spacer: true },
+			{ message: userMessage("queued") },
+			{ assistantError: expect.any(String) },
+		]);
 		expect(context.editor.getText()).toBe("Responde solo: dos");
 		expect(context.showError).not.toHaveBeenCalled();
 	});
 
-	it("W4: a prompt refused by the sticky error is shown once and restored, after text typed meanwhile", async () => {
+	it("W4: a prompt refused by the sticky error is shown once and restored, before text typed meanwhile", async () => {
 		const context = createContext(async () => {
 			throw new Error("Session file write failed (EACCES): refused");
 		});
@@ -106,13 +126,8 @@ describe("InteractiveMode: a prompt that never reaches the journal goes back to 
 		expect(context.editor.getText()).toBe("FAILPF primer intento");
 	});
 
-	it("keeps a prompt that reached the journal, even when a later write of the run fails", async () => {
-		const context = createContext(async (self, text) => {
-			const message = userMessage(text);
-			self.renderUserMessageStart(message);
-			self.entries.push({ type: "message", message });
-			self.failWrites();
-		});
+	it("keeps a prompt core reports persisted, even when a later write of the run fails", async () => {
+		const context = createContext(startedRun(true, (self) => self.failWrites()));
 
 		await submitPrompt(context, "persisted");
 
@@ -120,21 +135,66 @@ describe("InteractiveMode: a prompt that never reaches the journal goes back to 
 		expect(context.editor.getText()).toBe("");
 	});
 
-	it("does not restore a prompt that resolves without a failed write (extension commands, handled input)", async () => {
-		const context = createContext(async () => {});
+	it("does not restore handled input, even when its handler hit a write failure", async () => {
+		const context = createContext(async (self, _text, options) => {
+			self.failWrites();
+			options?.preflightResult?.("handled");
+		});
 
-		await submitPrompt(context, "/my-extension-command");
+		await submitPrompt(context, "handled");
 
 		expect(context.editor.setText).not.toHaveBeenCalled();
 		expect(context.showError).not.toHaveBeenCalled();
 	});
+
+	it("does not restore a prompt that resolves without a receipt (deferred from agent_settled)", async () => {
+		const context = createContext(async () => {});
+
+		await submitPrompt(context, "deferred");
+
+		expect(context.editor.setText).not.toHaveBeenCalled();
+	});
+
+	it("does not restore queued input", async () => {
+		const context = createContext(async (_self, _text, options) => options?.preflightResult?.("queued"));
+
+		await submitPrompt(context, "queued");
+
+		expect(context.editor.setText).not.toHaveBeenCalled();
+	});
 });
 
-describe("InteractiveMode: no /bug hint for a session write failure", () => {
-	it("the persistence error is an environment problem with its own remedy", () => {
-		const context = { suggestBugReport: vi.fn(), maybeShowInstallChangeWarning: vi.fn(() => false) };
-		const error = new SessionPersistenceError(Object.assign(new Error("denied"), { code: "EACCES" }));
-		const message: AssistantMessage = fauxAssistantMessage("", { stopReason: "error", errorMessage: error.message });
+describe("InteractiveMode: the post-compaction queue keeps an unsent first prompt", () => {
+	it("restores the compaction queue when core reports the first prompt unsent", async () => {
+		const context = createContext(startedRun(false));
+		const queued = [
+			{ text: "two", mode: "steer" as const },
+			{ text: "three", mode: "followUp" as const },
+		];
+		context.compactionQueuedMessages = [...queued];
+
+		await call("flushCompactionQueue", context);
+		await vi.waitFor(() => expect(context.compactionQueuedMessages).toEqual(queued));
+
+		expect(context.session.clearQueue).toHaveBeenCalled();
+		expect(context.children).toEqual([{ assistantError: expect.any(String) }]);
+	});
+});
+
+describe("InteractiveMode: no /bug hint while the session cannot write", () => {
+	it("is classified by session state, so a wrapped persistence failure is covered too", () => {
+		const context = {
+			suggestBugReport: vi.fn(),
+			maybeShowInstallChangeWarning: vi.fn(() => false),
+			sessionManager: {
+				getPersistenceError: () =>
+					new SessionPersistenceError(Object.assign(new Error("denied"), { code: "EACCES" })),
+			},
+		};
+		const message: AssistantMessage = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: 'Standing instruction "mode" could not be delivered: Session file write failed (EACCES): …',
+		});
 
 		call("maybeSuggestBugReport", context, message);
 

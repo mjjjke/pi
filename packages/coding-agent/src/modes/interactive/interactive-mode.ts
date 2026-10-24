@@ -65,7 +65,13 @@ import {
 	getDocsPath,
 	VERSION,
 } from "../../config.ts";
-import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
+import {
+	type AgentSession,
+	type AgentSessionEvent,
+	type PromptOptions,
+	parseSkillBlock,
+	type StartPersistedReceipt,
+} from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import {
@@ -109,7 +115,6 @@ import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
-	isSessionPersistenceErrorMessage,
 	type SessionEntry,
 	SessionManager,
 	sessionEntryToContextMessages,
@@ -450,9 +455,6 @@ export interface InteractiveModeOptions {
 	terminal?: Terminal;
 }
 
-/** Chat components rendered for one user message. */
-type UserMessageRender = { message: AgentMessage; components: Component[] };
-
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private renderer: TuiMainScreen | TuiAltScreen;
@@ -561,8 +563,8 @@ export class InteractiveMode {
 	/** The `/bug` hint is shown at most once per session so error output stays readable. */
 	private bugReportHintShown = false;
 	private installChangeWarningShown = false;
-	/** Chat components of the latest user `message_start`, so a prompt that never reached the journal can be taken back. */
-	private lastUserMessageRender: UserMessageRender | undefined;
+	/** Chat components rendered for each user `message_start`, so an unsent start message can be taken back. */
+	private userMessageComponents = new WeakMap<AgentMessage, Component[]>();
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1267,29 +1269,50 @@ export class InteractiveMode {
 	/**
 	 * Run a prompt submitted from the editor. A prompt that never reached the journal goes back to the
 	 * editor instead of being lost (refused, preflight failure) or left on screen as if sent (its append
-	 * failed, §3.6). The run reports the failed append itself, so only a rejection shows an error here.
+	 * failed, §3.6). The run reports a failed append itself, so only a rejection shows an error here.
 	 */
 	private async submitPrompt(text: string): Promise<void> {
-		const countUserEntries = () =>
-			this.sessionManager.getEntries().filter((entry) => entry.type === "message" && entry.message.role === "user")
-				.length;
-		const userEntriesBefore = countUserEntries();
-		const writeFailedBefore = this.sessionManager.getPersistenceError() !== undefined;
-		this.lastUserMessageRender = undefined;
-		let rejected = false;
-		try {
-			await this.session.prompt(text);
-		} catch (error: unknown) {
-			rejected = true;
-			this.showError(error instanceof Error ? error.message : "Unknown error occurred");
+		const outcome = await this.promptAndTrackStart(text);
+		if (outcome.rejected) {
+			this.showError(outcome.error instanceof Error ? outcome.error.message : "Unknown error occurred");
 		}
-		const writeFailed = !writeFailedBefore && this.sessionManager.getPersistenceError() !== undefined;
-		if ((!rejected && !writeFailed) || countUserEntries() !== userEntriesBefore) return;
-		// Set by the run's user message_start; the await above hides that assignment from narrowing.
-		const shown = this.lastUserMessageRender as UserMessageRender | undefined;
-		for (const component of shown?.components ?? []) this.chatContainer.removeChild(component);
-		this.lastUserMessageRender = undefined;
-		this.restorePromptToEditor(text);
+		if (outcome.unsent) this.restorePromptToEditor(text);
+	}
+
+	/**
+	 * Run a prompt and report, from core's own signals, whether its input never reached the journal:
+	 * a rejection unless core's receipt says the starting message was persisted, or a resolved prompt
+	 * whose receipt says it was not. Without a receipt (handled, queued or deferred input) a resolved
+	 * prompt is never treated as unsent. An unsent start message is taken back from the chat.
+	 */
+	private async promptAndTrackStart(
+		text: string,
+		options?: PromptOptions,
+	): Promise<{ rejected: boolean; error?: unknown; unsent: boolean }> {
+		let receipt: StartPersistedReceipt | undefined;
+		let rejected = false;
+		let error: unknown;
+		try {
+			await this.session.prompt(text, {
+				...options,
+				startPersisted: (value) => {
+					receipt = value;
+				},
+			});
+		} catch (caught: unknown) {
+			rejected = true;
+			error = caught;
+		}
+		// Assigned by a callback during the await, which control-flow narrowing cannot see.
+		const start = receipt as StartPersistedReceipt | undefined;
+		const unsent = rejected ? start?.persisted !== true : start?.persisted === false;
+		if (unsent && start) {
+			for (const component of this.userMessageComponents.get(start.message) ?? []) {
+				this.chatContainer.removeChild(component);
+			}
+			this.userMessageComponents.delete(start.message);
+		}
+		return { rejected, error, unsent };
 	}
 
 	/** Put an unsent prompt back in the editor, before any text typed meanwhile (as queued messages are restored). */
@@ -1302,7 +1325,7 @@ export class InteractiveMode {
 	private renderUserMessageStart(message: AgentMessage): void {
 		const start = this.chatContainer.children.length;
 		this.addMessageToChat(message);
-		this.lastUserMessageRender = { message, components: this.chatContainer.children.slice(start) };
+		this.userMessageComponents.set(message, this.chatContainer.children.slice(start));
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
@@ -2225,8 +2248,8 @@ export class InteractiveMode {
 
 	private maybeSuggestBugReport(message: AssistantMessage): void {
 		if (message.stopReason !== "error" || isRetryableAssistantError(message)) return;
-		// A failed session write is an environment problem, and its message already says how to recover.
-		if (isSessionPersistenceErrorMessage(message.errorMessage)) return;
+		// While the session cannot write, errors come from that environment problem and say how to recover.
+		if (this.sessionManager.getPersistenceError()) return;
 		if (/\b(?:abort(?:ed)?|cancel(?:l?ed)?)\b/i.test(message.errorMessage ?? "")) return;
 		if (this.maybeShowInstallChangeWarning()) return;
 		this.suggestBugReport();
@@ -4881,10 +4904,12 @@ export class InteractiveMode {
 		this.compactionQueuedMessages = [];
 		this.updatePendingMessagesDisplay();
 
+		/** `error` undefined: the run already reported its failure, so no second error is shown. */
 		const restoreQueue = (error: unknown) => {
 			this.session.clearQueue();
 			this.compactionQueuedMessages = queuedMessages;
 			this.updatePendingMessagesDisplay();
+			if (error === undefined) return;
 			this.showError(
 				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
 					error instanceof Error ? error.message : String(error)
@@ -4927,12 +4952,14 @@ export class InteractiveMode {
 				await this.session.prompt(message.text);
 			}
 
-			// Start a prompt when idle, or queue it into a run still finishing compaction.
-			const promptPromise = this.session
-				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
-				.catch((error) => {
-					restoreQueue(error);
-				});
+			// Start a prompt when idle, or queue it into a run still finishing compaction. A run whose
+			// starting message never reached the journal resolves: core's receipt restores the queue then.
+			const promptPromise = this.promptAndTrackStart(firstPrompt.text, { streamingBehavior: firstPrompt.mode }).then(
+				(outcome) => {
+					if (outcome.rejected) restoreQueue(outcome.error);
+					else if (outcome.unsent) restoreQueue(undefined);
+				},
+			);
 
 			// Queue remaining messages
 			for (const message of rest) {
