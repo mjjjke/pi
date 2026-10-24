@@ -356,4 +356,80 @@ describe("session_context_change (A8)", () => {
 			._pendingCustomMessages;
 		expect(pending.map((message) => message.customType)).toEqual(["change-notice"]);
 	});
+
+	/** Edits the first user entry once, from `position`; the change handler sends a passive notice (and a follow-up). */
+	function editThenNotice(position: "turn_end" | "agent_before_settle", followUp: boolean) {
+		let armed = true;
+		return (pi: ExtensionAPI) => {
+			const draft = (
+				event: { entries: unknown[] },
+				ctx: { sessionManager: { getBranch(): SessionEntryLike[] } },
+			) => {
+				if (!armed) return;
+				armed = false;
+				const targetId = ctx.sessionManager
+					.getBranch()
+					.find((entry) => entry.type === "message" && entry.message?.role === "user")!.id;
+				return {
+					entries: [
+						...(event.entries as never[]),
+						{ type: "context_edit" as const, targetId, replacement: { content: "EDITED" } },
+					],
+				};
+			};
+			if (position === "turn_end") pi.on("turn_end", draft as never);
+			else pi.on("agent_before_settle", draft as never);
+			pi.on("session_context_change", () => {
+				pi.sendMessage({ customType: "notice", content: "PASSIVE NOTICE", display: false }, { triggerTurn: false });
+				if (followUp) pi.sendUserMessage("FOLLOWUP", { deliverAs: "followUp" });
+			});
+		};
+	}
+
+	function journalTexts(harness: Harness): string[] {
+		return harness.sessionManager.buildSessionProjection().messages.map(getMessageText);
+	}
+
+	for (const position of ["turn_end", "agent_before_settle"] as const) {
+		it(`${position} edit + passive notice + queued follow-up: one request, follow-up before the notice`, async () => {
+			const requests: string[][] = [];
+			const harness = await setup({
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [editThenNotice(position, true)],
+			});
+			harness.setResponses([
+				fauxAssistantMessage("DONE"),
+				...Array.from({ length: 3 }, () => (context: Context) => {
+					requests.push(context.messages.map(getMessageText));
+					return fauxAssistantMessage("REPLY");
+				}),
+			]);
+			await harness.session.prompt("WORK");
+			expect(requests).toHaveLength(1);
+			const tail = requests[0].slice(-2);
+			expect(tail).toEqual(["FOLLOWUP", "PASSIVE NOTICE"]);
+			// The journal holds exactly what was sent, then the reply.
+			expect(journalTexts(harness)).toEqual([...requests[0], "REPLY"]);
+		});
+
+		it(`${position} edit + passive notice, no follow-up: no extra request, the notice is written at run end`, async () => {
+			let calls = 0;
+			const harness = await setup({
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [editThenNotice(position, false)],
+			});
+			harness.setResponses([
+				fauxAssistantMessage("DONE"),
+				() => {
+					calls++;
+					return fauxAssistantMessage("UNEXPECTED");
+				},
+			]);
+			await harness.session.prompt("WORK");
+			expect(calls).toBe(0);
+			expect(journalTexts(harness).slice(-2)).toEqual(["DONE", "PASSIVE NOTICE"]);
+		});
+	}
 });
+
+type SessionEntryLike = { id: string; type: string; message?: { role: string } };

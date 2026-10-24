@@ -1640,7 +1640,8 @@ export class AgentSession {
 			.filter((message) => message.role !== "system" && message.role !== "developer")
 			.at(-1)?.role;
 		const contextCanContinue = finalRole !== undefined && finalRole !== "assistant";
-		const pendingCustomContext = this._pendingCustomMessages.length > 0;
+		// Compaction notices are written at the next request boundary, not as a run of their own.
+		const pendingCustomContext = this._pendingCustomMessages.some((message) => !this._compactionNotices.has(message));
 		return {
 			contextEntries: projection.entries,
 			contextMessages: projection.messages,
@@ -1873,7 +1874,7 @@ export class AgentSession {
 		// handlers queued.
 		if (event.type === "turn_end") {
 			this._lastAssistantToolResults = event.toolResults;
-			this._flushPendingCustomMessages();
+			this._flushPendingCustomMessages({ keepCompactionNotices: true });
 		}
 	};
 
@@ -2881,7 +2882,7 @@ export class AgentSession {
 				(entries) => this._buildBoundaryContext(entries, "agent_before_settle"),
 			);
 			await this._commitBoundaryDrafts(result.entries);
-			this._flushPendingCustomMessages();
+			this._flushPendingCustomMessages({ keepCompactionNotices: true });
 			const finalContext = this._buildBoundaryContext([], "agent_before_settle");
 			if (this._abortDuringBeforeSettle) return false;
 			const shouldContinue = result.continue || this.agent.hasQueuedMessages();
@@ -3563,15 +3564,26 @@ export class AgentSession {
 		return written;
 	}
 
-	private _flushPendingCustomMessages(): void {
+	/**
+	 * Write the buffered passive messages. Turn-end and before-settle drains pass `keepCompactionNotices`:
+	 * compaction notices wait for the next request boundary (after its input, F2) or the run end, so they
+	 * neither precede a queued follow-up nor become a trailing message a continuation would answer.
+	 */
+	private _flushPendingCustomMessages(options?: { keepCompactionNotices?: boolean }): void {
 		// Kept, not dropped, while writes are blocked: a failing flush must not cut a run's end short.
 		if (this._isSessionWriteBlocked()) return;
+		const keepNotices = options?.keepCompactionNotices === true;
 		// Each item leaves the buffer only once written: a failed append keeps it and every later item
 		// (§3.6). Items queued by listeners of an announced message are written in the same pass.
-		while (this._pendingCustomMessages.length > 0) {
-			const appMessage = this._pendingCustomMessages[0]!;
+		for (;;) {
+			const index = keepNotices
+				? this._pendingCustomMessages.findIndex((message) => !this._compactionNotices.has(message))
+				: 0;
+			const appMessage = this._pendingCustomMessages[index];
+			if (index === -1 || !appMessage) return;
 			this._writeCustomMessage(appMessage);
-			this._pendingCustomMessages.shift();
+			this._pendingCustomMessages.splice(index, 1);
+			this._compactionNotices.delete(appMessage);
 			this._announceCustomMessage(appMessage);
 		}
 	}
