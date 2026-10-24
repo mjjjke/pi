@@ -881,7 +881,9 @@ export function prepareCompaction(
 	}
 
 	const projection = buildSessionProjection(pathEntries);
-	const projectedEntries = projection.entries;
+	// The previous compaction's boundary span carries no content to summarize and is never a cut point,
+	// so `firstKeptEntryId` cannot resolve to it.
+	const projectedEntries = projection.entries.filter((entry) => entry.part !== "boundary");
 	const sourceEntries = projectedEntries.map((entry) => entry.sourceEntry);
 	// The newest compaction is projected first. Older compaction entries can still
 	// occur in its retained raw range, but their projected contribution is empty.

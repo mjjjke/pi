@@ -46,6 +46,7 @@ import {
 	COMPACTION_BOUNDARY_TEXT_V1,
 	type CustomMessage,
 	createBranchSummaryMessage,
+	createCompactionBoundaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
@@ -272,6 +273,11 @@ export interface ProjectedSessionEntry {
 	sourceEntry: SessionEntry;
 	/** Model-visible messages after context edits. Empty for state-only entries and omissions. */
 	messages: AgentMessage[];
+	/**
+	 * `"boundary"`: the second span of the newest compaction, after its kept range (its `boundary` text as a
+	 * `compactionBoundary` message). Projection-only: never in `getBranch()`, `getEntries()` or the journal.
+	 */
+	part?: "boundary";
 }
 
 export interface SessionProjection {
@@ -830,7 +836,11 @@ export function buildContextEntries(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
-	const path = buildSessionPath(entries, leafId, byId);
+	return selectContextEntries(buildSessionPath(entries, leafId, byId)).entries;
+}
+
+/** `keptEnd`: index in `entries` after the newest compaction's kept range (undefined without a compaction). */
+function selectContextEntries(path: SessionEntry[]): { entries: SessionEntry[]; keptEnd?: number } {
 	let compaction: CompactionEntry | null = null;
 
 	for (const entry of path) {
@@ -840,12 +850,12 @@ export function buildContextEntries(
 	}
 
 	if (!compaction) {
-		return path;
+		return { entries: path };
 	}
 
 	const compactionIdx = path.findIndex((entry) => entry.id === compaction.id);
 	if (compactionIdx < 0) {
-		return path;
+		return { entries: path };
 	}
 
 	// A standing-aware compaction carries the values in effect; its kept keyed copies are hidden.
@@ -865,8 +875,9 @@ export function buildContextEntries(
 		if (hideKeyed && entry.standingKey !== undefined) continue;
 		contextEntries.push(entry);
 	}
+	const keptEnd = contextEntries.length;
 	contextEntries.push(...path.slice(compactionIdx + 1));
-	return contextEntries;
+	return { entries: contextEntries, keptEnd };
 }
 
 /**
@@ -905,7 +916,7 @@ export function buildSessionProjection(
 ): SessionProjection {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const contextEntries = buildContextEntries(entries, leafId, byId);
+	const { entries: contextEntries, keptEnd } = selectContextEntries(path);
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -923,6 +934,16 @@ export function buildSessionProjection(
 		}
 		return { sourceEntry, messages };
 	});
+	// The newest compaction marks where its kept range ends, only when it carries a boundary (unmarked
+	// compactions project as before).
+	const newest = contextEntries[0];
+	if (afterCompaction && newest.type === "compaction" && newest.boundary !== undefined && keptEnd !== undefined) {
+		projectedEntries.splice(keptEnd, 0, {
+			sourceEntry: newest,
+			messages: [createCompactionBoundaryMessage(newest.boundary, newest.timestamp)],
+			part: "boundary",
+		});
+	}
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
