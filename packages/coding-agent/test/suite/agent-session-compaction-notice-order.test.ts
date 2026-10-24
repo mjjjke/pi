@@ -227,7 +227,8 @@ describe("AgentSession: passive messages from session_compact keep request order
 		expect(requests).toHaveLength(3);
 		const [, second, third] = requests;
 		// The first post-compaction request carries the fresh snapshot, right after the follow-up.
-		expect(second.slice(-2)).toEqual(["user:FOLLOW-UP", "user:SNAPSHOT snap-1"]);
+		// The boundary is not input: the queued follow-up runs after it in the same request (no extra run).
+		expect(second.slice(-3)).toEqual(["user:Compaction boundary (not", "user:FOLLOW-UP", "user:SNAPSHOT snap-1"]);
 		expectPrefix(second, third);
 		expect(third.slice(second.length)).toEqual(["assistant:FOLLOW-UP-ANSWER", "user:LATE", "user:FINAL-PROMPT"]);
 		expect(journalLabels(harness)).toEqual([...third, "assistant:FINAL-ANSWER"]);
@@ -258,7 +259,12 @@ describe("AgentSession: passive messages from session_compact keep request order
 		await harness.session.prompt("FINAL-PROMPT");
 
 		const [resumed, final] = requests;
-		expect(resumed.slice(-2)).toEqual(["toolResult:TOOL-RESULT xxxxxxxxxxxx", "user:SNAPSHOT snap-1"]);
+		// The compaction boundary closes the kept range (the tool result) before the new snapshot.
+		expect(resumed.slice(-3)).toEqual([
+			"toolResult:TOOL-RESULT xxxxxxxxxxxx",
+			"user:Compaction boundary (not",
+			"user:SNAPSHOT snap-1",
+		]);
 		expectPrefix(resumed, final);
 		expect(final.slice(resumed.length)).toEqual(["assistant:RESUMED-ANSWER", "user:FINAL-PROMPT"]);
 		expect(journalLabels(harness)).toEqual([...final, "assistant:FINAL-ANSWER"]);
@@ -356,7 +362,7 @@ describe("AgentSession: passive messages from session_compact keep request order
 		await harness.session.prompt("FINAL-PROMPT");
 
 		const [small, final] = requests;
-		expect(small.slice(-2)).toEqual(["user:NEXT-PROMPT", "user:SNAPSHOT snap-1"]);
+		expect(small.slice(-3)).toEqual(["user:NEXT-PROMPT", "user:Compaction boundary (not", "user:SNAPSHOT snap-1"]);
 		expectPrefix(small, final);
 		expect(journalLabels(harness)).toEqual([...final, "assistant:FINAL-ANSWER"]);
 		expectJournalExtends(harness, final);

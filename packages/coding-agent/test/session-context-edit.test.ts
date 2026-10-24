@@ -136,12 +136,14 @@ describe("session context edits", () => {
 		expect(compaction).toMatchObject({ type: "compaction", firstKeptEntryId: compactionId });
 		expect(session.buildSessionProjection().messages.map((message) => message.role)).toEqual([
 			"compactionSummary",
+			"compactionBoundary",
 			"user",
 		]);
 		expect(
 			session
 				.buildSessionProjection()
-				.messages.map((message) => ("summary" in message ? message.summary : text(message as { content: string }))),
+				.messages.filter((message) => message.role !== "compactionBoundary")
+				.map((message) => ("summary" in message ? message.summary : text(message as { content: string }))),
 		).toEqual(["exact handoff", "after"]);
 	});
 
@@ -155,7 +157,8 @@ describe("session context edits", () => {
 		expect(
 			session
 				.buildSessionProjection()
-				.messages.map((message) => ("summary" in message ? message.summary : text(message as { content: string }))),
+				.messages.filter((message) => message.role !== "compactionBoundary")
+				.map((message) => ("summary" in message ? message.summary : text(message as { content: string }))),
 		).toEqual(["summary", "edited retained"]);
 	});
 
@@ -188,7 +191,10 @@ describe("session context edits", () => {
 
 		expect(session.getEntry(secondId)).toMatchObject({ firstKeptEntryId: secondId });
 		expect(
-			session.buildSessionProjection().messages.map((message) => ("summary" in message ? message.summary : "")),
+			session
+				.buildSessionProjection()
+				.messages.filter((message) => message.role !== "compactionBoundary")
+				.map((message) => ("summary" in message ? message.summary : "")),
 		).toEqual(["second handoff"]);
 	});
 
@@ -238,7 +244,8 @@ describe("session context edits", () => {
 
 		const estimate = estimateProjectedContextTokens(session.buildSessionProjection(), session.getBranch());
 		expect(estimate.usageTokens).toBe(0);
-		expect(estimate.tokens).toBeLessThan(100);
+		// Summary, kept input and the compaction boundary (~120 tokens), not the 50k usage.
+		expect(estimate.tokens).toBeLessThan(200);
 	});
 
 	it("includes effective system and tool context in edited estimates", () => {

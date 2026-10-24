@@ -221,7 +221,13 @@ describe("AgentSession compaction characterization", () => {
 		harness.sessionManager.appendCompaction("compacted", firstKeptEntryId, 100);
 
 		const messages = harness.sessionManager.buildSessionContext().messages;
-		expect(messages.map((message) => message.role)).toEqual(["system", "compactionSummary", "user", "user"]);
+		expect(messages.map((message) => message.role)).toEqual([
+			"system",
+			"compactionSummary",
+			"user",
+			"user",
+			"compactionBoundary",
+		]);
 		const checkpoint = messages[0];
 		if (checkpoint?.role !== "system") throw new Error("expected checkpoint system message");
 		expect(checkpoint.content).toBe("summarized instruction\n\nretained instruction");
@@ -255,7 +261,13 @@ describe("AgentSession compaction characterization", () => {
 			standing: [{ key: "mode", message: { role: "developer", content: "Plan" } }],
 		});
 		const messages = harness.sessionManager.buildSessionContext().messages;
-		expect(messages.map((message) => message.role)).toEqual(["system", "developer", "compactionSummary", "user"]);
+		expect(messages.map((message) => message.role)).toEqual([
+			"system",
+			"developer",
+			"compactionSummary",
+			"user",
+			"compactionBoundary",
+		]);
 	});
 
 	it("allows a queued prompt to start when manual compaction ends", async () => {
@@ -512,7 +524,8 @@ describe("AgentSession compaction characterization", () => {
 			const order: string[] = [];
 			const observedSettings: unknown[] = [];
 			const harness = await createHarness({
-				models: [{ id: "faux-1", contextWindow: 2600, maxTokens: 100 }],
+				// 2700: room for the compaction boundary in the resumed request (the faux usage counts it).
+				models: [{ id: "faux-1", contextWindow: 2700, maxTokens: 100 }],
 				settings: {
 					compaction: modelOverride
 						? {

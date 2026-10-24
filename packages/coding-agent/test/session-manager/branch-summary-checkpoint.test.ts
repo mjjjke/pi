@@ -72,6 +72,7 @@ describe("branch-summary checkpoint (§4.1, §7.5)", () => {
 			"branchSummary",
 			"user",
 			"assistant",
+			"compactionBoundary",
 		]);
 		expect(JSON.stringify(messages)).toContain("branch summary text");
 	});

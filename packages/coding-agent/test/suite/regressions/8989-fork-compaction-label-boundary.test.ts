@@ -18,6 +18,7 @@ describe("regression #8989", () => {
 		expect(session.buildSessionContext().messages).toMatchObject([
 			{ role: "compactionSummary", summary: "summary" },
 			{ role: "user", content: "kept" },
+			{ role: "compactionBoundary" },
 			{ role: "user", content: "after" },
 		]);
 	});

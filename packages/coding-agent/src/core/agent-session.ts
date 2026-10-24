@@ -955,6 +955,9 @@ export class AgentSession {
 		// One tool snapshot per request boundary (§6): the loop refreshes its tools from state before
 		// declaring changes, and prepareRequest sends exactly that declared snapshot.
 		this.agent.getTools = () => this.agent.state.tools.slice();
+		// The compaction boundary is context, never input: a transcript ending with it still ends with what
+		// precedes it, so continue() runs queued input after a final reply instead of answering the boundary.
+		this.agent.isContextMarker = (message) => message.role === "compactionBoundary";
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
 			// No request goes out on a session whose file may hold a partial entry (§3.6).
@@ -1632,7 +1635,8 @@ export class AgentSession {
 		const projection = this._createBoundaryPreviewManager(drafts).buildSessionProjection();
 		const pendingMessages = this._getPendingBoundaryMessages();
 		const llmMessages = convertToLlm(projection.messages);
-		const finalRole = llmMessages
+		// The compaction boundary is not input: it never makes the context continuable.
+		const finalRole = convertToLlm(projection.messages.filter((message) => message.role !== "compactionBoundary"))
 			.filter((message) => message.role !== "system" && message.role !== "developer")
 			.at(-1)?.role;
 		const contextCanContinue = finalRole !== undefined && finalRole !== "assistant";
