@@ -107,7 +107,10 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.prompt).toHaveBeenCalledWith("Say done", { images, startPersisted: expect.any(Function) });
+		expect(session.prompt).toHaveBeenCalledWith("Say done", {
+			images,
+			onStartMessagePersistence: expect.any(Function),
+		});
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
@@ -122,7 +125,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.prompt).toHaveBeenCalledWith("hello", { startPersisted: expect.any(Function) });
+		expect(session.prompt).toHaveBeenCalledWith("hello", { onStartMessagePersistence: expect.any(Function) });
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});

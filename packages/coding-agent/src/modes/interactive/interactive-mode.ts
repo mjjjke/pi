@@ -70,7 +70,7 @@ import {
 	type AgentSessionEvent,
 	type PromptOptions,
 	parseSkillBlock,
-	type StartPersistedReceipt,
+	type StartMessagePersistence,
 } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
@@ -1282,20 +1282,21 @@ export class InteractiveMode {
 	/**
 	 * Run a prompt and report, from core's own signals, whether its input never reached the journal:
 	 * a rejection unless core's receipt says the starting message was persisted, or a resolved prompt
-	 * whose receipt says it was not. Without a receipt (handled, queued or deferred input) a resolved
-	 * prompt is never treated as unsent. An unsent start message is taken back from the chat.
+	 * whose receipt says it was not. Without a receipt by the time `prompt()` returns (handled or
+	 * queued input, or input deferred from agent_settled, whose receipt comes later and is ignored) a
+	 * resolved prompt is never treated as unsent. An unsent start message is taken back from the chat.
 	 */
 	private async promptAndTrackStart(
 		text: string,
 		options?: PromptOptions,
 	): Promise<{ rejected: boolean; error?: unknown; unsent: boolean }> {
-		let receipt: StartPersistedReceipt | undefined;
+		let receipt: StartMessagePersistence | undefined;
 		let rejected = false;
 		let error: unknown;
 		try {
 			await this.session.prompt(text, {
 				...options,
-				startPersisted: (value) => {
+				onStartMessagePersistence: (value) => {
 					receipt = value;
 				},
 			});
@@ -1304,7 +1305,7 @@ export class InteractiveMode {
 			error = caught;
 		}
 		// Assigned by a callback during the await, which control-flow narrowing cannot see.
-		const start = receipt as StartPersistedReceipt | undefined;
+		const start = receipt as StartMessagePersistence | undefined;
 		const unsent = rejected ? start?.persisted !== true : start?.persisted === false;
 		if (unsent && start) {
 			for (const component of this.userMessageComponents.get(start.message) ?? []) {

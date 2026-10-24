@@ -7,7 +7,7 @@
  */
 
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
-import type { StartPersistedReceipt } from "../core/agent-session.ts";
+import type { StartMessagePersistence } from "../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -140,15 +140,15 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		// A prompt whose starting message never reached the journal, or a session that can no longer
 		// write, fails the command in every output mode (its run reports the error and still resolves).
 		let unsent = false;
-		const startPersisted = (receipt: StartPersistedReceipt) => {
+		const onStartMessagePersistence = (receipt: StartMessagePersistence) => {
 			if (!receipt.persisted) unsent = true;
 		};
 		if (initialMessage) {
-			await session.prompt(initialMessage, { images: initialImages, startPersisted });
+			await session.prompt(initialMessage, { images: initialImages, onStartMessagePersistence });
 		}
 
 		for (const message of messages) {
-			await session.prompt(message, { startPersisted });
+			await session.prompt(message, { onStartMessagePersistence });
 		}
 		if (unsent || session.sessionManager.getPersistenceError()) exitCode = 1;
 

@@ -332,17 +332,28 @@ export interface PromptOptions {
 	/** Internal hook used by RPC mode to observe how an accepted prompt was dispatched. Not called if the prompt is rejected. */
 	preflightResult?: (disposition: PromptDisposition) => void;
 	/**
-	 * Internal hook used by interactive and print modes: called once when a run this prompt started
-	 * ends, with its starting message and whether that message reached the session journal. Not
-	 * called for handled or queued input, or when the prompt is rejected before its run starts.
+	 * Observer of the journal outcome of the starting message of the run this prompt starts (public;
+	 * interactive and print modes use it to restore or fail unsent prompts).
+	 *
+	 * - Called once per started run, with `persisted: true` only if that message's own append
+	 *   succeeded (an in-memory session counts). It says nothing about the run's success or about
+	 *   filesystem durability, and `false` covers both a failed append and a run that ended before it.
+	 * - Called when the run's agent loop has ended (after its agent_end), before the remaining
+	 *   finalization and before agent_settled.
+	 * - Not called for handled or queued input, or when the prompt is rejected before its run starts.
+	 * - A prompt submitted during agent_settled runs after that settlement: its `prompt()` resolves
+	 *   at once, and this observer is called later, when the deferred run ends.
+	 * - An exception it throws is ignored.
 	 */
-	startPersisted?: (receipt: StartPersistedReceipt) => void;
+	onStartMessagePersistence?: (outcome: StartMessagePersistence) => void;
 }
 
-/** Whether a run's starting message reached the session journal (see `PromptOptions.startPersisted`). */
-export interface StartPersistedReceipt {
-	message: AgentMessage;
-	persisted: boolean;
+/** Journal outcome of a run's starting message (see `PromptOptions.onStartMessagePersistence`). */
+export interface StartMessagePersistence {
+	/** The starting message as sent (after input hooks, skill and template expansion). */
+	readonly message: AgentMessage;
+	/** Whether that message's own append to the session succeeded. */
+	readonly persisted: boolean;
 }
 
 /** A developer instruction queued with queueDeveloperMessage() and not yet committed. */
@@ -474,7 +485,8 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
 	/** The starting message of the active run and whether its append succeeded. */
-	private _runStartReceipt: StartPersistedReceipt | undefined;
+	/** The starting message of the active run and whether its append succeeded. */
+	private _runStart: { message: AgentMessage; persisted: boolean } | undefined;
 	/** Only developer instructions may commit immediately while before_agent_start handlers run. */
 	private _isPreparingRun = false;
 	/** Set while bindExtensions() or reload() runs startup; runs wait for it (readiness barrier). */
@@ -1772,7 +1784,7 @@ export class AgentSession {
 				entryId = this.sessionManager.appendMessage(event.message);
 			}
 			if (entryId) this._entryIdsByMessage.set(event.message, entryId);
-			if (entryId && this._runStartReceipt?.message === event.message) this._runStartReceipt.persisted = true;
+			if (entryId && this._runStart?.message === event.message) this._runStart.persisted = true;
 			if (entryId && (event.message.role === "user" || event.message.role === "custom")) this._inputArrived = true;
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1897,7 +1909,8 @@ export class AgentSession {
 	}
 
 	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
-		if (this._agentRunAbortRequested) return false;
+		// The post-run loop does not retry once writes are refused (§3.6).
+		if (this._agentRunAbortRequested || this._isSessionWriteBlocked()) return false;
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
 			return false;
@@ -2559,7 +2572,7 @@ export class AgentSession {
 		onStarted?: () => void,
 		admissionGen = this._admissionGen,
 		deferredStart?: DeferredStart,
-		onStartPersisted?: (receipt: StartPersistedReceipt) => void,
+		onStartMessagePersistence?: (outcome: StartMessagePersistence) => void,
 	): Promise<void> {
 		// Readiness barrier: a run requested during binding or reload starts after it. The loop awaits
 		// only while a barrier exists, so its last check and the reservation below run in the same
@@ -2593,8 +2606,7 @@ export class AgentSession {
 					// Staged content is data: it waits for the next B instead of being committed (§3.6).
 					this._stagePreflightBuffers();
 				} else {
-					this._flushPendingBashMessages();
-					this._flushPendingCustomMessages();
+					this._flushPendingAtRunEnd();
 				}
 			}
 			// nextTurn messages consumed by this run go back to the front (Sol F4b).
@@ -2634,8 +2646,8 @@ export class AgentSession {
 			if (trigger.messageType === "user") this._flushPendingCustomMessages();
 		}
 		const messages: AgentMessage[] = [...(update ? [update] : []), prepared.start, ...nextTurn, ...prepared.returned];
-		const startReceipt: StartPersistedReceipt = { message: prepared.start, persisted: false };
-		this._runStartReceipt = startReceipt;
+		const runStart = { message: prepared.start, persisted: false };
+		this._runStart = runStart;
 		onStarted?.();
 
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
@@ -2660,26 +2672,29 @@ export class AgentSession {
 				await this.agent.continue();
 			}
 		} finally {
-			if (this._runStartReceipt === startReceipt) this._runStartReceipt = undefined;
+			// Settlement must always happen: nothing in the finalization may skip agent_settled.
 			try {
-				onStartPersisted?.(startReceipt);
-			} catch {
-				// An observer hook must not change how the run ends.
-			}
-			this._inputArrived = false;
-			if (!this._disposed) this._commitPendingInstructionsAtRunEnd();
-			if (this._agentRunAbortRequested) this._finishCancelledRetry();
-			this._failedResponse = undefined;
-			this._runSystemPromptOptions = undefined;
-			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
-			this._pendingNewSessionRequest?.resolve({ cancelled: true });
-			this._pendingNewSessionRequest = undefined;
-			if (this._disposed) {
-				this._isAgentRunActive = false;
-				this._resolveIdleWaitIfIdle();
-			} else {
-				await this._emitAgentSettled();
+				if (this._runStart === runStart) this._runStart = undefined;
+				try {
+					onStartMessagePersistence?.({ message: runStart.message, persisted: runStart.persisted });
+				} catch {
+					// An observer hook must not change how the run ends.
+				}
+				this._inputArrived = false;
+				if (!this._disposed) this._commitPendingInstructionsAtRunEnd();
+				if (this._agentRunAbortRequested) this._finishCancelledRetry();
+				this._failedResponse = undefined;
+				this._runSystemPromptOptions = undefined;
+				this._flushPendingAtRunEnd();
+				this._pendingNewSessionRequest?.resolve({ cancelled: true });
+				this._pendingNewSessionRequest = undefined;
+			} finally {
+				if (this._disposed) {
+					this._isAgentRunActive = false;
+					this._resolveIdleWaitIfIdle();
+				} else {
+					await this._emitAgentSettled();
+				}
 			}
 		}
 	}
@@ -3067,7 +3082,7 @@ export class AgentSession {
 			() => preflightResult?.("started"),
 			admissionGen,
 			deferredStart,
-			options?.startPersisted,
+			options?.onStartMessagePersistence,
 		);
 	}
 
@@ -3396,12 +3411,20 @@ export class AgentSession {
 	}
 
 	private _appendCustomMessage(appMessage: CustomMessage): void {
+		this._writeCustomMessage(appMessage);
+		this._announceCustomMessage(appMessage);
+	}
+
+	private _writeCustomMessage(appMessage: CustomMessage): void {
 		this.sessionManager.appendCustomMessageEntry(
 			appMessage.customType,
 			appMessage.content,
 			appMessage.display,
 			appMessage.details,
 		);
+	}
+
+	private _announceCustomMessage(appMessage: CustomMessage): void {
 		this._refreshFinalizedContext();
 		this._emit({ type: "message_start", message: appMessage });
 		this._emit({ type: "message_end", message: appMessage });
@@ -3411,14 +3434,36 @@ export class AgentSession {
 	 * Append custom messages queued while the agent was running.
 	 * Called once the current turn's tool results are in agent state and session history.
 	 */
+	/**
+	 * Write the bash and passive custom content buffered during a run, after its agent_end (or after a
+	 * failed start). Never throws: a write failure here comes after the run's terminal events, so it
+	 * keeps the unwritten items buffered, is reported once on the runtime error channel (RPC
+	 * `extension_error`, interactive error line) and lets the run settle (§3.6). A sticky failure
+	 * makes the next prompt refuse with the same text.
+	 */
+	private _flushPendingAtRunEnd(): void {
+		try {
+			this._flushPendingBashMessages();
+			this._flushPendingCustomMessages();
+		} catch (error) {
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "session_persistence",
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	private _flushPendingCustomMessages(): void {
 		// Kept, not dropped, while writes are blocked: a failing flush must not cut a run's end short.
-		if (this._pendingCustomMessages.length === 0 || this._isSessionWriteBlocked()) return;
-
-		const pending = this._pendingCustomMessages;
-		this._pendingCustomMessages = [];
-		for (const appMessage of pending) {
-			this._appendCustomMessage(appMessage);
+		if (this._isSessionWriteBlocked()) return;
+		// Each item leaves the buffer only once written: a failed append keeps it and every later item
+		// (§3.6). Items queued by listeners of an announced message are written in the same pass.
+		while (this._pendingCustomMessages.length > 0) {
+			const appMessage = this._pendingCustomMessages[0]!;
+			this._writeCustomMessage(appMessage);
+			this._pendingCustomMessages.shift();
+			this._announceCustomMessage(appMessage);
 		}
 	}
 
@@ -5122,11 +5167,15 @@ export class AgentSession {
 	private _flushPendingBashMessages(): void {
 		if (this._pendingBashMessages.length === 0 || this._isSessionWriteBlocked()) return;
 
-		for (const bashMessage of this._pendingBashMessages) {
-			this.sessionManager.appendMessage(bashMessage);
+		// Each item leaves the buffer only once written, so a failed append keeps it and the rest (§3.6).
+		try {
+			while (this._pendingBashMessages.length > 0) {
+				this.sessionManager.appendMessage(this._pendingBashMessages[0]!);
+				this._pendingBashMessages.shift();
+			}
+		} finally {
+			this._refreshFinalizedContext();
 		}
-		this._pendingBashMessages = [];
-		this._refreshFinalizedContext();
 	}
 
 	// =========================================================================

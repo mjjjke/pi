@@ -78,7 +78,7 @@ function startedRun(persisted: boolean, extra?: (context: Context) => void): Sce
 		render(context, start);
 		extra?.(context);
 		if (!persisted) context.children.push({ assistantError: context.failWrites().message });
-		options?.startPersisted?.({ message: start, persisted });
+		options?.onStartMessagePersistence?.({ message: start, persisted });
 	};
 }
 
