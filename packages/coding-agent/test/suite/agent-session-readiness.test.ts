@@ -271,6 +271,55 @@ describe("AgentSession readiness barrier", () => {
 		expect(session.messages.filter((m) => m.role === "user").map((m) => getMessageText(m))).toEqual(["second"]);
 	});
 
+	it("without a barrier a custom start reserves its run synchronously, so reload rejects as busy (recheck2)", async () => {
+		const gate = deferred();
+		const phases: string[] = [];
+		const harness = await setup([
+			(pi) => {
+				pi.on("before_agent_start", () => {
+					const readiness = (harness.session as unknown as { _readiness?: Promise<void> })._readiness;
+					phases.push(`preflight:${readiness ? "reloading" : "ready"}`);
+				});
+			},
+		]);
+		await harness.session.bindExtensions({});
+		const run = harness.session.sendCustomMessage(
+			{ customType: "probe", content: "hello", display: false },
+			{ triggerTurn: true },
+		);
+		const reload = harness.session.reload({ beforeSessionStart: () => gate.promise }).then(
+			() => "resolved",
+			(error: Error) => error.message,
+		);
+		gate.resolve();
+		expect(await reload).toMatch(/Cannot reload while a run is active/);
+		await run;
+		expect(phases).toEqual(["preflight:ready"]);
+		expect(harness.session.messages.map((m) => m.role)).toEqual(["system", "custom", "assistant"]);
+	});
+
+	it("two back-to-back triggered custom messages both persist: the first is busy immediately (recheck2)", async () => {
+		const harness = await setup([]);
+		await harness.session.bindExtensions({});
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		const first = harness.session.sendCustomMessage(
+			{ customType: "test", content: "first", display: false },
+			{ triggerTurn: true },
+		);
+		expect(harness.session.isStreaming).toBe(true);
+		const second = harness.session.sendCustomMessage(
+			{ customType: "test", content: "second", display: false },
+			{ triggerTurn: true },
+		);
+		const results = await Promise.allSettled([first, second]);
+		expect(results.map((result) => result.status)).toEqual(["fulfilled", "fulfilled"]);
+		await harness.session.waitForIdle();
+		expect(harness.session.messages.filter((m) => m.role === "custom").map((m) => m.content)).toEqual([
+			"first",
+			"second",
+		]);
+	});
+
 	it.each([
 		["closeAdmission", (harness: Harness) => harness.session.closeAdmission()],
 		["dispose", (harness: Harness) => harness.session.dispose()],

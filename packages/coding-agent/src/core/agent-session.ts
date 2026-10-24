@@ -2520,8 +2520,13 @@ export class AgentSession {
 		admissionGen = this._admissionGen,
 		deferredStart?: DeferredStart,
 	): Promise<void> {
-		// Readiness barrier: a run requested during binding or reload starts after it.
-		await this._awaitReadiness(deferredStart);
+		// Readiness barrier: a run requested during binding or reload starts after it. The loop awaits
+		// only while a barrier exists, so its last check and the reservation below run in the same
+		// continuation (no reload can slip in between, and back-to-back starts see this one as busy).
+		while (this._readiness) {
+			deferredStart?.follow();
+			await this._readiness;
+		}
 		this._throwIfAdmissionChanged(admissionGen);
 		// After an ambiguous append the session refuses runs until it is reopened (§3.6).
 		const persistenceError = this.sessionManager.getPersistenceError();
@@ -2850,7 +2855,11 @@ export class AgentSession {
 	): Promise<void> {
 		const deferredStart = this._trackDeferredStart();
 		try {
-			await this._awaitReadiness(deferredStart);
+			// Same no-gap rule as _startRun: the last readiness check and the dispatch below share a continuation.
+			while (this._readiness) {
+				deferredStart.follow();
+				await this._readiness;
+			}
 			// Admission may have closed while waiting: no command or input hook runs then.
 			this._throwIfAdmissionChanged(admissionGen);
 			await this._promptWhenReady(text, options, admissionGen, deferredStart);
@@ -2860,19 +2869,10 @@ export class AgentSession {
 	}
 
 	/**
-	 * Wait until no readiness barrier is installed. A deferred start always belongs to the barrier it
-	 * is currently waiting on: when it meets a newer barrier, it leaves the older binder's set before
-	 * waiting, so no bind or reload waits on a start that itself waits on a later barrier.
-	 */
-	private async _awaitReadiness(deferredStart?: DeferredStart): Promise<void> {
-		while (this._readiness) {
-			deferredStart?.follow();
-			await this._readiness;
-		}
-	}
-
-	/**
-	 * Register a start deferred by the current readiness barrier. The barrier holding it waits (after
+	 * Register a start deferred by the current readiness barrier. Each readiness wait calls `follow()`
+	 * before awaiting, so a start always belongs to the barrier it is waiting on: meeting a newer
+	 * barrier releases the older binder, and no bind or reload waits on a start that waits on a later
+	 * barrier. The barrier holding it waits (after
 	 * its own release) until the start reserves its run, settles, reaches extension code, or moves to
 	 * a newer barrier (`follow()`). One set per barrier.
 	 */
