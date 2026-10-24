@@ -109,6 +109,7 @@ import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
+	isSessionPersistenceErrorMessage,
 	type SessionEntry,
 	SessionManager,
 	sessionEntryToContextMessages,
@@ -449,6 +450,9 @@ export interface InteractiveModeOptions {
 	terminal?: Terminal;
 }
 
+/** Chat components rendered for one user message. */
+type UserMessageRender = { message: AgentMessage; components: Component[] };
+
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private renderer: TuiMainScreen | TuiAltScreen;
@@ -557,6 +561,8 @@ export class InteractiveMode {
 	/** The `/bug` hint is shown at most once per session so error output stays readable. */
 	private bugReportHintShown = false;
 	private installChangeWarningShown = false;
+	/** Chat components of the latest user `message_start`, so a prompt that never reached the journal can be taken back. */
+	private lastUserMessageRender: UserMessageRender | undefined;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1254,13 +1260,49 @@ export class InteractiveMode {
 		// Main interactive loop
 		while (true) {
 			const userInput = await this.getUserInput();
-			try {
-				await this.session.prompt(userInput);
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				this.showError(errorMessage);
-			}
+			await this.submitPrompt(userInput);
 		}
+	}
+
+	/**
+	 * Run a prompt submitted from the editor. A prompt that never reached the journal goes back to the
+	 * editor instead of being lost (refused, preflight failure) or left on screen as if sent (its append
+	 * failed, §3.6). The run reports the failed append itself, so only a rejection shows an error here.
+	 */
+	private async submitPrompt(text: string): Promise<void> {
+		const countUserEntries = () =>
+			this.sessionManager.getEntries().filter((entry) => entry.type === "message" && entry.message.role === "user")
+				.length;
+		const userEntriesBefore = countUserEntries();
+		const writeFailedBefore = this.sessionManager.getPersistenceError() !== undefined;
+		this.lastUserMessageRender = undefined;
+		let rejected = false;
+		try {
+			await this.session.prompt(text);
+		} catch (error: unknown) {
+			rejected = true;
+			this.showError(error instanceof Error ? error.message : "Unknown error occurred");
+		}
+		const writeFailed = !writeFailedBefore && this.sessionManager.getPersistenceError() !== undefined;
+		if ((!rejected && !writeFailed) || countUserEntries() !== userEntriesBefore) return;
+		// Set by the run's user message_start; the await above hides that assignment from narrowing.
+		const shown = this.lastUserMessageRender as UserMessageRender | undefined;
+		for (const component of shown?.components ?? []) this.chatContainer.removeChild(component);
+		this.lastUserMessageRender = undefined;
+		this.restorePromptToEditor(text);
+	}
+
+	/** Put an unsent prompt back in the editor, before any text typed meanwhile (as queued messages are restored). */
+	private restorePromptToEditor(text: string): void {
+		const combined = [text, this.editor.getText()].filter((part) => part.trim()).join("\n\n");
+		this.editor.setText(combined);
+		this.ui.requestRender();
+	}
+
+	private renderUserMessageStart(message: AgentMessage): void {
+		const start = this.chatContainer.children.length;
+		this.addMessageToChat(message);
+		this.lastUserMessageRender = { message, components: this.chatContainer.children.slice(start) };
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
@@ -2183,6 +2225,8 @@ export class InteractiveMode {
 
 	private maybeSuggestBugReport(message: AssistantMessage): void {
 		if (message.stopReason !== "error" || isRetryableAssistantError(message)) return;
+		// A failed session write is an environment problem, and its message already says how to recover.
+		if (isSessionPersistenceErrorMessage(message.errorMessage)) return;
 		if (/\b(?:abort(?:ed)?|cancel(?:l?ed)?)\b/i.test(message.errorMessage ?? "")) return;
 		if (this.maybeShowInstallChangeWarning()) return;
 		this.suggestBugReport();
@@ -3513,7 +3557,7 @@ export class InteractiveMode {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
-					this.addMessageToChat(event.message);
+					this.renderUserMessageStart(event.message);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {

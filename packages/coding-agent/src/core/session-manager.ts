@@ -1537,6 +1537,13 @@ async function listSessionsFromDir(
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
  */
+const SESSION_PERSISTENCE_ERROR_PREFIX = "Session file write failed (";
+
+/** True for the text of a {@link SessionPersistenceError}, e.g. an assistant error message that reports one. */
+export function isSessionPersistenceErrorMessage(text: string | undefined): boolean {
+	return text?.startsWith(SESSION_PERSISTENCE_ERROR_PREFIX) ?? false;
+}
+
 /** An append to an existing session file failed; the file may end with a partial entry (§3.6). */
 export class SessionPersistenceError extends Error {
 	readonly code: string;
@@ -1544,7 +1551,7 @@ export class SessionPersistenceError extends Error {
 	constructor(cause: unknown) {
 		const code = (cause as NodeJS.ErrnoException | undefined)?.code ?? "unknown";
 		super(
-			`Session file write failed (${code}): the last entry may be missing or partial. Resume the session (/resume, or restart with pi -c) to continue.`,
+			`${SESSION_PERSISTENCE_ERROR_PREFIX}${code}): the last entry may be missing or partial. Resume the session (/resume, or restart with pi -c) to continue.`,
 			{ cause },
 		);
 		this.name = "SessionPersistenceError";
