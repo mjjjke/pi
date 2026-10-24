@@ -4742,6 +4742,7 @@ export class AgentSession {
 					void this.abort();
 				},
 				hasPendingMessages: () => this.pendingMessageCount > 0,
+				getStagedMessages: () => this.stagedMessages.map((message) => structuredClone(message)),
 				shutdown: () => {
 					this._extensionShutdownHandler?.();
 				},

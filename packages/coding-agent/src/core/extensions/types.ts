@@ -67,7 +67,7 @@ import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { McpServerConfig, McpServerRegistry, RegisteredMcpServer } from "../mcp-servers.ts";
-import type { CustomMessage } from "../messages.ts";
+import type { BashExecutionMessage, CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type {
@@ -369,6 +369,12 @@ export interface ExtensionContext {
 	abort(): void;
 	/** Whether there are queued messages waiting */
 	hasPendingMessages(): boolean;
+	/**
+	 * Copies of the content staged before the branch's bootstrap commit (passive custom messages and bash
+	 * results held until the first run writes the initial system snapshot), in commit order. Staged content
+	 * survives `/reload`; `hasPendingMessages()` does not count it. Empty once committed or discarded.
+	 */
+	getStagedMessages(): Array<CustomMessage | BashExecutionMessage>;
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
@@ -2615,6 +2621,8 @@ export interface ExtensionContextActions {
 	getSignal: () => AbortSignal | undefined;
 	abort: () => void;
 	hasPendingMessages: () => boolean;
+	/** Default: no staged content. */
+	getStagedMessages?: () => Array<CustomMessage | BashExecutionMessage>;
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
