@@ -106,10 +106,15 @@ describe("background compaction extension API", () => {
 			const kept = h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
 			h.session.refreshContext();
 			const ctx = h.session.extensionRunner.createContext();
+			let unsubscribedApplied = 0;
+			const off = h.session.subscribe((event) => {
+				if (event.type === "session_background_compaction" && event.phase === "applied") unsubscribedApplied++;
+			});
 			const now = h.session.compactNow();
 			await vi.waitFor(() => expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed"));
 			summary.resolve({ summary: "summary", firstKeptEntryId: kept, tokensBefore: 0 });
 			await entered.promise;
+			off();
 			expect(h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 			expect(h.session.cancelBackgroundCompaction()).toBe(false);
 			if (action === "reload") await expect(h.session.reload()).rejects.toThrow("Cannot reload");
@@ -120,6 +125,7 @@ describe("background compaction extension API", () => {
 			release.resolve();
 			expect(await now).toMatchObject({ status: "applied" });
 			expect.soft(laterHandler).toBe(action === "dispose" ? 0 : 1);
+			expect(unsubscribedApplied).toBe(0);
 			expect(
 				h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
 			).toHaveLength(1);
