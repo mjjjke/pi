@@ -50,6 +50,7 @@ import {
 	TuiMainScreen,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
+	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
@@ -83,6 +84,7 @@ import {
 	detectCacheMiss,
 } from "../../core/cache-stats.ts";
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
+import { estimateProjectedContextTokens } from "../../core/compaction/index.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
@@ -105,7 +107,7 @@ import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
-import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
+import { type CompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -117,6 +119,7 @@ import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
+	buildSessionProjection,
 	type SessionEntry,
 	SessionManager,
 	sessionEntryToContextMessages,
@@ -285,7 +288,23 @@ type CompactionCostNotice = {
 	usage: Usage;
 };
 
-type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" | "usage" }> | CompactionCostNotice;
+// Display metadata only: never added to session entries or agent messages.
+type CompactionDisplay = { type: "compaction_display"; message: CompactionSummaryMessage; tokensAfter?: number };
+type KeptContextSeparator = { type: "kept_context" };
+type RenderSessionItem =
+	| AgentMessage
+	| Extract<SessionEntry, { type: "custom" | "usage" }>
+	| CompactionCostNotice
+	| CompactionDisplay
+	| KeptContextSeparator;
+
+function estimateCompactedTokens(branch: SessionEntry[], entryId: string): number | undefined {
+	const index = branch.findIndex((entry) => entry.id === entryId);
+	if (index < 0) return undefined;
+	// Reconstruct the install-time context, not later turns (or stale pre-compaction usage).
+	const installed = branch.slice(0, index + 1);
+	return estimateProjectedContextTokens(buildSessionProjection(installed), installed).tokens;
+}
 
 function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
 	return "type" in item && item.type === "custom";
@@ -3590,19 +3609,7 @@ export class InteractiveMode {
 					const branch = this.sessionManager.getBranch();
 					const compactionIndex = branch.findIndex((entry) => entry.id === event.entry.id);
 					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
-					const retainedEntries = entries.slice(1);
-					this.renderSessionEntries(retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)));
-					this.addMessageToChat(
-						createCompactionSummaryMessage(event.entry.summary, event.entry.tokensBefore, event.entry.timestamp),
-					);
-					if (event.entry.usage) {
-						this.addCompactionCostNotice({
-							type: "compaction_cost",
-							kind: "compaction",
-							usage: event.entry.usage,
-						});
-					}
-					this.renderSessionEntries(retainedEntries.filter((entry) => entriesAfterCompaction.has(entry.id)));
+					this.renderSessionEntries(entries);
 					for (const entryId of entriesAfterCompaction) this.entriesRenderedByBoundaryCompaction.add(entryId);
 					this.footer.invalidate();
 					this.ui.requestRender();
@@ -3811,7 +3818,7 @@ export class InteractiveMode {
 				} else if (event.phase === "applied") {
 					this.endBackgroundCompactionWait(event.jobId, false);
 					this.rebuildChatFromMessages();
-					this.showStatus("Context compacted");
+					this.addCompactionAppliedNotice();
 					void this.flushCompactionQueue({ willRetry: this.session.isStreaming });
 				}
 				this.ui.requestRender();
@@ -3860,23 +3867,8 @@ export class InteractiveMode {
 					if (entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
-					this.chatContainer.clear();
-					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(entries.slice(1));
-					this.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
-					if (event.result.usage) {
-						this.addCompactionCostNotice({
-							type: "compaction_cost",
-							kind: "compaction",
-							usage: event.result.usage,
-						});
-					}
+					this.rebuildChatFromMessages();
+					this.addCompactionAppliedNotice();
 					this.footer.invalidate();
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {
@@ -4036,7 +4028,10 @@ export class InteractiveMode {
 		return this.session.extensionRunner.applyAssistantMessageDisplayTransforms(message, { phase });
 	}
 
-	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
+	private addMessageToChat(
+		message: AgentMessage,
+		options?: { populateHistory?: boolean; compactionTokensAfter?: number },
+	): void {
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(
@@ -4077,6 +4072,7 @@ export class InteractiveMode {
 					message,
 					this.getMarkdownThemeWithSettings(),
 					this.outputPad,
+					options?.compactionTokensAfter,
 				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
@@ -4180,6 +4176,22 @@ export class InteractiveMode {
 		}
 
 		for (const item of items) {
+			if ("type" in item && item.type === "compaction_display") {
+				this.addMessageToChat(item.message, { ...options, compactionTokensAfter: item.tokensAfter });
+				continue;
+			}
+			if ("type" in item && item.type === "kept_context") {
+				this.chatContainer.addChild({
+					invalidate() {},
+					render(width) {
+						const label = " kept context ";
+						if (width < label.length + 2) return [theme.fg("dim", "─".repeat(width))];
+						const left = Math.floor((width - label.length) / 2);
+						return [theme.fg("dim", `${"─".repeat(left)}${label}${"─".repeat(width - label.length - left)}`)];
+					},
+				});
+				continue;
+			}
 			if (isCustomSessionEntry(item)) {
 				this.addCustomEntryToChat(item);
 				continue;
@@ -4268,17 +4280,39 @@ export class InteractiveMode {
 	): void {
 		// Selection coordinates point into the transcript being replaced (#9311).
 		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTextSelection();
-		const items = entries.flatMap((entry): RenderSessionItem[] => {
+		const items = entries.flatMap((entry, index): RenderSessionItem[] => {
 			if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
 				return [entry];
 			}
 			const messages = sessionEntryToContextMessages(entry);
+			if (entry.type === "compaction" && index === 0) {
+				const tokensAfter = estimateCompactedTokens(this.sessionManager.getBranch(), entry.id);
+				const display: RenderSessionItem[] = messages.map((message) =>
+					message.role === "compactionSummary" ? { type: "compaction_display", message, tokensAfter } : message,
+				);
+				if (entry.usage) display.push({ type: "compaction_cost", kind: "compaction", usage: entry.usage });
+				display.push({ type: "kept_context" });
+				return display;
+			}
 			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
 				return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
 			}
 			return messages;
 		});
 		this.renderSessionItems(items, options);
+	}
+
+	private addCompactionAppliedNotice(): void {
+		const head = this.sessionManager.buildContextEntries()[0];
+		if (head?.type !== "compaction") return;
+		const after = estimateCompactedTokens(this.sessionManager.getBranch(), head.id);
+		const change = `${formatTokens(head.tokensBefore)}${after === undefined ? "" : ` → ~${formatTokens(after)}`}`;
+		const text = `✓ Context compacted · ${change} ↑`;
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild({
+			invalidate() {},
+			render: (width) => [truncateToWidth(theme.fg("dim", text), width)],
+		});
 	}
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {

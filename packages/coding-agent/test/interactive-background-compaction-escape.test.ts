@@ -73,6 +73,7 @@ async function setup(hard = false, background = true) {
 		clearStatusIndicator: vi.fn(),
 		flushCompactionQueue: vi.fn(),
 		rebuildChatFromMessages: vi.fn(),
+		addCompactionAppliedNotice: vi.fn(),
 	};
 	for (const method of [
 		"restoreQueuedMessagesToEditor",

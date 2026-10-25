@@ -1,6 +1,16 @@
-import { Box, Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	Box,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	TruncatedText,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { formatTokens } from "./footer.ts";
 import { keyText } from "./keybinding-hints.ts";
 
 /**
@@ -12,11 +22,23 @@ export class CompactionSummaryMessageComponent extends Box {
 	private message: CompactionSummaryMessage;
 	private markdownTheme: MarkdownTheme;
 
-	constructor(message: CompactionSummaryMessage, markdownTheme: MarkdownTheme = getMarkdownTheme(), outputPad = 1) {
+	private tokensAfter: number | undefined;
+
+	constructor(
+		message: CompactionSummaryMessage,
+		markdownTheme: MarkdownTheme = getMarkdownTheme(),
+		outputPad = 1,
+		tokensAfter?: number,
+	) {
 		super(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		this.message = message;
+		this.tokensAfter = tokensAfter;
 		this.markdownTheme = markdownTheme;
 		this.updateDisplay();
+	}
+
+	override render(width: number): string[] {
+		return super.render(width).map((line) => truncateToWidth(line, width));
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -39,11 +61,14 @@ export class CompactionSummaryMessageComponent extends Box {
 
 		const tokenStr = this.message.tokensBefore.toLocaleString();
 		const label = theme.fg("customMessageLabel", `\x1b[1m[compaction]\x1b[22m`);
-		content.addChild(new Text(label, 0, 0));
+		const date = new Date(this.message.timestamp);
+		const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+		content.addChild(new TruncatedText(`${label} ${theme.fg("dim", time)}`, 0, 0));
+		const tokenChange = `${tokenStr}${this.tokensAfter === undefined ? "" : ` → ~${formatTokens(this.tokensAfter)}`}`;
 		content.addChild(new Spacer(1));
 
 		if (this.expanded) {
-			const header = `**Compacted from ${tokenStr} tokens**\n\n`;
+			const header = `**Compacted from ${tokenChange} tokens**\n\n`;
 			content.addChild(
 				new Markdown(header + this.message.summary, 0, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
@@ -51,8 +76,8 @@ export class CompactionSummaryMessageComponent extends Box {
 			);
 		} else {
 			content.addChild(
-				new Text(
-					theme.fg("customMessageText", `Compacted from ${tokenStr} tokens (`) +
+				new TruncatedText(
+					theme.fg("customMessageText", `${tokenChange} tokens (`) +
 						theme.fg("dim", keyText("app.tools.expand")) +
 						theme.fg("customMessageText", " to expand)"),
 					0,

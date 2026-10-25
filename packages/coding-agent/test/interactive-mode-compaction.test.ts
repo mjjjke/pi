@@ -87,7 +87,7 @@ describe("InteractiveMode compaction events", () => {
 				usage: previousUsage,
 			},
 		];
-		const fakeThis = { renderSessionItems: vi.fn() };
+		const fakeThis = { renderSessionItems: vi.fn(), sessionManager: { getBranch: () => entries.toReversed() } };
 		const renderSessionEntries = Reflect.get(InteractiveMode.prototype, "renderSessionEntries") as (
 			this: typeof fakeThis,
 			entries: SessionEntry[],
@@ -97,8 +97,13 @@ describe("InteractiveMode compaction events", () => {
 
 		expect(fakeThis.renderSessionItems).toHaveBeenCalledWith(
 			[
-				expect.objectContaining({ role: "compactionSummary", summary: "current summary" }),
+				expect.objectContaining({
+					type: "compaction_display",
+					message: expect.objectContaining({ role: "compactionSummary", summary: "current summary" }),
+					tokensAfter: expect.any(Number),
+				}),
 				{ type: "compaction_cost", kind: "compaction", usage: currentUsage },
+				{ type: "kept_context" },
 				expect.objectContaining({ role: "compactionSummary", summary: "previous summary" }),
 				{ type: "compaction_cost", kind: "compaction", usage: previousUsage },
 			],
@@ -106,7 +111,7 @@ describe("InteractiveMode compaction events", () => {
 		);
 	});
 
-	test("renders retained entries and appends the latest summary cost at the bottom", async () => {
+	test("rebuilds in context order and appends only a transient applied notice", async () => {
 		const usage: Usage = {
 			input: 10,
 			output: 20,
@@ -146,6 +151,8 @@ describe("InteractiveMode compaction events", () => {
 			chatContainer: { clear: vi.fn() },
 			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]) },
 			renderSessionEntries: vi.fn(),
+			rebuildChatFromMessages: vi.fn(),
+			addCompactionAppliedNotice: vi.fn(),
 			addMessageToChat: vi.fn(),
 			addCompactionCostNotice: vi.fn(),
 			showError: vi.fn(),
@@ -180,21 +187,10 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
-		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction]);
-		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
-		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
-			expect.objectContaining({
-				role: "compactionSummary",
-				tokensBefore: 123,
-				summary: "summary",
-			}),
-		);
-		expect(fakeThis.addCompactionCostNotice).toHaveBeenCalledWith({
-			type: "compaction_cost",
-			kind: "compaction",
-			usage,
-		});
+		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledOnce();
+		expect(fakeThis.addCompactionAppliedNotice).toHaveBeenCalledOnce();
+		expect(fakeThis.addMessageToChat).not.toHaveBeenCalled();
+		expect(fakeThis.addCompactionCostNotice).not.toHaveBeenCalled();
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 	});
 
