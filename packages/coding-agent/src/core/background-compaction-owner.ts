@@ -39,7 +39,7 @@ interface BackgroundCompactionOwnerOptions {
 	refresh(): void;
 	/** Standing delivery and session_compact, in today's order; applied follows below. */
 	notifyApplied(entryId: string, job: CompactionJobView): Promise<void>;
-	emit(event: BackgroundCompactionEvent): Promise<void>;
+	emit(event: BackgroundCompactionEvent, signal?: AbortSignal): Promise<void>;
 	/** Synchronous disposal starts terminal handlers before invalidating their runtime. */
 	emitBeforeInvalidation?(event: BackgroundCompactionEvent): Promise<void>;
 	/** Synchronous public observers, before disposal can disconnect them. Never awaited. */
@@ -58,6 +58,7 @@ export class BackgroundCompactionOwner {
 	private waiter?: { job: OwnedJob; controller: AbortController; stopped: boolean };
 	private events: Promise<void> = Promise.resolve();
 	private readonly notifications = new Set<AbortController>();
+	private eventLifecycle = new AbortController();
 	private readonly terminalDeliveries = new Set<BackgroundCompactionEvent>();
 
 	constructor(options: BackgroundCompactionOwnerOptions) {
@@ -122,6 +123,8 @@ export class BackgroundCompactionOwner {
 	/** Lifecycle disposal releases post-commit notification work, never its receipt. */
 	abortNotifications(): void {
 		for (const controller of this.notifications) controller.abort();
+		this.eventLifecycle.abort();
+		this.eventLifecycle = new AbortController();
 	}
 
 	/** Start every still-owed terminal consumer before its outgoing runtime is invalidated. */
@@ -293,12 +296,16 @@ export class BackgroundCompactionOwner {
 			...(view.cause ? { cause: view.cause } : {}),
 			...(usage.length ? { usage: usage.reduce(combineUsage) } : {}),
 		};
+		const lifecycle = this.eventLifecycle.signal;
 		const terminal = phase === "discarded" || phase === "failed";
 		if (terminal) this.terminalDeliveries.add(event);
 		const dispatch = (
 			beforeInvalidation && this.options.emitBeforeInvalidation
-				? this.options.emitBeforeInvalidation(event)
-				: this.events.then(() => raceBackgroundWait(this.options.emit(event), [notificationSignal]))
+				? raceBackgroundWait(this.options.emitBeforeInvalidation(event), [lifecycle, notificationSignal])
+				: this.events.then(() => {
+						if (lifecycle.aborted) return;
+						return raceBackgroundWait(this.options.emit(event, lifecycle), [lifecycle, notificationSignal]);
+					})
 		)
 			.catch((error) => this.report(error))
 			.finally(() => {

@@ -768,8 +768,9 @@ export class AgentSession {
 				this._emitIsolated(event, this._disposed && committedListeners ? committedListeners : this._eventListeners);
 			},
 			emitBeforeInvalidation: (event) => this._extensionRunner.emitBeforeInvalidation(event),
-			emit: async (event) => {
-				if (!this._disposed && !this._extensionRunner.isInvalidated()) await this._extensionRunner.emit(event);
+			emit: async (event, signal) => {
+				if (!this._disposed && !this._extensionRunner.isInvalidated())
+					await this._extensionRunner.emit(event, signal);
 			},
 			reportError: (error) =>
 				this._extensionRunner.emitError({
@@ -5638,7 +5639,11 @@ export class AgentSession {
 			this._requestRunStop();
 			this.abortCompaction();
 			this._background.abortNotifications();
-			this._background.cancel(event.reason === "reload" ? "reload" : "disposed");
+			this._background.cancel(event.reason === "reload" ? "reload" : "disposed", undefined, true);
+			this._background.deliverBeforeInvalidation();
+			// Terminal consumers have started on the valid outgoing branch. Unrelated
+			// signal-ignoring observers must not own shutdown's completion.
+			this._background.abortNotifications();
 			await this._background.flushEvents();
 		});
 		this._applyExtensionBindings(this._extensionRunner);

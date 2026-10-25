@@ -689,6 +689,7 @@ export class ExtensionRunner {
 	private async emitBackgroundTerminal(
 		event: Extract<RunnerEmitEvent, { type: "session_background_compaction" }>,
 		fanOut = false,
+		signal?: AbortSignal,
 	): Promise<void> {
 		let dispatch = this.backgroundTerminals.get(event);
 		if (!dispatch) {
@@ -710,7 +711,7 @@ export class ExtensionRunner {
 			dispatch = { next: 0, calls, pending: [] };
 			this.backgroundTerminals.set(event, dispatch);
 		}
-		while (dispatch.next < dispatch.calls.length && !this.isInvalidated()) {
+		while (dispatch.next < dispatch.calls.length && !this.isInvalidated() && !signal?.aborted) {
 			// Advance before invocation: dispose may reenter from this very handler.
 			const call = dispatch.calls[dispatch.next++];
 			const pending = call();
@@ -1325,9 +1326,9 @@ export class ExtensionRunner {
 		);
 	}
 
-	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+	async emit<TEvent extends RunnerEmitEvent>(event: TEvent, signal?: AbortSignal): Promise<RunnerEmitResult<TEvent>> {
 		if (event.type === "session_background_compaction" && (event.phase === "discarded" || event.phase === "failed")) {
-			await this.emitBackgroundTerminal(event);
+			await this.emitBackgroundTerminal(event, false, signal);
 			return undefined as RunnerEmitResult<TEvent>;
 		}
 		const ctx = this.createContext(event.type);
@@ -1337,7 +1338,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				// An awaited lifecycle handler may dispose or replace this runtime.
 				// Do not invoke the remaining snapshot with an already-stale context.
-				if (this.isInvalidated()) return result as RunnerEmitResult<TEvent>;
+				if (this.isInvalidated() || signal?.aborted) return result as RunnerEmitResult<TEvent>;
 				try {
 					const handlerResult = await handler(event, ctx);
 

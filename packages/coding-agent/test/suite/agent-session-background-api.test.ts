@@ -253,6 +253,51 @@ describe("background compaction extension API", () => {
 		).toHaveLength(1);
 	});
 
+	it.each(["started", "discarded"] as const)("review B6: reload releases a blocked %s observer", async (phase) => {
+		const entered = deferred<void>();
+		const release = deferred<void>();
+		const h = await createHarness({
+			settings: { compaction: { keepRecentTokens: 10 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => new Promise<never>(() => {}));
+					pi.on("session_background_compaction", async (event) => {
+						if (event.phase === phase) {
+							entered.resolve();
+							await release.promise;
+						}
+					});
+					pi.on("session_background_compaction", (event) => {
+						if (event.phase === "discarded") pi.appendEntry("review-discard-intent", { jobId: event.jobId });
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+		h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+		h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
+		h.session.refreshContext();
+		h.session.startBackgroundCompaction({ source: "model" });
+		if (phase === "started") await entered.promise;
+		let settled = false;
+		const reload = h.session.reload().finally(() => {
+			settled = true;
+		});
+		if (phase === "discarded") await entered.promise;
+		try {
+			await vi.waitFor(() => expect(settled).toBe(true), { timeout: 200 });
+			expect(
+				h.sessionManager
+					.getBranch()
+					.filter((entry) => entry.type === "custom" && entry.customType === "review-discard-intent"),
+			).toHaveLength(1);
+		} finally {
+			release.resolve();
+			await reload;
+		}
+	});
+
 	it("reload during a manual wait is refused without invalidation; after release it cancels the summary", async () => {
 		const summary = deferred<CompactionResult>();
 		const h = await createHarness({
