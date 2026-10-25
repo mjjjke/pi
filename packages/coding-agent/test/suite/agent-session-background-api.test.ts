@@ -1,5 +1,5 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompactionResult } from "../../src/core/compaction/index.ts";
 import type { ExtensionContext, SessionBackgroundCompactionEvent } from "../../src/core/extensions/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -75,6 +75,86 @@ describe("background compaction extension API", () => {
 		await run;
 		expect(phases.map((e) => e.phase)).toEqual(["started", "ready", "applied"]);
 		expect(ctx.getBackgroundCompaction!()).toBeUndefined();
+	});
+
+	it.each(["cancel", "reload", "dispose"] as const)(
+		"irreversible append survives %s inside an awaited compact handler",
+		async (action) => {
+			const summary = deferred<CompactionResult>();
+			const entered = deferred<void>();
+			const release = deferred<void>();
+			let laterHandler = 0;
+			const h = await createHarness({
+				settings: { compaction: { keepRecentTokens: 10 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_compact", async () => ({ compaction: await summary.promise }));
+						pi.on("session_compact", async () => {
+							entered.resolve();
+							await release.promise;
+						});
+						pi.on("session_compact", () => {
+							laterHandler++;
+						});
+					},
+				],
+			});
+			harnesses.push(h);
+			h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+			h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+			const kept = h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
+			h.session.refreshContext();
+			const ctx = h.session.extensionRunner.createContext();
+			const now = h.session.compactNow();
+			await vi.waitFor(() => expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed"));
+			summary.resolve({ summary: "summary", firstKeptEntryId: kept, tokensBefore: 0 });
+			await entered.promise;
+			expect(h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+			expect(h.session.cancelBackgroundCompaction()).toBe(false);
+			if (action === "reload") await expect(h.session.reload()).rejects.toThrow("Cannot reload");
+			if (action === "dispose") {
+				h.session.dispose();
+				expect(() => ctx.getBackgroundCompaction!()).toThrow("stale");
+			}
+			release.resolve();
+			expect(await now).toMatchObject({ status: "applied" });
+			expect.soft(laterHandler).toBe(action === "dispose" ? 0 : 1);
+			expect(
+				h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
+			).toHaveLength(1);
+			expect(h.eventsOfType("agent_start")).toHaveLength(0);
+		},
+	);
+
+	it("reload during a manual wait is refused without invalidation; after release it cancels the summary", async () => {
+		const summary = deferred<CompactionResult>();
+		const h = await createHarness({
+			settings: { compaction: { keepRecentTokens: 10 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => ({ compaction: await summary.promise }));
+				},
+			],
+		});
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+		h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+		const kept = h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
+		h.session.refreshContext();
+		const runner = h.session.extensionRunner;
+		const now = h.session.compactNow();
+		await vi.waitFor(() => expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed"));
+		await expect(h.session.reload()).rejects.toThrow("Cannot reload");
+		expect(runner.isInvalidated()).toBe(false);
+		expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed");
+		await h.session.abort();
+		expect(await now).toMatchObject({ status: "released" });
+		await h.session.reload();
+		expect(runner.isInvalidated()).toBe(true);
+		summary.resolve({ summary: "late", firstKeptEntryId: kept, tokensBefore: 0 });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(h.session.getBackgroundCompaction()).toBeUndefined();
+		expect(h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 	});
 
 	it("guards stale contexts and observes terminal cancellation before disposal removes listeners", async () => {
