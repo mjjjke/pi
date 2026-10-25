@@ -40,6 +40,8 @@ interface BackgroundCompactionOwnerOptions {
 	/** Standing delivery and session_compact, in today's order; applied follows below. */
 	notifyApplied(entryId: string, job: CompactionJobView): Promise<void>;
 	emit(event: BackgroundCompactionEvent): Promise<void>;
+	/** Synchronous disposal starts terminal handlers before invalidating their runtime. */
+	emitBeforeInvalidation?(event: BackgroundCompactionEvent): Promise<void>;
 	/** Synchronous public observers, before disposal can disconnect them. Never awaited. */
 	observe?(event: BackgroundCompactionEvent): void;
 	reportError(error: unknown): void;
@@ -116,7 +118,7 @@ export class BackgroundCompactionOwner {
 		this.waiter?.controller.abort();
 	}
 
-	cancel(cause = "user-cancel", jobId?: string): boolean {
+	cancel(cause = "user-cancel", jobId?: string, beforeInvalidation = false): boolean {
 		const owned = this.owned;
 		if (!owned || this.jobs.current !== owned.view || (jobId !== undefined && owned.view.id !== jobId)) return false;
 		// Q14: set the latch before a cancellation can release a wait or wake its done.
@@ -125,7 +127,7 @@ export class BackgroundCompactionOwner {
 			this.waiter.controller.abort();
 		}
 		const cancelled = this.jobs.cancel(cause, jobId);
-		if (cancelled) this.observeTerminal(owned);
+		if (cancelled) this.observeTerminal(owned, beforeInvalidation);
 		return cancelled;
 	}
 
@@ -235,19 +237,19 @@ export class BackgroundCompactionOwner {
 		}
 	}
 
-	private observeTerminal(owned: OwnedJob): Promise<void> {
+	private observeTerminal(owned: OwnedJob, beforeInvalidation = false): Promise<void> {
 		if (!owned.view.terminal) return Promise.resolve();
 		this.accountTerminalUsage(owned);
 		if (owned.terminalEvent) return owned.terminalEvent;
 		if (this.owned === owned) this.owned = undefined;
 		const phase = owned.view.phase;
 		if (phase === "applied" || phase === "failed" || phase === "discarded") {
-			owned.terminalEvent = this.emit(owned, phase);
+			owned.terminalEvent = this.emit(owned, phase, beforeInvalidation);
 		}
 		return owned.terminalEvent ?? Promise.resolve();
 	}
 
-	private emit(owned: OwnedJob, phase: BackgroundCompactionEvent["phase"]): Promise<void> {
+	private emit(owned: OwnedJob, phase: BackgroundCompactionEvent["phase"], beforeInvalidation = false): Promise<void> {
 		const { view } = owned;
 		const usage = view.usage;
 		const event: BackgroundCompactionEvent = {
@@ -258,8 +260,12 @@ export class BackgroundCompactionOwner {
 			...(view.cause ? { cause: view.cause } : {}),
 			...(usage.length ? { usage: usage.reduce(combineUsage) } : {}),
 		};
-		const dispatch = this.events.then(() => this.options.emit(event)).catch((error) => this.report(error));
-		this.events = dispatch;
+		const dispatch = (
+			beforeInvalidation && this.options.emitBeforeInvalidation
+				? this.options.emitBeforeInvalidation(event)
+				: this.events.then(() => this.options.emit(event))
+		).catch((error) => this.report(error));
+		this.events = beforeInvalidation ? Promise.all([this.events, dispatch]).then(() => {}) : dispatch;
 		try {
 			this.options.observe?.(structuredClone(event));
 		} catch (error) {

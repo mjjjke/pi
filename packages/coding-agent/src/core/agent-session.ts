@@ -766,6 +766,7 @@ export class AgentSession {
 				if (event.phase === "applied") this._backgroundAppliedListeners.delete(event.jobId);
 				this._emitIsolated(event, this._disposed && committedListeners ? committedListeners : this._eventListeners);
 			},
+			emitBeforeInvalidation: (event) => this._extensionRunner.emitBeforeInvalidation(event),
 			emit: async (event) => {
 				if (!this._disposed && !this._extensionRunner.isInvalidated()) await this._extensionRunner.emit(event);
 			},
@@ -2329,7 +2330,16 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		if (this._disposed) return;
-		this._background.cancel("disposed");
+		this._admissionGen++;
+		this._admissionClosed = true;
+		// A synchronous dispose cannot await handlers, but each terminal observer
+		// must start before invalidation. Shutdown custom sends join the stop writer.
+		this._isStoppingCustom = true;
+		try {
+			this._background.cancel("disposed", undefined, true);
+		} finally {
+			this._isStoppingCustom = false;
+		}
 		this._branchGeneration++;
 		this._disposed = true;
 		this._agentRunAbortRequested = true;
@@ -2343,8 +2353,6 @@ export class AgentSession {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
-		this._admissionGen++;
-		this._admissionClosed = true;
 		this._discardStaged();
 		for (const pending of this._pendingInstructions.splice(0)) {
 			try {
@@ -5615,6 +5623,10 @@ export class AgentSession {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
 		this._bindExtensionCore(this._extensionRunner);
+		this._extensionRunner.setBeforeShutdown(async (event) => {
+			this._background.cancel(event.reason === "reload" ? "reload" : "disposed");
+			await this._background.flushEvents();
+		});
 		this._applyExtensionBindings(this._extensionRunner);
 
 		const defaultActiveToolNames = this._baseToolsOverride

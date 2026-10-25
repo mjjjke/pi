@@ -2,6 +2,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompactionResult } from "../../src/core/compaction/index.ts";
 import type { ExtensionContext, SessionBackgroundCompactionEvent } from "../../src/core/extensions/index.ts";
+import { emitSessionShutdownEvent } from "../../src/core/extensions/runner.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function deferred<T>() {
@@ -171,7 +172,7 @@ describe("background compaction extension API", () => {
 		}
 	});
 
-	it.each(["reload", "dispose"] as const)(
+	it.each(["reload", "dispose", "shutdown"] as const)(
 		"review B4: %s persists terminal intent before invalidation or shutdown",
 		async (action) => {
 			let active = true;
@@ -182,6 +183,9 @@ describe("background compaction extension API", () => {
 						pi.on("session_before_compact", async () => new Promise<never>(() => {}));
 						pi.on("session_shutdown", () => {
 							active = false;
+						});
+						pi.on("session_background_compaction", async (event) => {
+							if (action === "dispose" && event.phase === "discarded") await new Promise<never>(() => {});
 						});
 						pi.on("session_background_compaction", (event) => {
 							if (active && event.phase === "discarded")
@@ -197,7 +201,10 @@ describe("background compaction extension API", () => {
 			h.session.refreshContext();
 			h.session.startBackgroundCompaction({ source: "model" });
 			if (action === "reload") await h.session.reload();
-			else h.session.dispose();
+			else if (action === "shutdown") {
+				await emitSessionShutdownEvent(h.session.extensionRunner, { type: "session_shutdown", reason: "quit" });
+				h.session.dispose();
+			} else h.session.dispose();
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			expect(
 				h.sessionManager

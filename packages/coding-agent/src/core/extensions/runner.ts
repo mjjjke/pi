@@ -280,6 +280,7 @@ export async function emitSessionShutdownEvent(
 	extensionRunner: ExtensionRunner,
 	event: SessionShutdownEvent,
 ): Promise<boolean> {
+	await extensionRunner.prepareForShutdown(event);
 	if (extensionRunner.hasHandlers("session_shutdown")) {
 		await extensionRunner.emit(event);
 		return true;
@@ -420,6 +421,7 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	private beforeShutdown?: (event: SessionShutdownEvent) => Promise<void>;
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
 
@@ -657,6 +659,45 @@ export class ExtensionRunner {
 		queueMicrotask(() => {
 			void this.emit(event);
 		});
+	}
+
+	/** Core lifecycle work must finish before a consumer disables itself at shutdown. */
+	setBeforeShutdown(handler: (event: SessionShutdownEvent) => Promise<void>): void {
+		this.beforeShutdown = handler;
+	}
+
+	async prepareForShutdown(event: SessionShutdownEvent): Promise<void> {
+		if (!this.isInvalidated()) await this.beforeShutdown?.(event);
+	}
+
+	/**
+	 * dispose() is synchronous. Start every terminal observer while its context is
+	 * still valid; asynchronous continuations retain the usual stale-context guards.
+	 * Progress/applied events keep ordinary sequential, awaited dispatch.
+	 */
+	async emitBeforeInvalidation(
+		event: Extract<RunnerEmitEvent, { type: "session_background_compaction" }>,
+	): Promise<void> {
+		const ctx = this.createContext(event.type);
+		const pending: Promise<void>[] = [];
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) {
+				if (this.isInvalidated()) return;
+				const report = (error: unknown) =>
+					this.emitError({
+						extensionPath: ext.path,
+						event: event.type,
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				try {
+					pending.push(Promise.resolve(handler(event, ctx)).then(() => {}, report));
+				} catch (error) {
+					report(error);
+				}
+			}
+		}
+		await Promise.all(pending);
 	}
 
 	getUIContext(): ExtensionUIContext {
