@@ -2957,6 +2957,7 @@ export class AgentSession {
 		this._pendingToolNames.clear();
 		try {
 			await this.agent.prompt(messages);
+			this._recoverCustomAdmissions();
 			// No retry, compaction, queued continuation or before-settle boundary once writes are blocked:
 			// each would start another refused run; queued input stays queued (§3.6).
 			while (!this._agentRunAbortRequested && !this._disposed && !this._isSessionWriteBlocked()) {
@@ -2969,12 +2970,14 @@ export class AgentSession {
 					if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) break;
 					if (!(await this._gatePostRunContinuation())) break;
 					await this.agent.continue();
+					this._recoverCustomAdmissions();
 					continue;
 				}
 				if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary())) break;
 				if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) break;
 				if (!(await this._gatePostRunContinuation())) break;
 				await this.agent.continue();
+				this._recoverCustomAdmissions();
 			}
 		} finally {
 			// Settlement must always happen: nothing in the finalization may skip agent_settled.
@@ -2990,14 +2993,7 @@ export class AgentSession {
 				if (this._agentRunAbortRequested) this._finishCancelledRetry();
 				this._failedResponse = undefined;
 				this._runSystemPromptOptions = undefined;
-				// The loop no longer owns admitted items. Failed/unreached receipts return to the
-				// store at their original arrival positions; no retry re-enqueues them.
-				for (const item of this._customStore.values()) {
-					if (item.state === "admitted") {
-						item.state = "buffered";
-						item.riderOf = undefined;
-					}
-				}
+				this._recoverCustomAdmissions();
 				this._flushPendingAtRunEnd();
 				this._pendingNewSessionRequest?.resolve({ cancelled: true });
 				this._pendingNewSessionRequest = undefined;
@@ -3741,7 +3737,7 @@ export class AgentSession {
 			item.riderOf = [...this._customStore.values()].findLast(
 				(older) =>
 					older.key === item.key &&
-					(older.lane === "steer" || older.lane === "trigger") &&
+					(older.lane === "steer" || (older.lane === "trigger" && older.delivery !== "followUp")) &&
 					older.state !== "admitted",
 			);
 		}
@@ -3787,6 +3783,18 @@ export class AgentSession {
 		};
 	}
 
+	/** Each low-level loop has unwound; recover failed receipts before any continuation drains younger handles. */
+	private _recoverCustomAdmissions(): void {
+		let recovered = false;
+		for (const item of this._customStore.values()) {
+			if (item.state !== "admitted") continue;
+			item.state = "buffered";
+			item.riderOf = undefined;
+			recovered = true;
+		}
+		if (recovered) this._flushPendingAtRunEnd();
+	}
+
 	private _isCustomWritable(item: OwnedCustomMessage): boolean {
 		if (item.state !== "buffered") return false;
 		if (item.riderOf && !this._customStore.has(item.riderOf.handle)) item.riderOf = undefined;
@@ -3794,7 +3802,13 @@ export class AgentSession {
 		if (item.lane === "notice") return true;
 		for (const older of this._customStore.values()) {
 			if (older === item) return true;
-			if (older.key === item.key && older.lane !== "followUp" && older.lane !== "notice") return false;
+			if (
+				older.key === item.key &&
+				older.lane !== "followUp" &&
+				older.lane !== "notice" &&
+				!(older.lane === "trigger" && older.delivery === "followUp")
+			)
+				return false;
 		}
 		return false;
 	}
