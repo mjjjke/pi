@@ -1,11 +1,11 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
-import { Container, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, Spacer, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
-import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { getMarkdownTheme, initTheme, Theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 beforeAll(() => {
@@ -31,7 +31,8 @@ function fixture(showCosts = false) {
 		rebuildChatFromMessages(): void;
 		renderSessionEntries(entries: ReturnType<SessionManager["getBranch"]>): void;
 		handleEvent(event: AgentSessionEvent): Promise<void>;
-		showStatus: ReturnType<typeof vi.fn>;
+		showStatus(message: string): void;
+		setToolsExpanded(expanded: boolean): void;
 	};
 	Object.assign(mode, {
 		isInitialized: true,
@@ -45,13 +46,14 @@ function fixture(showCosts = false) {
 		editor: {},
 		outputPad: 1,
 		toolOutputExpanded: false,
+		loadedResourcesContainer: new Container(),
+		lastStatusMessage: "",
 		getMarkdownThemeWithSettings: getMarkdownTheme,
 		getMarkdownTransformers: () => [],
 		clearStatusIndicator: vi.fn(),
 		endBackgroundCompactionWait: vi.fn(),
 		flushCompactionQueue: vi.fn(),
 		renderProjectTrustWarningIfNeeded: vi.fn(),
-		showStatus: vi.fn(),
 	});
 	Object.defineProperties(mode, {
 		sessionManager: { value: manager },
@@ -61,52 +63,101 @@ function fixture(showCosts = false) {
 	return { mode, manager, chat, output: () => stripAnsi(chat.render(80).join("\n")) };
 }
 
+function applyEvent(path: string): AgentSessionEvent {
+	return path === "background"
+		? { type: "session_background_compaction", phase: "applied", jobId: "job", source: "user" }
+		: {
+				type: "compaction_end",
+				reason: "manual",
+				result: { summary: "A useful summary", tokensBefore: 168342, firstKeptEntryId: "kept" },
+				aborted: false,
+				willRetry: false,
+			};
+}
+
+function expectOrder(output: string) {
+	expect(output).toContain("✓ compaction");
+	expect(output.indexOf("✓ compaction")).toBeLessThan(output.indexOf("kept message"));
+	expect(output).not.toContain("kept context");
+	expect(output).not.toContain("[compaction]");
+}
+
 describe("interactive compaction UI", () => {
-	test("initial rendering and rebuild keep summary, separator, tail in order without an applied notice", () => {
+	test("initial and rebuild retain faithful order with no separator or applied receipt; entries unchanged", () => {
 		const f = fixture();
 		const before = JSON.stringify(f.manager.getEntries());
 		f.mode.renderInitialMessages();
 		for (let i = 0; i < 2; i++) {
-			const output = f.output();
-			expect(output.indexOf("[compaction]")).toBeLessThan(output.indexOf("kept context"));
-			expect(output.indexOf("kept context")).toBeLessThan(output.indexOf("kept message"));
-			expect(output).toContain("168,342 → ~");
-			expect(output).not.toContain("✓ Context compacted");
+			expectOrder(f.output());
+			expect(f.output()).toContain("168k → ~");
+			expect(f.output()).not.toContain("compaction applied");
 			f.mode.rebuildChatFromMessages();
 		}
 		expect(JSON.stringify(f.manager.getEntries())).toBe(before);
 	});
 
 	test.each(["background", "foreground"])(
-		"%s apply has exactly one bottom notice, removed by rebuild",
+		"%s apply: one themed status, replaced by next status and removed on rebuild",
 		async (path) => {
 			const f = fixture();
-			const event: AgentSessionEvent =
-				path === "background"
-					? { type: "session_background_compaction", phase: "applied", jobId: "job", source: "user" }
-					: {
-							type: "compaction_end",
-							reason: "manual",
-							result: { summary: "A useful summary", tokensBefore: 168342, firstKeptEntryId: "kept" },
-							aborted: false,
-							willRetry: false,
-						};
-			await f.mode.handleEvent(event);
-			const output = f.output();
-			expect(output.indexOf("[compaction]")).toBeLessThan(output.indexOf("kept context"));
-			expect(output.indexOf("kept context")).toBeLessThan(output.indexOf("kept message"));
-			expect(output.match(/✓ Context compacted/g)).toHaveLength(1);
-			expect(output.trimEnd().split("\n").at(-1)).toMatch(/✓ Context compacted · 168k → ~\S+ ↑/);
-			expect(f.mode.showStatus).not.toHaveBeenCalledWith("Context compacted");
-			f.mode.rebuildChatFromMessages();
-			expect(f.output()).not.toContain("✓ Context compacted");
+			const before = JSON.stringify(f.manager.getEntries());
+			const fg = vi.spyOn(Theme.prototype, "fg");
+			try {
+				await f.mode.handleEvent(applyEvent(path));
+				expectOrder(f.output());
+				expect(f.output().match(/✓ compaction applied/g)).toHaveLength(1);
+				expect(f.output().trimEnd().split("\n").at(-1)?.trim()).toMatch(
+					/^✓ compaction applied {2}168k → ~\S+ tokens$/,
+				);
+				expect(f.output()).not.toContain("Context compacted");
+				expect(fg).toHaveBeenCalledWith("success", "✓");
+				expect(fg.mock.calls.some(([key, text]) => key === "dim" && text.includes("compaction applied"))).toBe(
+					true,
+				);
+				const length = f.chat.children.length;
+				f.mode.showStatus("Next status");
+				expect(f.chat.children).toHaveLength(length);
+				expect(f.output()).not.toContain("compaction applied");
+				expect(f.output()).toContain("Next status");
+				await f.mode.handleEvent(applyEvent(path));
+				f.mode.rebuildChatFromMessages();
+				expect(f.output()).not.toContain("compaction applied");
+				expect(JSON.stringify(f.manager.getEntries())).toBe(before);
+			} finally {
+				fg.mockRestore();
+			}
 		},
 	);
 
-	test("install-time estimate stays fixed after later turns and their usage", () => {
+	test("applied status is one width-safe row and does not change when a later non-adjacent status appears", async () => {
+		const f = fixture();
+		await f.mode.handleEvent(applyEvent("background"));
+		const status = f.chat.children.at(-1)!;
+		const original = stripAnsi(status.render(80).join("\n"));
+		for (const width of [0, 1, 12, 30]) {
+			const lines = status.render(width);
+			expect(lines).toHaveLength(1);
+			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
+		}
+		f.chat.addChild(new Spacer(1));
+		f.mode.showStatus("Later status");
+		expect(stripAnsi(status.render(80).join("\n"))).toBe(original);
+	});
+
+	test("global expansion toggles the summary and replaces the apply status", async () => {
+		const f = fixture();
+		await f.mode.handleEvent(applyEvent("background"));
+		f.mode.setToolsExpanded(true);
+		expect(f.output()).toContain("A useful summary");
+		expect(f.output()).not.toContain("compaction applied");
+		f.mode.setToolsExpanded(false);
+		expect(f.output()).not.toContain("A useful summary");
+	});
+
+	test("install-time estimate remains fixed after later usage", () => {
 		const f = fixture();
 		f.mode.rebuildChatFromMessages();
-		const before = f.output().match(/168,342 → ~\S+/)?.[0];
+		const before = f.output().match(/168k → ~\S+/)?.[0];
 		expect(before).toBeDefined();
 		f.manager.appendMessage({
 			...fauxAssistantMessage("new"),
@@ -119,58 +170,31 @@ describe("interactive compaction UI", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 		});
-		// Don't render the new assistant: this assertion concerns summary metadata only.
 		f.mode.renderSessionEntries([f.manager.buildContextEntries()[0]]);
-		expect(f.output().match(/168,342 → ~\S+/g)).toEqual([before, before]);
+		expect(f.output().match(/168k → ~\S+/g)).toEqual([before, before]);
 	});
 
-	test.each(["background", "foreground"])("%s preserves the billing notice once, after summary", async (path) => {
+	test.each(["background", "foreground"])("%s preserves billing once between marker and tail", async (path) => {
 		const f = fixture(true);
-		await f.mode.handleEvent(
-			path === "background"
-				? { type: "session_background_compaction", phase: "applied", jobId: "job", source: "user" }
-				: {
-						type: "compaction_end",
-						reason: "threshold",
-						result: { summary: "A useful summary", tokensBefore: 168342, firstKeptEntryId: "kept" },
-						aborted: false,
-						willRetry: false,
-					},
-		);
+		await f.mode.handleEvent(applyEvent(path));
 		const output = f.output();
 		expect(output.match(/Compaction: 100 tokens billed/g)).toHaveLength(1);
 		expect(output).toContain("(~$0.13)");
-		expect(output.indexOf("[compaction]")).toBeLessThan(output.indexOf("Compaction: 100"));
-		expect(output.indexOf("Compaction: 100")).toBeLessThan(output.indexOf("kept context"));
+		expect(output.indexOf("✓ compaction")).toBeLessThan(output.indexOf("Compaction: 100"));
+		expect(output.indexOf("Compaction: 100")).toBeLessThan(output.indexOf("kept message"));
 	});
 
-	test("boundary entry notification uses the same order, without an apply acknowledgement", async () => {
+	test("boundary notification uses same order without applied status", async () => {
 		const f = fixture();
 		await f.mode.handleEvent({ type: "entry_appended", entry: f.manager.buildContextEntries()[0] });
-		const output = f.output();
-		expect(output.indexOf("[compaction]")).toBeLessThan(output.indexOf("kept context"));
-		expect(output.indexOf("kept context")).toBeLessThan(output.indexOf("kept message"));
-		expect(output).not.toContain("✓ Context compacted");
+		expectOrder(f.output());
+		expect(f.output()).not.toContain("compaction applied");
 	});
 
-	test("uncompacted context has no separator", () => {
+	test("uncompacted context has no marker or separator", () => {
 		const f = fixture();
 		f.mode.renderSessionEntries(f.manager.getBranch().filter((entry) => entry.type !== "compaction"));
 		expect(f.output()).not.toContain("kept context");
-	});
-
-	test.each([1, 12, 40, 80])("separator fits full width %s", (width) => {
-		const f = fixture();
-		f.mode.rebuildChatFromMessages();
-		const separatorComponent = f.chat.children.find((child) =>
-			stripAnsi(child.render(80).join("\n")).includes("kept context"),
-		);
-		expect(separatorComponent).toBeDefined();
-		const lines = separatorComponent!.render(width);
-		expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-		if (width >= 40) {
-			const separator = lines.find((line) => stripAnsi(line).includes("kept context"));
-			expect(separator && visibleWidth(separator)).toBe(width);
-		}
+		expect(f.output()).not.toContain("✓ compaction");
 	});
 });

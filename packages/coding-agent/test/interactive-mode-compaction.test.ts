@@ -103,7 +103,6 @@ describe("InteractiveMode compaction events", () => {
 					tokensAfter: expect.any(Number),
 				}),
 				{ type: "compaction_cost", kind: "compaction", usage: currentUsage },
-				{ type: "kept_context" },
 				expect.objectContaining({ role: "compactionSummary", summary: "previous summary" }),
 				{ type: "compaction_cost", kind: "compaction", usage: previousUsage },
 			],

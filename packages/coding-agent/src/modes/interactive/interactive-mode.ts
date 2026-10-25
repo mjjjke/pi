@@ -290,13 +290,11 @@ type CompactionCostNotice = {
 
 // Display metadata only: never added to session entries or agent messages.
 type CompactionDisplay = { type: "compaction_display"; message: CompactionSummaryMessage; tokensAfter?: number };
-type KeptContextSeparator = { type: "kept_context" };
 type RenderSessionItem =
 	| AgentMessage
 	| Extract<SessionEntry, { type: "custom" | "usage" }>
 	| CompactionCostNotice
-	| CompactionDisplay
-	| KeptContextSeparator;
+	| CompactionDisplay;
 
 function estimateCompactedTokens(branch: SessionEntry[], entryId: string): number | undefined {
 	const index = branch.findIndex((entry) => entry.id === entryId);
@@ -525,8 +523,9 @@ export class InteractiveMode {
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
-	private lastStatusText: ThemedText | undefined = undefined;
+	private lastStatusText: Component | undefined = undefined;
 	private lastStatusMessage = "";
+	private lastStatusRenderer: { render?: (width: number) => string[] } | undefined;
 	private managedToolStatusStarted = false;
 
 	// Streaming message tracking
@@ -3977,13 +3976,14 @@ export class InteractiveMode {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	private showStatus(message: string): void {
+	private showStatus(message: string, render?: (width: number) => string[]): void {
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
 		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
 			this.lastStatusMessage = message;
+			if (this.lastStatusRenderer) this.lastStatusRenderer.render = render;
 			this.lastStatusText.invalidate();
 			this.ui.requestRender();
 			return;
@@ -3991,7 +3991,13 @@ export class InteractiveMode {
 
 		const spacer = new Spacer(1);
 		this.lastStatusMessage = message;
-		const text = new ThemedText(() => theme.fg("dim", this.lastStatusMessage), 1, 0);
+		const themed = new ThemedText(() => theme.fg("dim", this.lastStatusMessage), 1, 0);
+		const renderer = { render };
+		const text: Component = {
+			invalidate: () => themed.invalidate(),
+			render: (width) => renderer.render?.(width) ?? themed.render(width),
+		};
+		this.lastStatusRenderer = renderer;
 		this.chatContainer.addChild(spacer);
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
@@ -4180,18 +4186,6 @@ export class InteractiveMode {
 				this.addMessageToChat(item.message, { ...options, compactionTokensAfter: item.tokensAfter });
 				continue;
 			}
-			if ("type" in item && item.type === "kept_context") {
-				this.chatContainer.addChild({
-					invalidate() {},
-					render(width) {
-						const label = " kept context ";
-						if (width < label.length + 2) return [theme.fg("dim", "─".repeat(width))];
-						const left = Math.floor((width - label.length) / 2);
-						return [theme.fg("dim", `${"─".repeat(left)}${label}${"─".repeat(width - label.length - left)}`)];
-					},
-				});
-				continue;
-			}
 			if (isCustomSessionEntry(item)) {
 				this.addCustomEntryToChat(item);
 				continue;
@@ -4291,7 +4285,6 @@ export class InteractiveMode {
 					message.role === "compactionSummary" ? { type: "compaction_display", message, tokensAfter } : message,
 				);
 				if (entry.usage) display.push({ type: "compaction_cost", kind: "compaction", usage: entry.usage });
-				display.push({ type: "kept_context" });
 				return display;
 			}
 			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
@@ -4307,12 +4300,10 @@ export class InteractiveMode {
 		if (head?.type !== "compaction") return;
 		const after = estimateCompactedTokens(this.sessionManager.getBranch(), head.id);
 		const change = `${formatTokens(head.tokensBefore)}${after === undefined ? "" : ` → ~${formatTokens(after)}`}`;
-		const text = `✓ Context compacted · ${change} ↑`;
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild({
-			invalidate() {},
-			render: (width) => [truncateToWidth(theme.fg("dim", text), width)],
-		});
+		const message = `compaction applied  ${change} tokens`;
+		this.showStatus(message, (width) => [
+			truncateToWidth(` ${theme.fg("success", "✓")} ${theme.fg("dim", message)}`, width),
+		]);
 	}
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
