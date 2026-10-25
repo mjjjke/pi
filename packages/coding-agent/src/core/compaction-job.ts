@@ -131,6 +131,8 @@ export interface CompactionJobView {
 	/** Resolves on ready or terminal, never rejects (even for signal-ignoring hooks). */
 	readonly done: Promise<void>;
 	readonly usage: readonly Usage[];
+	/** Calls included in the applied entry; later calls need separate journal accounting. */
+	readonly appliedUsageCount: number;
 }
 interface Job {
 	view: CompactionJobView;
@@ -145,6 +147,7 @@ interface Job {
 	done: Promise<void>;
 	settle(): void;
 	usage: Usage[];
+	appliedUsageCount: number;
 	identity: CompactionJobBranch;
 	preparation: CompactionPreparation;
 	prefix: Map<string, string>;
@@ -212,6 +215,7 @@ export class BackgroundCompactionJobs {
 			done,
 			settle,
 			usage: [],
+			appliedUsageCount: 0,
 			identity,
 			preparation,
 			prefix,
@@ -241,6 +245,9 @@ export class BackgroundCompactionJobs {
 			done,
 			get usage() {
 				return structuredClone(job.usage);
+			},
+			get appliedUsageCount() {
+				return job.appliedUsageCount;
 			},
 		});
 		this.job = job;
@@ -349,8 +356,10 @@ export class BackgroundCompactionJobs {
 				if (preview.status === "discarded") this.terminate(job, "discarded", preview.cause);
 				return preview;
 			}
+			const usageCount = job.usage.length;
 			const entryId = this.target.append(preview.candidate);
 			// Linearization: no user code/await before the slot is cleared irrevocably.
+			job.appliedUsageCount = usageCount;
 			job.entryId = entryId;
 			this.terminate(job, "applied");
 			return { status: "applied", entryId, job: job.view };
