@@ -534,6 +534,8 @@ export class AgentSession {
 	private _steeringMessages: string[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
+	/** Identity, not display text, determines whether input still belongs to an Agent queue. */
+	private _queuedUserInput = new Map<AgentMessage, { text: string; lane: "steering" | "followUp" }>();
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
@@ -1793,21 +1795,13 @@ export class AgentSession {
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._overflowRecoveryAttempted = false;
-			const messageText = contentText(event.message.content, "");
-			if (messageText) {
-				// Check steering queue first
-				const steeringIndex = this._steeringMessages.indexOf(messageText);
-				if (steeringIndex !== -1) {
-					this._steeringMessages.splice(steeringIndex, 1);
-					this._emitQueueUpdate();
-				} else {
-					// Check follow-up queue
-					const followUpIndex = this._followUpMessages.indexOf(messageText);
-					if (followUpIndex !== -1) {
-						this._followUpMessages.splice(followUpIndex, 1);
-						this._emitQueueUpdate();
-					}
-				}
+			const queued = this._queuedUserInput.get(event.message);
+			if (queued) {
+				this._queuedUserInput.delete(event.message);
+				const mirror = queued.lane === "steering" ? this._steeringMessages : this._followUpMessages;
+				const index = mirror.indexOf(queued.text);
+				if (index !== -1) mirror.splice(index, 1);
+				this._emitQueueUpdate();
 			}
 		}
 
@@ -3299,30 +3293,26 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		if (images) content.push(...images);
+		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
+		this._queuedUserInput.set(message, { text, lane: "steering" });
+		this.agent.steer(message);
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
-		this.agent.steer({
-			role: "user",
-			content,
-			timestamp: Date.now(),
-		});
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		if (images) content.push(...images);
+		const message: AgentMessage = { role: "user", content, timestamp: Date.now() };
+		this._queuedUserInput.set(message, { text, lane: "followUp" });
+		this.agent.followUp(message);
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
-		this.agent.followUp({ role: "user", content, timestamp: Date.now() });
 	}
 
 	/**
@@ -3639,18 +3629,23 @@ export class AgentSession {
 	}
 
 	/**
-	 * Clear all queued messages and return them.
-	 * Useful for restoring to editor when user aborts.
+	 * Remove only user input still owned by the queues and return its text to the editor.
+	 * Admitted input and non-user messages are never transferred.
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
-		this._steeringMessages = [];
-		this._followUpMessages = [];
-		this.agent.clearAllQueues();
+		const result: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
+		for (const [handle, queued] of [...this._queuedUserInput]) {
+			if (this.agent.removeQueued(handle)) result[queued.lane].push(queued.text);
+			// A failed removal means the loop has already admitted it. It belongs only to the run,
+			// never also to the editor, even before message_start updates the display mirror.
+			this._queuedUserInput.delete(handle);
+			const mirror = queued.lane === "steering" ? this._steeringMessages : this._followUpMessages;
+			const index = mirror.indexOf(queued.text);
+			if (index !== -1) mirror.splice(index, 1);
+		}
 		this._emitQueueUpdate();
-		return { steering, followUp };
+		return result;
 	}
 
 	/** Number of pending messages (includes both steering and follow-up) */
