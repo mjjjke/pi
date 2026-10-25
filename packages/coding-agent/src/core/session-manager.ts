@@ -1938,16 +1938,16 @@ export class SessionManager {
 		return entry;
 	}
 
-	/** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */
-	appendCompaction<T = unknown>(
+	/** Build a detached compaction candidate without changing memory or the journal. */
+	buildCompactionEntry<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string | null,
 		tokensBefore: number,
 		details?: T,
 		fromHook?: boolean,
 		usage?: Usage,
-		options?: { carry?: "desired" | "delivered" },
-	): string {
+		options?: { carry?: "desired" | "delivered"; boundary?: string },
+	): CompactionEntry<T> {
 		const timestamp = new Date().toISOString();
 		const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
 		const standing = this._buildStandingCarry(options?.carry ?? "delivered", new Date(timestamp).getTime());
@@ -1963,10 +1963,50 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
-			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			...(systemMessage
+				? { systemMessage: { ...structuredClone(systemMessage), timestamp: new Date(timestamp).getTime() } }
+				: {}),
 			standing,
-			boundary: COMPACTION_BOUNDARY_TEXT_V1,
+			boundary: options?.boundary ?? COMPACTION_BOUNDARY_TEXT_V1,
 		};
+		return entry;
+	}
+
+	/** Commit exactly the previewed candidate, or build one for an ordinary blocking compaction. */
+	appendCompaction<T = unknown>(candidate: CompactionEntry<T>): string;
+	appendCompaction<T = unknown>(
+		summary: string,
+		firstKeptEntryId: string | null,
+		tokensBefore: number,
+		details?: T,
+		fromHook?: boolean,
+		usage?: Usage,
+		options?: { carry?: "desired" | "delivered" },
+	): string;
+	appendCompaction<T = unknown>(
+		summaryOrCandidate: string | CompactionEntry<T>,
+		firstKeptEntryId?: string | null,
+		tokensBefore?: number,
+		details?: T,
+		fromHook?: boolean,
+		usage?: Usage,
+		options?: { carry?: "desired" | "delivered" },
+	): string {
+		const entry =
+			typeof summaryOrCandidate === "string"
+				? this.buildCompactionEntry(
+						summaryOrCandidate,
+						firstKeptEntryId ?? null,
+						tokensBefore ?? 0,
+						details,
+						fromHook,
+						usage,
+						options,
+					)
+				: summaryOrCandidate;
+		if (entry.parentId !== this.leafId || this.byId.has(entry.id)) {
+			throw new Error("stale compaction candidate");
+		}
 		this._appendEntry(entry);
 		return entry.id;
 	}
