@@ -233,6 +233,39 @@ describe("aborted preparation", () => {
 		expect(calls).toBe(1);
 	});
 
+	// Review A B1: clearing a selected queue must not discard replacement input returned by preparation.
+	it("preserves prepared input when preparation removes the selected queue item", async () => {
+		const prepared = user("PREPARED_INPUT");
+		const ended: AgentMessage[] = [];
+		const requests: AgentMessage[][] = [];
+		let queued = false;
+		const agent = new Agent({
+			initialState: { model },
+			streamFn: (_model, context) => {
+				requests.push([...context.messages]);
+				return provider(() => {})(_model, context);
+			},
+			finishTurn: () => {
+				if (!queued) {
+					queued = true;
+					agent.followUp(user("placeholder"));
+				}
+			},
+			prepareNextTurn: () => {
+				agent.clearAllQueues();
+				return { messages: [prepared] };
+			},
+		});
+		agent.subscribe((event) => {
+			if (event.type === "message_end") ended.push(event.message);
+		});
+		await agent.prompt("start");
+		expect(agent.state.messages).toContain(prepared);
+		expect(ended.filter((message) => message === prepared)).toHaveLength(1);
+		expect(requests).toHaveLength(2);
+		expect(requests[1]).toContain(prepared);
+	});
+
 	it("persists a drained batch once if turn_start aborts", async () => {
 		const queued = user("queued");
 		let calls = 0,

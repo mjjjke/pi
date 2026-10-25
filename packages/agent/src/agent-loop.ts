@@ -240,7 +240,12 @@ async function runLoop(
 						pendingMessages = (await config.getFollowUpMessages?.()) || [];
 					}
 					// A queue clear while preparation waited revokes a queue-only continuation.
-					if (!hasMoreToolCalls && !explicitContinuation && pendingMessages.length === 0) {
+					if (
+						!hasMoreToolCalls &&
+						!explicitContinuation &&
+						pendingMessages.length === 0 &&
+						preparedMessages.length === 0
+					) {
 						await emit({ type: "agent_end", messages: newMessages });
 						return;
 					}
