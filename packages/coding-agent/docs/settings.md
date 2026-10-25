@@ -71,7 +71,7 @@ CLI tool options override this setting for one invocation. `--tools` with only `
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `compaction.enabled` | boolean | `true` | Enable automatic compaction. |
+| `compaction.enabled` | boolean | `true` | Enable the hard-threshold safety net: adopt a ready job, wait for a running one, otherwise compact synchronously. Never launches background jobs. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for the model response. |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens retained without summarization. |
 | `compaction.modelOverrides` | object | None | Per-model token settings keyed by exact `provider/modelId`. |

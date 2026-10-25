@@ -27,7 +27,9 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | `/tree` | Navigate the session tree |
 | `/fork` | Create a new session from an earlier user message |
 | `/clone` | Duplicate the current session at its current position |
-| `/compact [instructions]` | Compact the current context, optionally with custom instructions |
+| `/compact [instructions]` | Start background compaction and keep working |
+| `/compact --now [instructions]` | Stop the run and wait for compaction |
+| `/compact --cancel` | Cancel the pending background job (also stops a compaction wait) |
 | `/import <path>` | Import and resume a JSONL session |
 
 ## Export and share

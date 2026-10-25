@@ -37,11 +37,13 @@ For the persisted tree and entry types, see [Session Format](session-format.md).
 
 The model receives the active branch, not every branch in the session file. Pi combines that history with the system prompt, discovered context files, available tools, and loaded skill descriptions. [How Pi Works](how-pi-works.md#context) describes how those inputs are assembled.
 
-The footer shows current context usage. When the active context approaches the model's limit, Pi normally compacts older history automatically. Compaction adds a summary and keeps recent messages. It does not delete the original session entries.
+The footer shows context usage and any pending background summary. Compaction adds a summary and keeps recent messages without deleting the original session entries.
 
-Run `/compact` to compact manually. You can add instructions when the summary should preserve a particular topic or decision. Configure automatic compaction and retained history through [Settings](settings.md#compaction).
+Run `/compact [instructions]` to start a background summary and keep working. It installs at a later request boundary. `/compact --now [instructions]` stops the run and waits; `/compact --cancel` cancels a pending job. Escape while waiting stops the run/wait without cancelling the summary, and restores queued user text to the editor.
 
-Compaction can fail if the provider is unavailable or cannot accept the summarization request. Correct the provider problem and run `/compact` again. Disabling automatic compaction does not disable the manual command.
+At the hard threshold, the safety net adopts a ready job, waits for a running job, or uses blocking compaction if none is available. It never starts background jobs automatically. Configure the safety net and retained history through [Settings](settings.md#compaction). Disabling it does not disable requested jobs.
+
+Compaction can fail if the provider is unavailable or cannot accept the summarization request. Correct the provider problem and run `/compact` again.
 
 See [Compaction Reference](compaction.md) for thresholds, retained boundaries, branch-summary behavior, and extension hooks.
 

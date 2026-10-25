@@ -4641,8 +4641,9 @@ export class AgentSession {
 	/**
 	 * Manually compact the session context.
 	 *
-	 * This is the manual entry point used by `/compact`, RPC, and extensions. It is
-	 * separate from automatic threshold/overflow compaction, which enters through
+	 * This is the blocking SDK/extension entry point. Interactive and RPC compaction
+	 * use startBackgroundCompaction()/compactNow(). It is separate from the safety
+	 * net's threshold/overflow compaction, which enters through
 	 * `_checkCompaction()` and `_runAutoCompaction()`. After preparation and the
 	 * `session_before_compact` hook, both paths call the lower-level `compact()`
 	 * function imported from `./compaction/index.ts`, unless the hook cancels or

@@ -1,6 +1,6 @@
 # Compaction Reference
 
-This reference describes automatic compaction, branch summarization, persisted entries, and extension hooks. For the user workflow, see [Sessions and Context](sessions.md#manage-conversation-context).
+This reference describes requested background compaction, the hard-threshold safety net, branch summarization, persisted entries, and extension hooks. For the user workflow, see [Sessions and Context](sessions.md#manage-conversation-context).
 
 **Source files** ([pi](https://github.com/earendil-works/pi)):
 - [`packages/coding-agent/src/core/compaction/compaction.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) - Auto-compaction logic
@@ -17,7 +17,7 @@ Pi has two summarization mechanisms:
 
 | Mechanism | Trigger | Purpose |
 |-----------|---------|---------|
-| Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
+| Compaction | Explicit background request, or hard-threshold safety net | Summarize old messages to free up context |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
 Both use closely related structured formats and track file operations cumulatively. Summarization requests disable prompt-cache writes because these one-off prompts are unlikely to be reused.
@@ -26,19 +26,31 @@ Both use closely related structured formats and track file operations cumulative
 
 ### When It Triggers
 
-Auto-compaction triggers when:
+The automatic safety net acts at or over the hard threshold H:
 
 ```
-contextTokens > contextWindow - reserveTokens
+contextTokens >= contextWindow - reserveTokens
 ```
+
+It adopts a ready requested job, waits for a running one, or uses blocking compaction when no job is available. It never launches a background job automatically. `compaction.enabled: false` disables waiting/blocking safety-net actions, not installation of explicitly requested ready jobs.
 
 By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
 
-During a multi-turn agent run, Pi checks the canonical projected context after tools finish and their results are appended, before starting the next assistant response. If the threshold is crossed, Pi compacts during `prepareNextTurn`, then performs the existing catch-up steering poll before `turn_start`. It skips this between-turn check when the completed tool batch terminates the run and no queued message requires another response. Pi also checks before a new user prompt and performs final-attempt overflow recovery after the low-level run ends.
+During a multi-turn agent run, Pi checks the canonical projected context after tools finish and their results are appended, before starting the next assistant response. If the threshold is reached, Pi adopts, waits, or blocks during `prepareNextTurn`, before draining queued input. The admitted batch is then persisted before any request, even if a later hook stops the run. It skips this between-turn check when the completed tool batch terminates the run and no queued message requires another response. Pi also checks before a new user prompt and performs final-attempt overflow recovery after the low-level run ends.
 
 A provider context-overflow error or an early final `stopReason: "length"` can select one compact-and-retry recovery attempt. Length responses with tool calls retain their synthetic failed tool results and follow the ordinary tool/queue scheduler rather than forcing the run to end.
 
-You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
+### Requested background jobs
+
+- `/compact [instructions]` starts a background summary without stopping the run. Its cut and summarized prefix are frozen at launch; subsequent entries remain verbatim.
+- `/compact --now [instructions]` stops the run and holds request admission until installation and awaited notifications finish. Prompts queue during the hold.
+- `/compact --cancel` cancels the pending job. In a wait it also stops the run, without a blocking replacement.
+
+A ready job installs at a request boundary: before a new prompt, before a between-turn queue drain, or before a post-run continuation (not a retry). A fresh projection preview must be smaller and below the current check-site model's H. Ordinary model changes during a wait update H; an already-decided virtual physical route keeps its routed limits. Installation appends one entry at the current leaf and never moves the frozen cut.
+
+Escape or SDK/RPC `abort` releases a wait and stops the run, not the background summary; no request follows that stop. Queued users remain queued unless the TUI transfers them to the editor with user-only `clearQueue()`. Owned custom messages are written passively in arrival order. A later boundary can install the surviving job. Blocking safety-net Escape also stops the run.
+
+Tree moves, reload and disposal cancel pending jobs. Reload is currently refused during an active run or manual compaction reservation; release the wait first. Jobs and unwritten memory-only input do not survive a crash. `AgentSession.compact()` / `ctx.compact()` remain explicit blocking APIs; background SDK/extension methods are described below.
 
 ### How It Works
 
@@ -80,7 +92,7 @@ What the LLM sees:
     prompt   from cmp          messages from firstKeptEntryId   from cmp
 ```
 
-Projection order after a compaction is `[checkpoint, carried standing, summary, kept…, boundary, new…]`. The boundary (this fork) is the compaction's stored `boundary` text, projected once after the kept range (directly after the summary when nothing is kept) as user-role text: kept messages are older than the summary, their state describes when they were sent, earlier context-size readings no longer apply, messages after it are new. It is context, never input: no turn, no input events, no `next-input` standing delivery, not counted by `pendingMessageCount`; a transcript that ends with it still ends with the message before it, so after a final reply queued input runs after it and nothing else continues (`Agent.isContextMarker`). It can be the last message before a reply when a compaction runs mid-run or for overflow recovery, which is why it says it is not a request. It is never summarized and never a cut point. Compactions written before it existed carry no `boundary` and project as before.
+Projection order after a compaction is `[checkpoint, carried standing, summary, kept…, boundary, new…]`. The boundary (this fork) is the compaction's stored `boundary` text, projected once after the kept range (directly after the summary when nothing is kept) as user-role text: kept messages precede the append but may contain updates newer than the frozen summary; their state describes when they were sent, earlier context-size readings no longer apply, messages after it are new. It is context, never input: no turn, no input events, no `next-input` standing delivery, not counted by `pendingMessageCount`; a transcript that ends with it still ends with the message before it, so after a final reply queued input runs after it and nothing else continues (`Agent.isContextMarker`). It can be the last message before a reply when a compaction runs mid-run or for overflow recovery, which is why it says it is not a request. It is never summarized and never a cut point. Compactions written before it existed carry no `boundary` and project as before.
 
 On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. A retain-none compaction records its own ID as `firstKeptEntryId`; repeated compaction starts after that entry. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Pi also recalculates `tokensBefore` from the rebuilt, context-edited session projection before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced. Omitted raw entries remain stored but do not affect cut selection, summaries, checkpoints, or token estimates.
 
@@ -298,7 +310,7 @@ Extensions can intercept and customize both compaction and branch summarization.
 
 ### session_before_compact
 
-Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
+Fired once at background launch, or before blocking compaction. Can cancel or provide a custom summary. A background event carries `background: {jobId, source}`, frozen preparation/branch, `reason: "manual"`, `willRetry: false`, and the job signal; custom results must use the frozen cut and a nonblank summary. Propagate `signal` to nested calls. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
 
 ```typescript
 pi.on("session_before_compact", async (event, ctx) => {
@@ -373,13 +385,23 @@ See [custom-compaction.ts](../examples/extensions/custom-compaction.ts) for a co
 
 Fired after the compaction entry is written, with that entry (`compactionEntry`), `fromExtension`, `reason` and `willRetry`. A passive message sent from a handler while a run is active (`pi.sendMessage(message, { triggerTurn: false })`, e.g. a state snapshot for the new epoch) is written at the next provider request boundary: after that request's queued input, steering and tool results, and before its queued developer instructions (for a compaction that virtual-model routing runs inside the request preparation: after them) and its `context` handlers. The first request after the compaction therefore contains it, in the position it keeps in the session file, so later requests repeat that request as an unchanged prefix. With no further request in the run (no queued input), it is written at run end. Other passive messages sent during a run still wait for the end of the turn.
 
+### Background API and events
+
+`ctx.startBackgroundCompaction({source: "user" | "model", customInstructions?})` returns immediately with `started`, `already`, or `unavailable`. `ctx.getBackgroundCompaction()` returns `{jobId, source, phase, hardThreshold}` or undefined; `ctx.cancelBackgroundCompaction(jobId?)` returns whether a matching job was cancelled. These methods are optional for hand-built/older contexts and always bound by AgentSession. A claimed job cannot be superseded by a second starter.
+
+`session_background_compaction` reports `started`, `ready`, `waiting`, `released`, and one terminal `applied`, `discarded`, or `failed`. A background job does not emit `compaction_start`, `compaction_end`, or `session_compact_failed`. `session_compact.background` identifies the committed job; its append is irreversible before any notification awaits. Applied usage is in that entry; terminal-unapplied and late calls use non-context `usage` entries with kind `background-compaction`, attributed to the captured summarization model (the frozen physical route for built-in summaries). Sticky write failure still prevents receipts and is reported; usage cannot be promised durable through it.
+
+Shutdown dispatches pending terminal events before consumers' `session_shutdown` handlers. Direct synchronous SDK disposal starts all terminal observers before invalidation without awaiting an earlier observer; persist terminal intent synchronously there, since asynchronous continuations cannot use an invalidated context. Ordinary successful applied notifications remain awaited before admission opens; lifecycle termination releases signal-ignoring notification waits without undoing the entry. Public observers still receive its one applied observation.
+
+Passive notices from `session_compact` / `session_context_change` are tagged by the caller's open awaited dispatch scope, not by a session-wide depth: sync/awaited handler work belongs to that dispatch; independent ingress, public listeners, error listeners and late callbacks do not. Use `orderKey` to associate custom task updates; see [custom ownership](extensions.md#custom-message-ownership).
+
 ### session_context_change
 
 Fired once per context change that core commits without `session_compact` (this fork): each compaction or `context_edit` drafted by a `turn_end` / `agent_before_settle` handler, and each recovery omission (`context_edit` with `replacement: null`) written for a retry or overflow recovery. `event.entry` is the committed entry; handlers run after the whole batch is committed and the context refreshed, so `ctx.sessionManager.getBranch()` and the projection already include every change of the batch. Previews of drafts never emit it; it is not replayed after a crash (derive missed changes from the branch). Passive sends from its handlers are written at the next provider request boundary, like `session_compact` notices. The handlers are awaited: an abort, disposal or refused write meanwhile cancels the pending retry or recovery compaction.
 
 ### session_compact_failed
 
-Fired when manual or automatic compaction fails or is aborted. This is useful for telemetry extensions that need to pair `session_before_compact` attempts with terminal outcomes.
+Fired when blocking manual or safety-net compaction fails or is aborted; background jobs use their terminal phase instead. This is useful for telemetry extensions that need to pair `session_before_compact` attempts with terminal outcomes.
 
 ```typescript
 pi.on("session_compact_failed", async (event, ctx) => {
@@ -440,11 +462,11 @@ Configure compaction in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settin
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `enabled` | `true` | Enable auto-compaction |
+| `enabled` | `true` | Enable the hard-threshold safety net (never an automatic background launcher) |
 | `reserveTokens` | `16384` | Tokens to reserve for LLM response |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
 
-Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.
+Disable the safety net with `"enabled": false`. Explicit `/compact` jobs still run and install when ready.
 
 ### Per-model overrides
 
@@ -464,10 +486,10 @@ Use `compaction.modelOverrides` to tune token budgets for different models:
 }
 ```
 
-For a model with a 1M context window, this override triggers compaction above 600K tokens and keeps the ordinary 20000 recent tokens. Other models retain the ordinary 16384-token reserve. `reserveTokens` also influences summarization output limits, capped by the model's maximum output tokens; it is not solely a trigger threshold.
+For a model with a 1M context window, this override activates the safety net at or over 600K tokens and keeps the ordinary 20000 recent tokens. Other models retain the ordinary 16384-token reserve. `reserveTokens` also influences summarization output limits, capped by the model's maximum output tokens; it is not solely a trigger threshold.
 
 Keys are exact, case-sensitive `provider/modelId` values, including any slashes within the model ID. Each `reserveTokens` and `keepRecentTokens` value falls back independently from the model override to the ordinary setting to the built-in default. Values must be non-negative safe integers. Invalid values in the matching model override produce an error when read; only omitted fields fall back to the ordinary setting. Model override entries must be objects. Invalid ordinary token settings produce an error when read, even if the active model has a valid override. Only omitted ordinary values use built-in defaults. `enabled` remains global, not model-specific.
 
-These resolved values are used for manual compaction, all automatic threshold checks, overflow recovery, and extension-visible `preparation.settings`. Model switches affect subsequent checks and compactions without changing ordinary settings. Compaction already in progress uses the model and settings captured for that operation. Branch summarization settings are unaffected.
+These resolved values are used for manual compaction, all automatic threshold checks, overflow recovery, and extension-visible `preparation.settings`. Model switches affect subsequent checks and compactions without changing ordinary settings. Background summarization captures its model/settings/request policy at launch and resolves auth for each physical call. Installation still checks current check-site limits, including changes made during a wait. Branch summarization settings are unaffected.
 
 Overrides work in both global and project settings. The files merge recursively before lookup, so a global model-specific value beats a project-wide fallback; a project must override that model entry to change it. See [Settings](settings.md#per-model-compaction-overrides) for details.
