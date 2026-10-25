@@ -193,7 +193,7 @@ describe("background compaction extension API", () => {
 		}
 	});
 
-	it.each(["reload", "dispose", "shutdown"] as const)(
+	it.each(["reload", "dispose", "shutdown", "reentrant dispose"] as const)(
 		"review B4: %s persists terminal intent before invalidation or shutdown",
 		async (action) => {
 			let active = true;
@@ -207,6 +207,7 @@ describe("background compaction extension API", () => {
 						});
 						pi.on("session_background_compaction", async (event) => {
 							if (action === "dispose" && event.phase === "discarded") await new Promise<never>(() => {});
+							if (action === "reentrant dispose" && event.phase === "discarded") h.session.dispose();
 						});
 						pi.on("session_background_compaction", (event) => {
 							if (active && event.phase === "discarded")
