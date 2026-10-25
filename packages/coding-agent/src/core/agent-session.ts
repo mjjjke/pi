@@ -6017,7 +6017,16 @@ export class AgentSession {
 
 		// No-op navigation must not turn a flush-created leaf into an accidental branch change.
 		if (targetId === this.sessionManager.getLeafId()) return { cancelled: false };
-		this._background.cancel("tree");
+		// Terminal intent belongs to the launch branch, including when its event
+		// was already queued. Start all remaining consumers before capturing the
+		// source leaf; their synchronous receipts become part of the old branch.
+		this._isStoppingCustom = true;
+		try {
+			this._background.cancel("tree", undefined, true);
+			this._background.deliverBeforeInvalidation();
+		} finally {
+			this._isStoppingCustom = false;
+		}
 		this._branchGeneration++;
 		this._writeStoppedCustomMessages();
 		const persistenceError = this.sessionManager.getPersistenceError();

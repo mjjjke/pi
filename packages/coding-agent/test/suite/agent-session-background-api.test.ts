@@ -253,6 +253,42 @@ describe("background compaction extension API", () => {
 		).toHaveLength(1);
 	});
 
+	it("review B7: tree terminal intent and oldLeaf stay on the launch branch", async () => {
+		let oldLeaf: string | null | undefined;
+		const h = await createHarness({
+			settings: { compaction: { keepRecentTokens: 10 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => new Promise<never>(() => {}));
+					pi.on("session_background_compaction", (event) => {
+						if (event.phase === "discarded") pi.appendEntry("review-discard-intent", { jobId: event.jobId });
+					});
+					pi.on("session_tree", (event) => {
+						oldLeaf = event.oldLeafId;
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+		h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+		const target = h.sessionManager.appendMessage(fauxAssistantMessage("old"));
+		const launch = h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
+		h.session.refreshContext();
+		h.session.startBackgroundCompaction({ source: "model" });
+		await h.session.navigateTree(target);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const intents = h.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === "review-discard-intent");
+		expect(intents).toHaveLength(1);
+		expect(h.sessionManager.getBranch(intents[0].id).some((entry) => entry.id === launch)).toBe(true);
+		expect(oldLeaf).toBe(intents[0].id);
+		await h.session.navigateTree(oldLeaf!);
+		expect(h.sessionManager.getBranch().some((entry) => entry.id === intents[0].id)).toBe(true);
+		expect(h.session.getBackgroundCompaction()).toBeUndefined();
+	});
+
 	it.each(["started", "discarded"] as const)("review B6: reload releases a blocked %s observer", async (phase) => {
 		const entered = deferred<void>();
 		const release = deferred<void>();
