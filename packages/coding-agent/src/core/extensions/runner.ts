@@ -422,6 +422,11 @@ export class ExtensionRunner {
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
 	private beforeShutdown?: (event: SessionShutdownEvent) => Promise<void>;
+	/** Terminal delivery survives slot retirement and can be promoted during teardown. */
+	private readonly backgroundTerminals = new WeakMap<
+		object,
+		{ next: number; calls: Array<() => Promise<void>>; pending: Promise<void>[] }
+	>();
 	private uiPromptDepth = 0;
 	private activeUIPrompt: { kind: UIPromptKind; title?: string } | undefined;
 
@@ -678,26 +683,41 @@ export class ExtensionRunner {
 	async emitBeforeInvalidation(
 		event: Extract<RunnerEmitEvent, { type: "session_background_compaction" }>,
 	): Promise<void> {
-		const ctx = this.createContext(event.type);
-		const pending: Promise<void>[] = [];
-		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
-			for (const handler of handlers) {
-				if (this.isInvalidated()) return;
-				const report = (error: unknown) =>
-					this.emitError({
-						extensionPath: ext.path,
-						event: event.type,
-						error: error instanceof Error ? error.message : String(error),
-						stack: error instanceof Error ? error.stack : undefined,
-					});
-				try {
-					pending.push(Promise.resolve(handler(event, ctx)).then(() => {}, report));
-				} catch (error) {
-					report(error);
-				}
-			}
+		await this.emitBackgroundTerminal(event, true);
+	}
+
+	private async emitBackgroundTerminal(
+		event: Extract<RunnerEmitEvent, { type: "session_background_compaction" }>,
+		fanOut = false,
+	): Promise<void> {
+		let dispatch = this.backgroundTerminals.get(event);
+		if (!dispatch) {
+			const ctx = this.createContext(event.type);
+			const calls = snapshotEventHandlers(this.extensions, event.type).flatMap(({ ext, handlers }) =>
+				handlers.map((handler) => async () => {
+					try {
+						await handler(event, ctx);
+					} catch (error) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: event.type,
+							error: error instanceof Error ? error.message : String(error),
+							stack: error instanceof Error ? error.stack : undefined,
+						});
+					}
+				}),
+			);
+			dispatch = { next: 0, calls, pending: [] };
+			this.backgroundTerminals.set(event, dispatch);
 		}
-		await Promise.all(pending);
+		while (dispatch.next < dispatch.calls.length && !this.isInvalidated()) {
+			// Advance before invocation: dispose may reenter from this very handler.
+			const call = dispatch.calls[dispatch.next++];
+			const pending = call();
+			dispatch.pending.push(pending);
+			if (!fanOut) await pending;
+		}
+		await Promise.all(dispatch.pending);
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -1306,6 +1326,10 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+		if (event.type === "session_background_compaction" && (event.phase === "discarded" || event.phase === "failed")) {
+			await this.emitBackgroundTerminal(event);
+			return undefined as RunnerEmitResult<TEvent>;
+		}
 		const ctx = this.createContext(event.type);
 		let result: SessionBeforeEventResult | undefined;
 

@@ -58,6 +58,7 @@ export class BackgroundCompactionOwner {
 	private waiter?: { job: OwnedJob; controller: AbortController; stopped: boolean };
 	private events: Promise<void> = Promise.resolve();
 	private readonly notifications = new Set<AbortController>();
+	private readonly terminalDeliveries = new Set<BackgroundCompactionEvent>();
 
 	constructor(options: BackgroundCompactionOwnerOptions) {
 		this.options = options;
@@ -121,6 +122,13 @@ export class BackgroundCompactionOwner {
 	/** Lifecycle disposal releases post-commit notification work, never its receipt. */
 	abortNotifications(): void {
 		for (const controller of this.notifications) controller.abort();
+	}
+
+	/** Start every still-owed terminal consumer before its outgoing runtime is invalidated. */
+	deliverBeforeInvalidation(): void {
+		for (const event of this.terminalDeliveries) {
+			void this.options.emitBeforeInvalidation?.(event).catch((error) => this.report(error));
+		}
 	}
 
 	/** Abort only the wait. Its continuation sets the run-stop latch before release. */
@@ -285,11 +293,17 @@ export class BackgroundCompactionOwner {
 			...(view.cause ? { cause: view.cause } : {}),
 			...(usage.length ? { usage: usage.reduce(combineUsage) } : {}),
 		};
+		const terminal = phase === "discarded" || phase === "failed";
+		if (terminal) this.terminalDeliveries.add(event);
 		const dispatch = (
 			beforeInvalidation && this.options.emitBeforeInvalidation
 				? this.options.emitBeforeInvalidation(event)
 				: this.events.then(() => raceBackgroundWait(this.options.emit(event), [notificationSignal]))
-		).catch((error) => this.report(error));
+		)
+			.catch((error) => this.report(error))
+			.finally(() => {
+				this.terminalDeliveries.delete(event);
+			});
 		this.events = beforeInvalidation ? Promise.all([this.events, dispatch]).then(() => {}) : dispatch;
 		try {
 			this.options.observe?.(structuredClone(event));

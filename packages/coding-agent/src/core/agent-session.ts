@@ -2346,6 +2346,7 @@ export class AgentSession {
 		this._isStoppingCustom = true;
 		try {
 			this._background.cancel("disposed", undefined, true);
+			this._background.deliverBeforeInvalidation();
 		} finally {
 			this._isStoppingCustom = false;
 		}
