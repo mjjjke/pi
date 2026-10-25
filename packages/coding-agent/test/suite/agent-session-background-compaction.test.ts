@@ -2,7 +2,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/compat
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, StartMessagePersistence } from "../../src/core/agent-session.ts";
-import type { CompactionResult } from "../../src/core/compaction/index.ts";
+import { type CompactionResult, estimateProjectedContextTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function deferred<T>() {
@@ -131,6 +131,42 @@ describe("AgentSession background compaction integration", () => {
 		await f.h.session.prompt("ordinary");
 		expect(f.cuts).toBe(0);
 		expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
+	});
+
+	it("disabled safety net neither waits nor blocks, but explicitly requested ready jobs still install", async () => {
+		const f = await setup(true);
+		f.h.session.setAutoCompactionEnabled(false);
+		f.h.session.startBackgroundCompaction({ source: "user" });
+		await f.h.session.prompt("ordinary while summarizing");
+		expect(f.cuts).toBe(1);
+		expect(f.h.eventsOfType("session_background_compaction").some((event) => event.phase === "waiting")).toBe(false);
+		expect(f.h.eventsOfType("compaction_start")).toHaveLength(0);
+		const ready = phase(f.h, "ready");
+		f.finish();
+		await ready;
+		await f.h.session.prompt("apply explicit job");
+		expect(f.h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
+	});
+
+	it("at exact H the pre-prompt safety net waits for a running job", async () => {
+		const f = await setup();
+		// The actual projection defines H; no usage or chars/4 estimate is guessed by the fixture.
+		const tokens = estimateProjectedContextTokens(
+			f.h.sessionManager.buildSessionProjection(),
+			f.h.sessionManager.getBranch(),
+		).tokens;
+		f.h.session.agent.state.model = { ...f.h.getModel(), contextWindow: tokens + 1000 };
+		f.h.session.startBackgroundCompaction({ source: "user" });
+		const run = f.h.session.prompt("held at H", { onStartMessagePersistence: () => {} });
+		await vi.waitFor(() =>
+			expect(f.h.eventsOfType("session_background_compaction").some((event) => event.phase === "waiting")).toBe(
+				true,
+			),
+		);
+		await f.h.session.abort();
+		await run;
+		expect(f.h.eventsOfType("agent_start")).toHaveLength(0);
 	});
 
 	it.each(["abort", "cancel"] as const)(
