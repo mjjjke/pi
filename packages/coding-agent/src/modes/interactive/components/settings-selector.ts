@@ -489,8 +489,9 @@ export class SettingsSelectorComponent extends Container {
 		const items: SettingItem[] = [
 			{
 				id: "autocompact",
-				label: "Auto-compact",
-				description: "Automatically compact context when it gets too large",
+				label: "Compaction safety net",
+				description:
+					"At the hard threshold: adopt a ready job, wait for a running summary, or compact synchronously. No automatic background launch.",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
 			},

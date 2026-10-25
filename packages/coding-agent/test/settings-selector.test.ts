@@ -1,6 +1,7 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import {
 	type SettingsCallbacks,
 	type SettingsConfig,
@@ -20,6 +21,32 @@ describe("SettingsSelectorComponent", () => {
 	afterEach(() => {
 		harness?.cleanup();
 		harness = undefined;
+	});
+
+	it("describes compaction as an explicit background command plus a hard-threshold safety net", () => {
+		const config = {
+			autoCompact: true,
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+			warnings: {},
+		} as unknown as SettingsConfig;
+		const onAutoCompactChange = vi.fn();
+		const list = new SettingsSelectorComponent(config, {
+			onAutoCompactChange,
+		} as unknown as SettingsCallbacks).getSettingsList();
+		list.selectItem("autocompact");
+		const output = stripAnsi(list.render(180).join("\n"));
+		expect(output).toContain("Compaction safety net");
+		expect(output).toContain("hard threshold");
+		expect(output).toContain("No automatic background launch");
+		list.handleInput("\r");
+		expect(onAutoCompactChange).toHaveBeenCalledWith(false);
+		const command = BUILTIN_SLASH_COMMANDS.find((command) => command.name === "compact")!;
+		expect(command.description).toContain("background");
+		expect(command.argumentHint).toContain("--now");
+		expect(command.argumentHint).toContain("--cancel");
 	});
 
 	it("cycles through fullscreen settings", () => {
