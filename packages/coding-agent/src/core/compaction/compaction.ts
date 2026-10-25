@@ -626,6 +626,7 @@ export async function completeSummarization(
 	streamFn?: StreamFn,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	onUsage?: (usage: Usage) => void,
 ): Promise<AssistantMessage> {
 	// Avoid cache writes for one-off summaries. Reuse caller-supplied routing when available;
 	// callers without a session ID, including branch summaries, receive a fresh routing ID.
@@ -634,10 +635,13 @@ export async function completeSummarization(
 		cacheRetention: "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
-	const produce = async (): Promise<AssistantMessage> =>
-		streamFn
+	const produce = async (): Promise<AssistantMessage> => {
+		const response = await (streamFn
 			? (await streamFn(model, context, requestOptions)).result()
-			: completeSimple(model, context, requestOptions);
+			: completeSimple(model, context, requestOptions));
+		onUsage?.(response.usage);
+		return response;
+	};
 	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 
@@ -711,6 +715,7 @@ export async function generateSummaryWithUsage(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	onUsage?: (usage: Usage) => void,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -753,6 +758,7 @@ export async function generateSummaryWithUsage(
 		streamFn,
 		retry,
 		callbacks,
+		onUsage,
 	);
 
 	const failure = getSummarizationFailure(response, "Summarization");
@@ -980,6 +986,7 @@ export async function compact(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	onUsage?: (usage: Usage) => void,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -1015,6 +1022,7 @@ export async function compact(
 				retry,
 				callbacks,
 				sessionId,
+				onUsage,
 			);
 			historyText = historyResult.text;
 			historyUsage = historyResult.usage;
@@ -1032,6 +1040,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			onUsage,
 		);
 		// Merge into single summary
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
@@ -1053,6 +1062,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			onUsage,
 		);
 		summary = result.text;
 		summaryUsage = result.usage;
@@ -1091,6 +1101,7 @@ async function generateTurnPrefixSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	onUsage?: (usage: Usage) => void,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -1107,6 +1118,7 @@ async function generateTurnPrefixSummary(
 		streamFn,
 		retry,
 		callbacks,
+		onUsage,
 	);
 
 	const failure = getSummarizationFailure(response, "Turn prefix summarization");
