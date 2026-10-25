@@ -14,6 +14,7 @@ import {
 import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { CacheWarmingAction } from "../cache-warmer.ts";
+import { outsideCompactionNoticeScope } from "../compaction-notice-scope.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { BashExecutionMessage, CustomMessage } from "../messages.ts";
@@ -786,7 +787,7 @@ export class ExtensionRunner {
 	emitError(error: ExtensionError): void {
 		for (const listener of [...this.errorListeners]) {
 			try {
-				listener(error);
+				outsideCompactionNoticeScope(() => listener(error));
 			} catch (listenerError) {
 				const reason = listenerError instanceof Error ? listenerError.message : String(listenerError);
 				console.error(

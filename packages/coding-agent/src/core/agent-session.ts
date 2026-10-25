@@ -79,6 +79,11 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import {
+	isCompactionNoticeSource,
+	outsideCompactionNoticeScope,
+	withCompactionNoticeScope,
+} from "./compaction-notice-scope.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -533,8 +538,6 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
-	/** Nesting depth of `session_compact` dispatch; passive messages buffered meanwhile are compaction notices. */
-	private _sessionCompactDepth = 0;
 	/**
 	 * Buffered passive messages sent by `session_compact` handlers during a run. They are written at the next
 	 * provider request boundary instead of the turn end, so the request sends them where the journal has them.
@@ -1120,7 +1123,7 @@ export class AgentSession {
 	private _emitIsolated(event: AgentSessionEvent): void {
 		for (const listener of [...this._eventListeners]) {
 			try {
-				listener(event);
+				outsideCompactionNoticeScope(() => listener(event));
 			} catch (error) {
 				this._reportBootstrapError(error);
 			}
@@ -1688,7 +1691,7 @@ export class AgentSession {
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
 		for (const l of this._eventListeners) {
-			l(event);
+			outsideCompactionNoticeScope(() => l(event));
 		}
 	}
 
@@ -1700,25 +1703,17 @@ export class AgentSession {
 		});
 	}
 
-	/** Passive messages its handlers send during a run are compaction notices (`_flushCompactionNotices`). */
+	/** Only sends originating in this awaited dispatch become request-boundary notices. */
 	private async _emitSessionCompact(event: SessionCompactEvent): Promise<void> {
-		this._sessionCompactDepth++;
-		try {
-			await this._extensionRunner.emit(event);
-		} finally {
-			this._sessionCompactDepth--;
-		}
+		await withCompactionNoticeScope(this, () => this._extensionRunner.emit(event));
 	}
 
-	/** Like `session_compact`, passive sends of its handlers are compaction notices (next request boundary). */
+	/** Context edits use the same source-scoped notice lane as compaction commits. */
 	private async _emitSessionContextChange(entry: CompactionEntry | ContextEditEntry): Promise<void> {
 		if (!this._extensionRunner.hasHandlers("session_context_change")) return;
-		this._sessionCompactDepth++;
-		try {
-			await this._extensionRunner.emit({ type: "session_context_change", entry });
-		} finally {
-			this._sessionCompactDepth--;
-		}
+		await withCompactionNoticeScope(this, () =>
+			this._extensionRunner.emit({ type: "session_context_change", entry }),
+		);
 	}
 
 	private async _emitSessionCompactFailed(event: Omit<SessionCompactFailedEvent, "type">): Promise<void> {
@@ -3483,7 +3478,7 @@ export class AgentSession {
 			// to the end of the turn. Nothing is emitted yet: message events must not
 			// describe messages the session tree does not contain.
 			this._pendingCustomMessages.push(appMessage);
-			if (this._sessionCompactDepth > 0) this._compactionNotices.add(appMessage);
+			if (isCompactionNoticeSource(this)) this._compactionNotices.add(appMessage);
 		} else if (this._isStagingBranch()) {
 			// Before B: held after the snapshot, announced now (#5943).
 			this._stagedContent.push({ message: structuredClone(appMessage), announced: true });
