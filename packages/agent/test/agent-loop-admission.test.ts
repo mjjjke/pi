@@ -4,10 +4,11 @@ import {
 	type Message,
 	type Model,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/agent.ts";
 import { runAgentLoop } from "../src/agent-loop.ts";
-import type { AgentEvent, AgentMessage } from "../src/types.ts";
+import type { AgentEvent, AgentMessage, AgentTool } from "../src/types.ts";
 
 const model: Model<"openai-responses"> = {
 	id: "mock",
@@ -202,6 +203,71 @@ describe("input admission receipts", () => {
 		expect(calls).toBe(1);
 		expect(agent.hasQueuedMessages()).toBe(false);
 	});
+
+	// Review A B2: declaration rewrites must carry admission metadata, not recover it by message identity.
+	for (const stage of ["initialSystem", "initialUser", "drainedSystem"] as const) {
+		it(`preserves ${stage} admission tokens while declaring tools`, async () => {
+			const input: AgentMessage =
+				stage === "initialUser" ? user("input") : { role: "system", content: "instructions", timestamp: 0 };
+			const token = {};
+			const captured: AgentMessage[] = [];
+			const events: AgentEvent[] = [];
+			const tool: AgentTool = {
+				name: "work",
+				label: "work",
+				description: "work",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: undefined }),
+			};
+			const getMessageAdmissionToken = (message: AgentMessage) => {
+				captured.push(message);
+				return message === input ? token : undefined;
+			};
+			if (stage === "drainedSystem") {
+				let queued = false;
+				const agent = new Agent({
+					initialState: { model },
+					streamFn: response,
+					getMessageAdmissionToken,
+					getTools: () => agent.state.tools,
+				});
+				agent.subscribe((event) => {
+					events.push(event);
+					if (event.type === "turn_end" && !queued) {
+						queued = true;
+						agent.state.tools = [tool];
+						agent.steer(input);
+					}
+				});
+				await agent.prompt("start");
+			} else {
+				await runAgentLoop(
+					[input],
+					{ messages: [], tools: [tool] },
+					{ model, convertToLlm: (messages) => messages as Message[], getMessageAdmissionToken },
+					(event) => {
+						events.push(event);
+					},
+					undefined,
+					response,
+				);
+			}
+			expect(captured.filter((message) => message === input)).toHaveLength(1);
+			const starts = events.filter((event) => event.type === "message_start" && event.admissionToken === token);
+			const ends = events.flatMap((event) =>
+				event.type === "message_end" && event.admissionToken === token ? [event] : [],
+			);
+			expect(starts).toHaveLength(1);
+			expect(ends).toHaveLength(1);
+			if (stage !== "initialUser") {
+				expect(ends[0].message).not.toBe(input);
+				expect(ends[0].message).toMatchObject({ role: "system", toolsAdded: [{ name: "work" }] });
+			} else {
+				const declaration = events.find((event) => event.type === "message_end" && event.message.role === "system");
+				expect(declaration).not.toHaveProperty("admissionToken");
+			}
+		});
+	}
 
 	it("does not add receipt fields to legacy caller events", async () => {
 		const events: AgentEvent[] = [];

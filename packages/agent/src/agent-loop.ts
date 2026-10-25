@@ -109,11 +109,8 @@ export async function runAgentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
-	const admissions = admitMessages(prompts, config);
-	const initialMessages = declareToolChanges(
-		context,
-		admissions.map((input) => input.message),
-	);
+	const admissions = declareToolChanges(context, admitMessages(prompts, config));
+	const initialMessages = admissions.map((input) => input.message);
 	const newMessages: AgentMessage[] = [...initialMessages];
 	const currentContext: AgentContext = {
 		...context,
@@ -122,8 +119,8 @@ export async function runAgentLoop(
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
-	for (const message of initialMessages) {
-		await emitAdmittedMessage(message, admissions, emit);
+	for (const admission of admissions) {
+		await emitAdmittedMessage(admission, emit);
 	}
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
@@ -206,8 +203,9 @@ async function runLoop(
 					// Legacy callers can already have drained a batch. Admission is irreversible.
 					const abortedAdmissions = admitMessages(pendingMessages, config);
 					await emit({ type: "turn_start" });
-					for (const { message } of abortedAdmissions) {
-						await emitAdmittedMessage(message, abortedAdmissions, emit);
+					for (const admission of abortedAdmissions) {
+						const { message } = admission;
+						await emitAdmittedMessage(admission, emit);
 						currentContext.messages.push(message);
 						newMessages.push(message);
 					}
@@ -266,11 +264,9 @@ async function runLoop(
 			}
 
 			// Process prepared and queued messages before the next assistant response.
-			for (const message of declareToolChanges(
-				currentContext,
-				admissions.map((input) => input.message),
-			)) {
-				await emitAdmittedMessage(message, admissions, emit);
+			for (const admission of declareToolChanges(currentContext, admissions)) {
+				const { message } = admission;
+				await emitAdmittedMessage(admission, emit);
 				currentContext.messages.push(message);
 				newMessages.push(message);
 			}
@@ -424,12 +420,7 @@ function admitMessages(messages: AgentMessage[], config: AgentLoopConfig): Messa
 	return batch.map((message) => ({ message, admissionToken: config.getMessageAdmissionToken?.(message) }));
 }
 
-async function emitAdmittedMessage(
-	message: AgentMessage,
-	admissions: MessageAdmission[],
-	emit: AgentEventSink,
-): Promise<void> {
-	const admissionToken = admissions.find((input) => input.message === message)?.admissionToken;
+async function emitAdmittedMessage({ message, admissionToken }: MessageAdmission, emit: AgentEventSink): Promise<void> {
 	const receipt = admissionToken === undefined ? {} : { admissionToken };
 	await emit({ type: "message_start", message, ...receipt });
 	await emit({ type: "message_end", message, ...receipt });
@@ -485,7 +476,8 @@ async function endAbortedPreparation(
  * the executable set, so replay always yields exactly `context.tools`. Otherwise a new
  * system message is inserted before the first non-system pending message.
  */
-function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage[]): AgentMessage[] {
+function declareToolChanges(context: AgentContext, admissions: MessageAdmission[]): MessageAdmission[] {
+	const pendingMessages = admissions.map((input) => input.message);
 	let systemIndex = -1;
 	for (let i = pendingMessages.length - 1; i >= 0; i--) {
 		if (pendingMessages[i].role === "system") {
@@ -507,14 +499,19 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 
 	if (pending) {
 		// Keep the caller's message object when it already declares no tool changes.
-		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return pendingMessages;
-		return baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message));
+		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return admissions;
+		return admissions.map((input, index) =>
+			index === systemIndex ? { ...input, message: withToolChanges(pending, changes) } : input,
+		);
 	}
-	if (unchanged) return pendingMessages;
-	const update = withToolChanges({ role: "system", content: "", timestamp: Date.now() }, changes);
+	if (unchanged) return admissions;
+	const update: MessageAdmission = {
+		message: withToolChanges({ role: "system", content: "", timestamp: Date.now() }, changes),
+		admissionToken: undefined,
+	};
 	const insertIndex = pendingMessages.findIndex((message) => message.role !== "system");
 	const index = insertIndex === -1 ? pendingMessages.length : insertIndex;
-	return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];
+	return [...admissions.slice(0, index), update, ...admissions.slice(index)];
 }
 
 const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
