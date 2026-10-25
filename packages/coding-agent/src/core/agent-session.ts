@@ -4460,9 +4460,11 @@ export class AgentSession {
 		if (error) throw error;
 	}
 
-	private async _backgroundGate(carry: CompactionCarry, model = this._limitsModel(), wait = false): Promise<boolean> {
+	private async _backgroundGate(carry: CompactionCarry, checkModel?: Model<any>, wait = false): Promise<boolean> {
 		this._throwIfRunStopped();
-		const options = { carry, hardThreshold: this._hardCompactionThreshold(model) };
+		// Ordinary selections are live after a wait; an explicit virtual route stands.
+		const resolveHardThreshold = () => this._hardCompactionThreshold(checkModel ?? this._limitsModel());
+		const options = { carry, hardThreshold: resolveHardThreshold(), resolveHardThreshold };
 		let result = await this._background.installReady(options);
 		this._throwIfRunStopped();
 		if (result.status === "applied") return true;
@@ -4509,6 +4511,7 @@ export class AgentSession {
 			const result = await this._background.waitAndInstall({
 				carry: "desired",
 				hardThreshold: this._hardCompactionThreshold(this._limitsModel()),
+				resolveHardThreshold: () => this._hardCompactionThreshold(this._limitsModel()),
 				waitSignal: controller.signal,
 			});
 			applied = result.status === "applied";
@@ -4985,7 +4988,7 @@ export class AgentSession {
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
 		carry: CompactionCarry = "delivered",
-		checkModel = this._limitsModel(),
+		checkModel?: Model<any>,
 	): Promise<boolean> {
 		try {
 			if (await this._backgroundGate(carry, checkModel, true)) return willRetry || this.agent.hasQueuedMessages();

@@ -138,7 +138,9 @@ export class BackgroundCompactionOwner {
 	}
 
 	/** L3 / --now only. A second waiter cannot steal a synchronous claim. */
-	async waitAndInstall(options: CompactionJobInstallOptions): Promise<BackgroundCompactionInstallResult> {
+	async waitAndInstall(
+		options: CompactionJobInstallOptions & { resolveHardThreshold?: () => number },
+	): Promise<BackgroundCompactionInstallResult> {
 		if (options.waitSignal?.aborted) {
 			this.options.requestRunStop();
 			return { status: "aborted" };
@@ -162,7 +164,11 @@ export class BackgroundCompactionOwner {
 			}
 			// Clear before post-commit hooks: cancellation cannot turn an append into a stop.
 			this.waiter = undefined;
-			return await this.install(owned, { ...options, waitSignal: waiter.controller.signal });
+			return await this.install(owned, {
+				...options,
+				hardThreshold: options.resolveHardThreshold?.() ?? options.hardThreshold,
+				waitSignal: waiter.controller.signal,
+			});
 		} finally {
 			if (this.waiter === waiter) this.waiter = undefined;
 		}
