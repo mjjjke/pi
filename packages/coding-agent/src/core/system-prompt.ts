@@ -117,8 +117,15 @@ function buildRules(
 		);
 	}
 
-	// Rendering is a session fact, not part of any static tool declaration (including codemode).
-	if (rendersToolCalls && hasShell && selectedTools.includes("edit") && selectedTools.includes("write")) {
+	// Rendering is a session fact, not a static declaration. Codemode's nested calls show
+	// summaries rather than edit diffs/write previews, even when direct tools are declared too.
+	if (
+		rendersToolCalls &&
+		hasShell &&
+		selectedTools.includes("edit") &&
+		selectedTools.includes("write") &&
+		!selectedTools.includes("codemode")
+	) {
 		addRule(
 			"The user sees each edit as a colored diff and each write as highlighted content; a file changed through the shell shows them only the command and its output. edit writes nothing unless every oldText matches exactly one region, while sed -i or a script's replace() can silently change nothing or more than intended.",
 		);

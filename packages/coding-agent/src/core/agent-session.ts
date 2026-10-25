@@ -2726,6 +2726,9 @@ export class AgentSession {
 		options: NormalizedBuildSystemPromptOptions,
 		messages: AgentMessage[] = this.agent.state.messages,
 	): SystemMessage | undefined {
+		// Rendering belongs to the current binding, not the run's before_agent_start snapshot.
+		// Refresh just this fact so active/preparing rebinds keep extension-owned run options.
+		options.rendersToolCalls = this._extensionMode === "tui";
 		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
 		// The tool list and rules must match the declarations the request carries.
 		options.hiddenTools = [...this._hiddenDeclarations];

@@ -113,9 +113,10 @@ describe("approved core tool texts rev 3.2", () => {
 			expect(buildSystemPromptSections(options)).toEqual(sections);
 		},
 	);
-	it("omits rendering claims for explore, hidden codemode tools and no-shell loadouts", () => {
+	it("omits rendering claims for explore, declared codemode, hidden tools and no-shell loadouts", () => {
 		for (const options of [
 			{ selectedTools: ["read", "bash", "grep", "find", "ls"] },
+			{ selectedTools: ["read", "bash", "edit", "write", "codemode"] },
 			{
 				selectedTools: ["read", "bash", "edit", "write", "codemode"],
 				hiddenTools: ["read", "bash", "edit", "write"],
