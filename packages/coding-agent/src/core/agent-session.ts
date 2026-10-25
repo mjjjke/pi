@@ -4349,6 +4349,10 @@ export class AgentSession {
 					background: { jobId, source: options.source },
 				};
 				const hook = (await this._extensionRunner.emit(event)) as SessionBeforeCompactResult | undefined;
+				// A signal-ignoring hook can finish after cancellation with billed usage.
+				// Report it before rejecting the result; it must not revive or install the job.
+				if (hook?.compaction?.usage && (hook.cancel || request.signal.aborted))
+					request.onUsage(hook.compaction.usage);
 				if (hook?.cancel) {
 					this._background.cancel("extension-cancel", jobId);
 					throw new DOMException("Compaction cancelled", "AbortError");
