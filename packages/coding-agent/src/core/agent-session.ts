@@ -617,6 +617,7 @@ export class AgentSession {
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _disposed = false;
+	private _disposing = false;
 	private _turnIndex = 0;
 	private readonly _entryIdsByMessage = new WeakMap<object, string>();
 	/** Instructions queued during a run, committed at the next anchored provider request or at run end. */
@@ -715,7 +716,7 @@ export class AgentSession {
 
 		const target = createCompactionJobTarget(this.sessionManager, () => ({
 			generation: this._branchGeneration,
-			disposed: this._disposed,
+			disposed: this._disposed || this._disposing,
 		}));
 		const append = target.append;
 		target.append = (candidate) => {
@@ -2330,7 +2331,8 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
-		if (this._disposed) return;
+		if (this._disposed || this._disposing) return;
+		this._disposing = true;
 		this._background.abortNotifications();
 		this._admissionGen++;
 		this._admissionClosed = true;
