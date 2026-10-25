@@ -550,6 +550,7 @@ export class AgentSession {
 	/** Insertion order is arrival order. Only an append or staging receipt retires an item. */
 	private readonly _customStore = new Map<AgentMessage, OwnedCustomMessage>();
 	private _isWritingCustom = false;
+	private _isStoppingCustom = false;
 	/** One-shot developer instructions held until B (status `staged`), FIFO. No drain but B commits them. */
 	private _stagedInstructions: PendingInstruction[] = [];
 	/** Custom and bash content held until B, in ingress order. */
@@ -1821,9 +1822,14 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first, then notify public listeners.
+		// Transform hooks still precede persistence. An owned custom message's public receipt
+		// follows its append and store retirement, so a listener never sees two owners.
+		const ownedMessageEnd =
+			event.type === "message_end" && [...this._customStore.values()].some((item) => item === event.admissionToken);
 		await this._emitExtensionEvent(event);
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		if (!ownedMessageEnd) {
+			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		}
 
 		if (event.type === "tool_execution_end") {
 			this._settleBashHandoverWaiters(event.toolCallId);
@@ -1866,6 +1872,7 @@ export class AgentSession {
 					if (item === event.admissionToken) this._customStore.delete(handle);
 				}
 			}
+			if (ownedMessageEnd && entryId) this._emit(event);
 			if (entryId && this._runStart?.message === event.message) this._runStart.persisted = true;
 			if (entryId && (event.message.role === "user" || event.message.role === "custom")) this._inputArrived = true;
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
@@ -2201,7 +2208,19 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		if (this._disposed) return;
 		this._disposed = true;
+		this._agentRunAbortRequested = true;
+		// Active admissions belong to the loop until unwind; idle owned items must be
+		// receipted on this branch before the runtime is disconnected.
+		try {
+			this._writeStoppedCustomMessages();
+		} catch (error) {
+			this._extensionRunner.emitError({
+				...SESSION_PERSISTENCE_REPORT,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 		this._admissionGen++;
 		this._admissionClosed = true;
 		this._discardStaged();
@@ -2688,6 +2707,10 @@ export class AgentSession {
 		const bootstrap = needsSnapshot || this._stagedInstructions.length > 0 || this._stagedContent.length > 0;
 		const failStart = (error: unknown): never => {
 			this._isAgentRunActive = false;
+			if (trigger.messageType === "custom") {
+				const item = this._customStore.get(trigger.message);
+				if (item) item.state = "buffered";
+			}
 			if (!this._isAdmissionChanged(admissionGen)) {
 				if (bootstrap) {
 					// Staged content is data: it waits for the next B instead of being committed (§3.6).
@@ -3487,7 +3510,7 @@ export class AgentSession {
 			});
 			return;
 		}
-		const activeInput = this.isStreaming && options?.triggerTurn !== false;
+		const activeInput = this.isStreaming && options?.triggerTurn !== false && !this._isStoppingCustom;
 		const lane = activeInput
 			? options?.deliverAs === "followUp"
 				? "followUp"
@@ -3512,6 +3535,9 @@ export class AgentSession {
 			);
 		}
 		this._customStore.set(appMessage, item);
+		// Reentrant notifications join this stop writer's arrival-ordered pass. A trigger
+		// must not reserve a run while its predecessor's passive receipt is announced.
+		if (this._isStoppingCustom) return;
 		if (activeInput) {
 			if (lane === "followUp") this.agent.followUp(appMessage);
 			else this.agent.steer(appMessage);
@@ -3584,9 +3610,11 @@ export class AgentSession {
 		if (this._isWritingCustom || this._isSessionWriteBlocked()) return;
 		if ([...this._customStore.values()].some((item) => item.state === "admitted")) return;
 		this._isWritingCustom = true;
+		this._isStoppingCustom = true;
 		try {
 			for (const item of this._customStore.values()) this._writeOwnedCustom(item);
 		} finally {
+			this._isStoppingCustom = false;
 			this._isWritingCustom = false;
 		}
 	}
@@ -5475,12 +5503,12 @@ export class AgentSession {
 			);
 		}
 
+		// No-op navigation must not turn a flush-created leaf into an accidental branch change.
+		if (targetId === this.sessionManager.getLeafId()) return { cancelled: false };
+		this._writeStoppedCustomMessages();
+		const persistenceError = this.sessionManager.getPersistenceError();
+		if (persistenceError) throw persistenceError;
 		const oldLeafId = this.sessionManager.getLeafId();
-
-		// No-op if already at target
-		if (targetId === oldLeafId) {
-			return { cancelled: false };
-		}
 
 		// Model required for summarization
 		if (options.summarize && !this.model) {

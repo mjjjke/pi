@@ -126,6 +126,97 @@ describe("AgentSession custom ownership", () => {
 		expect(texts(h)).toEqual(["passive", "completion", "follow"]);
 	});
 
+	it("stages a failed bootstrap trigger before its passive rider", async () => {
+		let h!: Harness;
+		h = await createHarness({
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => {
+						if (event.messageType !== "custom") return;
+						await h.session.sendCustomMessage(custom("rider"), { triggerTurn: false });
+						throw new Error("preflight failure");
+					});
+				},
+			],
+		});
+		cleanups.push(h.cleanup);
+		// A throwing extension is isolated by the runner; force B itself to fail instead.
+		const append = h.sessionManager.appendMessage.bind(h.sessionManager);
+		vi.spyOn(h.sessionManager, "appendMessage").mockImplementationOnce(() => {
+			throw new Error("bootstrap failure");
+		});
+		await expect(h.session.sendCustomMessage(custom("trigger"), { triggerTurn: true })).rejects.toThrow(
+			"bootstrap failure",
+		);
+		expect(h.session.stagedMessages.map(getMessageText)).toEqual(["trigger", "rider"]);
+		vi.spyOn(h.sessionManager, "appendMessage").mockImplementation(append);
+		h.setResponses([fauxAssistantMessage("done")]);
+		await h.session.prompt("start");
+		expect(texts(h)).toEqual(["trigger", "rider"]);
+	});
+
+	for (const lifecycle of ["dispose", "tree"] as const) {
+		it(`writes unreceipted passive input to the old branch before ${lifecycle}`, async () => {
+			const h = await createHarness({ settings: { compaction: { enabled: false } } });
+			cleanups.push(h.cleanup);
+			h.setResponses([fauxAssistantMessage("done")]);
+			await h.session.prompt("start");
+			const oldLeaf = h.sessionManager.getLeafId();
+			vi.spyOn(h.sessionManager, "appendCustomMessageEntry").mockImplementationOnce(() => {
+				throw new Error("transient failure");
+			});
+			await expect(h.session.sendCustomMessage(custom("owned"), { triggerTurn: false })).rejects.toThrow(
+				"transient failure",
+			);
+			if (lifecycle === "dispose") h.session.dispose();
+			else {
+				const target = h.sessionManager
+					.getBranch()
+					.find((entry) => entry.type === "message" && entry.message.role === "user")!;
+				await h.session.navigateTree(target.id);
+				expect(texts(h)).toEqual([]);
+			}
+			const entry = h.sessionManager.getEntries().find((entry) => entry.type === "custom_message");
+			expect(entry).toMatchObject({ parentId: oldLeaf, content: "owned" });
+		});
+	}
+
+	it("keeps reentrant triggered sends passive during an idle stop writer", async () => {
+		const h = await createHarness({ settings: { compaction: { enabled: false } } });
+		cleanups.push(h.cleanup);
+		h.setResponses([fauxAssistantMessage("seed")]);
+		await h.session.prompt("seed");
+		const calls = h.faux.state.callCount;
+		vi.spyOn(h.sessionManager, "appendCustomMessageEntry").mockImplementationOnce(() => {
+			throw new Error("transient failure");
+		});
+		await expect(h.session.sendCustomMessage(custom("A"), { triggerTurn: false })).rejects.toThrow();
+		h.session.subscribe((event) => {
+			if (event.type !== "message_end" || getMessageText(event.message) !== "A") return;
+			void h.session.sendCustomMessage(custom("B"), { triggerTurn: true });
+			void h.session.sendCustomMessage(custom("C"), { triggerTurn: false });
+		});
+		await h.session.abort();
+		expect(texts(h)).toEqual(["A", "B", "C"]);
+		expect(h.faux.state.callCount).toBe(calls);
+	});
+
+	it("retires an admitted item before its public message_end announcement", async () => {
+		let h!: Harness;
+		let ownedAtAnnouncement: boolean | undefined;
+		h = await createHarness({ settings: { compaction: { enabled: false } } });
+		cleanups.push(h.cleanup);
+		h.session.subscribe((event) => {
+			if (event.type !== "message_end" || event.message.role !== "custom") return;
+			const store = (h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore;
+			ownedAtAnnouncement = store.has(event.message);
+		});
+		h.setResponses([fauxAssistantMessage("done")]);
+		await h.session.sendCustomMessage(custom("trigger"), { triggerTurn: true });
+		expect(ownedAtAnnouncement).toBe(false);
+	});
+
 	it("keeps a passive behind an older admitted item whose append fails", async () => {
 		let h!: Harness;
 		let sent = false;

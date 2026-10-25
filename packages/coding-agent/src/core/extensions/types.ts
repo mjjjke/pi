@@ -506,7 +506,7 @@ export interface ReplacedSessionContext extends ExtensionCommandContext {
 
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
 	): Promise<void>;
 
 	sendUserMessage(
@@ -2062,10 +2062,14 @@ export interface ExtensionAPI {
 	// Actions
 	// =========================================================================
 
-	/** Send a custom message to the session. */
+	/**
+	 * Send a custom message. `orderKey` is a producer-namespaced causal key (defaults to customType).
+	 * Passives follow older same-key steering/trigger input in its admission batch; follow-ups and
+	 * compaction-handler notices retain their separate delivery lanes. `nextTurn` is unaffected.
+	 */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
 	): void;
 
 	/**
@@ -2482,7 +2486,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
 ) => void;
 
 export type SendUserMessageHandler = (
