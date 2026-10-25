@@ -2749,11 +2749,25 @@ export class AgentSession {
 			}
 			if (needsSnapshot) update = undefined;
 		} else {
-			// Bash output and user-run context held during startup precede its starting messages.
-			// Passive messages received during custom preflight instead wait for the turn boundary,
-			// so they cannot precede their triggering notification.
-			this._flushPendingBashMessages();
-			if (trigger.messageType === "user") this._flushPendingCustomMessages();
+			try {
+				// Bash output and user-run context held during startup precede its starting messages.
+				// Passive messages received during custom preflight instead wait for the turn boundary,
+				// so they cannot precede their triggering notification.
+				this._flushPendingBashMessages();
+				if (trigger.messageType === "user") this._flushPendingCustomMessages();
+				else {
+					// An idle passive whose append failed still precedes a later same-key trigger.
+					// Only earlier arrivals are eligible: passives received in this custom
+					// preflight must remain behind their starter (or ride with it).
+					const starter = this._customStore.get(trigger.message);
+					for (const item of this._customStore.values()) {
+						if (item === starter) break;
+						if (item.key === starter?.key && this._isCustomWritable(item)) this._writeOwnedCustom(item);
+					}
+				}
+			} catch (error) {
+				return failStart(error);
+			}
 		}
 		const messages: AgentMessage[] = [...(update ? [update] : []), prepared.start, ...nextTurn, ...prepared.returned];
 		const runStart = { message: prepared.start, persisted: false };

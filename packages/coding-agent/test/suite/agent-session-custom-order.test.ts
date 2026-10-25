@@ -1,5 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { convertToLlm } from "../../src/core/messages.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 const custom = (text: string) => ({ customType: "task", content: text, display: false });
@@ -103,6 +104,65 @@ describe("AgentSession custom ownership", () => {
 		expect(h.session.agent.hasQueuedMessages()).toBe(false);
 	});
 
+	it("keeps independent same-key ingress behind its steer while a context-change handler awaits", async () => {
+		let h!: Harness;
+		let enter!: () => void;
+		let release!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			enter = resolve;
+		});
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let drafted = false;
+		h = await createHarness({
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", async (event, ctx) => {
+						if (drafted) return;
+						drafted = true;
+						await h.session.steer("U");
+						pi.sendMessage(custom("A"), { deliverAs: "steer", orderKey: "task:k" });
+						const target = ctx.sessionManager
+							.getBranch()
+							.find((entry) => entry.type === "message" && entry.message.role === "user")!;
+						return {
+							entries: [
+								...event.entries,
+								{ type: "context_edit", targetId: target.id, replacement: { content: "edited" } },
+							],
+						};
+					});
+					pi.on("session_context_change", async () => {
+						enter();
+						await gate;
+					});
+				},
+			],
+		});
+		cleanups.push(() => {
+			release();
+			h.cleanup();
+		});
+		h.session.agent.steeringMode = "one-at-a-time";
+		const requests: string[][] = [];
+		h.setResponses(
+			Array.from({ length: 3 }, (_, index) => (context) => {
+				expect(context.messages).toEqual(convertToLlm(h.sessionManager.buildSessionProjection().messages));
+				requests.push(context.messages.map(getMessageText).filter((text) => ["U", "A", "B"].includes(text)));
+				return fauxAssistantMessage(`reply ${index}`);
+			}),
+		);
+		const run = h.session.prompt("start");
+		await entered;
+		await h.session.sendCustomMessage(custom("B"), { triggerTurn: false, orderKey: "task:k" });
+		release();
+		await run;
+		expect(requests).toEqual([[], ["U"], ["U", "A", "B"]]);
+		expect(texts(h)).toEqual(["A", "B"]);
+	});
+
 	it("keeps an unrelated passive eligible while a follow-up is pending", async () => {
 		let h!: Harness;
 		let sent = false;
@@ -124,6 +184,42 @@ describe("AgentSession custom ownership", () => {
 		h.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("next"), fauxAssistantMessage("done")]);
 		await h.session.prompt("start");
 		expect(texts(h)).toEqual(["passive", "completion", "follow"]);
+	});
+
+	it("writes an older unreceipted same-key passive before an idle trigger", async () => {
+		const h = await createHarness({ settings: { compaction: { enabled: false } } });
+		cleanups.push(h.cleanup);
+		h.setResponses([fauxAssistantMessage("seed")]);
+		await h.session.prompt("seed");
+		vi.spyOn(h.sessionManager, "appendCustomMessageEntry").mockImplementationOnce(() => {
+			throw new Error("transient failure");
+		});
+		await expect(h.session.sendCustomMessage(custom("older"), { triggerTurn: false })).rejects.toThrow();
+		h.setResponses([
+			(context) => {
+				expect(context.messages.map(getMessageText).slice(-2)).toEqual(["older", "trigger"]);
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await h.session.sendCustomMessage(custom("trigger"), { triggerTurn: true });
+		expect(texts(h)).toEqual(["older", "trigger"]);
+	});
+
+	it("releases the run reservation when an older passive still cannot append", async () => {
+		const h = await createHarness({ settings: { compaction: { enabled: false } } });
+		cleanups.push(h.cleanup);
+		h.setResponses([fauxAssistantMessage("seed")]);
+		await h.session.prompt("seed");
+		const calls = h.faux.state.callCount;
+		vi.spyOn(h.sessionManager, "appendCustomMessageEntry").mockImplementation(() => {
+			throw new Error("append unavailable");
+		});
+		await expect(h.session.sendCustomMessage(custom("older"), { triggerTurn: false })).rejects.toThrow();
+		await expect(h.session.sendCustomMessage(custom("trigger"), { triggerTurn: true })).rejects.toThrow(
+			"append unavailable",
+		);
+		expect(h.session.isStreaming).toBe(false);
+		expect(h.faux.state.callCount).toBe(calls);
 	});
 
 	it("stages a failed bootstrap trigger before its passive rider", async () => {
