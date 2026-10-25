@@ -553,8 +553,27 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "compact": {
-				const result = await session.compact(command.customInstructions);
-				return success(id, "compact", result);
+				if (command.mode !== undefined && command.mode !== "background" && command.mode !== "now") {
+					return error(id, "compact", "Invalid compaction mode: expected background or now");
+				}
+				const result =
+					command.mode === "now"
+						? await session.compactNow(command.customInstructions)
+						: session.startBackgroundCompaction({
+								source: "user",
+								customInstructions: command.customInstructions,
+							});
+				return success(
+					id,
+					"compact",
+					result.status === "applied" ? { status: result.status, entryId: result.entryId } : result,
+				);
+			}
+
+			case "cancel_background_compaction": {
+				return success(id, "cancel_background_compaction", {
+					cancelled: session.cancelBackgroundCompaction(command.jobId),
+				});
 			}
 
 			case "set_auto_compaction": {

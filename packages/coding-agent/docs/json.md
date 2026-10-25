@@ -158,6 +158,20 @@ If compaction was aborted, `result` is absent and `aborted` is true. If it faile
 
 See [Compaction and Branch Summaries](compaction.md) for result semantics.
 
+### session_background_compaction
+
+Requested background jobs emit this event instead of `compaction_start` / `compaction_end`:
+
+```json
+{"type":"session_background_compaction","jobId":"abc123","source":"user","phase":"started"}
+{"type":"session_background_compaction","jobId":"abc123","source":"user","phase":"ready"}
+{"type":"session_background_compaction","jobId":"abc123","source":"user","phase":"applied"}
+```
+
+`source` is `"user"` or `"model"`. Phases are `started`, `ready`, `waiting`, `released`, `applied`, `discarded`, `failed`; optional `cause` describes termination and optional `usage` reports summary usage. `waiting` holds request admission; `released` stops waiting but leaves the summary running. `applied` follows the committed append and awaited extension notifications, once. An applied job cannot be cancelled. `discarded` / `failed` are terminal without installation; late completion cannot install it.
+
+A background job emits neither `session_compact_failed` (the extension hook for failed blocking compaction) nor `compaction_start`. Extensions receive `session_compact` only when its entry commits, with `background: {jobId, source}`. This extension hook is not a JSON session event. Jobs are not replayed after a crash.
+
 ## Retry events
 
 Assistant-turn retry emits:

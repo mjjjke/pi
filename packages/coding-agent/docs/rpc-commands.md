@@ -131,7 +131,7 @@ Response:
 }
 ```
 
-To implement interactive Esc behavior, send `clear_queue` before `abort`, then restore the returned text in the client editor. `abort` continues queued messages when they remain in the session.
+To implement interactive Esc behavior, send `clear_queue` before `abort`, then restore the returned text in the client editor. Only queued user input successfully removed is returned, never extension messages or already-admitted input. During a compaction wait, `abort` stops the run and releases the wait without cancelling the background summary; queued users remain queued unless cleared.
 
 ### new_session
 
@@ -372,46 +372,37 @@ Response:
 
 ### compact
 
-Manually compact conversation context to reduce token usage.
+Start a background summary. `mode` defaults to `"background"`; the response does not wait for the summary. Nothing is installed until a later request boundary.
 
 ```json
-{"type": "compact"}
+{"id":"cut","type":"compact","mode":"background","customInstructions":"Focus on code changes"}
+{"id":"cut","type":"response","command":"compact","success":true,"data":{"status":"started","jobId":"abc123","phase":"summarizing"}}
 ```
 
-With custom instructions:
+A pending job with the same instructions returns `status: "already"` with its `jobId` and phase. Different instructions supersede it. An unavailable launch returns `{status: "unavailable", reason}`. Observe [background events](json.md#session_background_compaction) for progress and the terminal outcome, not `agent_settled`.
+
+To abort the active run, reserve admission, and wait for installation:
+
 ```json
-{"type": "compact", "customInstructions": "Focus on code changes"}
+{"id":"cut-now","type":"compact","mode":"now"}
 ```
 
-Response:
+Prompts queue during this wait. The response data is the installation outcome: `{status: "applied", entryId}`, `{status: "released"}` on `abort`, or `{status: "discarded", cause}` / `{status: "unavailable"}` when adoption is unavailable. If launch is unavailable, the existing blocking compaction runs instead and returns `{status: "compacted", result}` with the usual compaction result. `abort` releases a wait without cancelling the summary or sending queued input. `RpcClient.compact()` starts a background job; `RpcClient.compactNow()` waits.
+
+### cancel_background_compaction
+
+Cancel the pending job, optionally only if its id matches. In a compaction wait, cancellation also stops the run; no blocking replacement starts.
+
 ```json
-{
-  "type": "response",
-  "command": "compact",
-  "success": true,
-  "data": {
-    "summary": "Summary of conversation...",
-    "firstKeptEntryId": "abc123",
-    "tokensBefore": 150000,
-    "estimatedTokensAfter": 32000,
-    "usage": {
-      "input": 32000,
-      "output": 1200,
-      "cacheRead": 0,
-      "cacheWrite": 0,
-      "totalTokens": 33200,
-      "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03}
-    },
-    "details": {}
-  }
-}
+{"id":"cancel","type":"cancel_background_compaction","jobId":"abc123"}
+{"id":"cancel","type":"response","command":"cancel_background_compaction","success":true,"data":{"cancelled":true}}
 ```
 
-`estimatedTokensAfter` is a heuristic estimate over the rebuilt message context immediately after compaction, not a provider-exact token count. `usage` reports the LLM call or calls that generated the summary and may be omitted by custom compaction handlers.
+`cancelled: false` means no matching pending job (including a job whose append already committed). `RpcClient.cancelBackgroundCompaction(jobId?)` returns this boolean.
 
 ### set_auto_compaction
 
-Enable or disable automatic compaction when context is nearly full.
+Enable or disable the hard-threshold safety net. It adopts a ready background job, waits for a running one, or uses blocking compaction when no job is pending. This setting never starts background jobs automatically and does not disable adoption of explicitly requested ready jobs.
 
 ```json
 {"type": "set_auto_compaction", "enabled": true}

@@ -7,9 +7,13 @@
 
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { PromptDisposition, QueuedInputDisposition, SessionStats } from "../../core/agent-session.ts";
+import type {
+	AgentSession,
+	PromptDisposition,
+	QueuedInputDisposition,
+	SessionStats,
+} from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
-import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
@@ -52,7 +56,8 @@ export type RpcCommand =
 	| { id?: string; type: "set_follow_up_mode"; mode: "all" | "one-at-a-time" }
 
 	// Compaction
-	| { id?: string; type: "compact"; customInstructions?: string }
+	| { id?: string; type: "compact"; mode?: "background" | "now"; customInstructions?: string }
+	| { id?: string; type: "cancel_background_compaction"; jobId?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
 
 	// Retry
@@ -119,6 +124,11 @@ export interface RpcSessionState {
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
+
+/** Installation outcomes omit the in-process job's AbortSignal and completion promise. */
+export type RpcCompactNowResult =
+	| Exclude<Awaited<ReturnType<AgentSession["compactNow"]>>, { status: "applied" }>
+	| { status: "applied"; entryId: string };
 
 // Success responses with data
 export type RpcResponse =
@@ -190,7 +200,20 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "set_follow_up_mode"; success: true }
 
 	// Compaction
-	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
+	| {
+			id?: string;
+			type: "response";
+			command: "compact";
+			success: true;
+			data: ReturnType<AgentSession["startBackgroundCompaction"]> | RpcCompactNowResult;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "cancel_background_compaction";
+			success: true;
+			data: { cancelled: boolean };
+	  }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
 
 	// Retry

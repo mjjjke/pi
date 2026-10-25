@@ -7,13 +7,17 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { PromptDisposition, QueuedInputDisposition, SessionStats } from "../../core/agent-session.ts";
+import type {
+	AgentSession,
+	PromptDisposition,
+	QueuedInputDisposition,
+	SessionStats,
+} from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
-import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
-import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+import type { RpcCommand, RpcCompactNowResult, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
 // ============================================================================
 // Types
@@ -318,12 +322,22 @@ export class RpcClient {
 		await this.send({ type: "set_follow_up_mode", mode });
 	}
 
-	/**
-	 * Compact session context.
-	 */
-	async compact(customInstructions?: string): Promise<CompactionResult> {
-		const response = await this.send({ type: "compact", customInstructions });
+	/** Start background compaction without waiting for the summary. */
+	async compact(customInstructions?: string): Promise<ReturnType<AgentSession["startBackgroundCompaction"]>> {
+		const response = await this.send({ type: "compact", mode: "background", customInstructions });
 		return this.getData(response);
+	}
+
+	/** Abort the current run, compact and wait for installation (abort releases the wait). */
+	async compactNow(customInstructions?: string): Promise<RpcCompactNowResult> {
+		const response = await this.send({ type: "compact", mode: "now", customInstructions });
+		return this.getData(response);
+	}
+
+	/** Cancel a pending job; when waiting, also stop the run. */
+	async cancelBackgroundCompaction(jobId?: string): Promise<boolean> {
+		const response = await this.send({ type: "cancel_background_compaction", jobId });
+		return this.getData<{ cancelled: boolean }>(response).cancelled;
 	}
 
 	/**

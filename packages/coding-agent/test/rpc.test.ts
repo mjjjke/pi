@@ -93,9 +93,8 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		await client.promptAndWait("Say hello");
 
 		// Compact
-		const result = await client.compact();
-		expect(result.summary).toBeDefined();
-		expect(result.tokensBefore).toBeGreaterThan(0);
+		const result = await client.compactNow();
+		expect(["applied", "compacted"]).toContain(result.status);
 
 		// Wait for file writes
 		await new Promise((resolve) => setTimeout(resolve, 200));
@@ -353,7 +352,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		await client.promptAndWait("Reply with just 'ok'");
 		const before = await client.getEntries();
 
-		await client.compact();
+		await client.compactNow();
 
 		const after = await client.getEntries();
 		// Append-only: pre-compaction entries are still there, in the same order
