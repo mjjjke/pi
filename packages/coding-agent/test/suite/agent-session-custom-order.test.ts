@@ -16,6 +16,40 @@ describe("AgentSession custom ownership", () => {
 		while (cleanups.length) cleanups.pop()?.();
 	});
 
+	it("pumps a trigger accepted by the final run-end flush after settlement", async () => {
+		let h!: Harness;
+		let sent = false;
+		h = await createHarness({
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("agent_end", async () => {
+						if (sent) return;
+						sent = true;
+						await h.session.sendCustomMessage(custom("final passive"), { triggerTurn: false });
+					});
+				},
+			],
+		});
+		cleanups.push(h.cleanup);
+		const activeAtStarts: boolean[] = [];
+		h.session.subscribe((event) => {
+			if (event.type === "message_end" && getMessageText(event.message) === "final passive") {
+				void h.session.sendCustomMessage(custom("wake trigger"), { triggerTurn: true });
+				void h.session.sendCustomMessage(custom("rider"), { triggerTurn: false });
+			}
+			if (event.type === "agent_start") activeAtStarts.push(h.session.isStreaming);
+		});
+		h.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("done")]);
+		await h.session.prompt("start");
+		await h.session.waitForIdle();
+		expect(texts(h)).toEqual(["final passive", "wake trigger", "rider"]);
+		expect(h.faux.state.callCount).toBe(2);
+		expect(activeAtStarts).toEqual([true, true]);
+		expect(h.session.agent.hasQueuedMessages()).toBe(false);
+		expect((h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore.size).toBe(0);
+	});
+
 	it("admits a same-key passive rider with its steer in request and journal order", async () => {
 		let h!: Harness;
 		const requests: string[][] = [];
