@@ -1063,6 +1063,29 @@ describe("AgentSession standing instructions", () => {
 			expect(compacted).toEqual([first, second]);
 		});
 
+		it.each([false, true])(
+			"a safety-net veto cancels only compaction, not the run (tool continuation=%s)",
+			async (withTool) => {
+				const requests: string[][] = [];
+				const { harness } = await compactionSetup({
+					models: [{ id: "faux-1", contextWindow: 100, maxTokens: 10 }],
+					settings: { compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 0 } },
+					maxCompactions: 0,
+					tools: [sideTool("side", () => {})],
+				});
+				harness.setResponses([
+					respond(requests, withTool ? toolCall("side") : undefined),
+					respond(requests),
+					respond(requests),
+				]);
+				await harness.session.prompt("x".repeat(2000));
+				await harness.session.prompt("after veto");
+				expect(requests).toHaveLength(withTool ? 3 : 2);
+				expect(harness.eventsOfType("agent_settled").every((event) => !event.aborted)).toBe(true);
+				expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
+			},
+		);
+
 		it("mid-run threshold compaction carries the delivered value; the pending one follows the next input; tree R3", async () => {
 			const largeTool: AgentTool = {
 				name: "large_result",
@@ -1120,6 +1143,7 @@ describe("AgentSession standing instructions", () => {
 			// delivered and nothing is sent.
 			await harness.session.navigateTree(compaction.id, { summarize: false });
 			expect(harness.session.getStandingInstruction("mode")).toMatchObject({ content: "Plan", delivered: false });
+			// B8: the fixture now vetoes compaction. That is not Escape: the prompt still sends.
 			await harness.session.prompt("from C");
 			expect(requests[5]?.slice(-2)).toEqual(["user:from C", "developer:Plan"]);
 			await harness.session.navigateTree(leaf, { summarize: false });

@@ -5146,7 +5146,9 @@ export class AgentSession {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "compaction failed";
 			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
-			if (aborted && this.isStreaming) this._requestRunStop();
+			// An extension veto cancels the compaction, not the enclosing run. Only
+			// an actual abort (Escape/Q13) suppresses the next request.
+			if (abortController?.signal.aborted && this.isStreaming) this._requestRunStop();
 			if (started) {
 				const errorMessage = aborted
 					? undefined
