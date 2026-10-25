@@ -5,7 +5,7 @@ import { stream as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-re
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectPromptPrefixStable } from "../../../ai/test/prompt-prefix-utils.ts";
-import { COMPACTION_BOUNDARY_TEXT_V1 } from "../../src/core/messages.ts";
+import { COMPACTION_BOUNDARY_TEXT_V2 } from "../../src/core/messages.ts";
 import { createHarness, getMessageText } from "./harness.ts";
 
 /**
@@ -72,7 +72,7 @@ async function postCompactionRequests(): Promise<[Context, Context]> {
 		harness.cleanup();
 	}
 	expect(contexts).toHaveLength(2);
-	expect(contexts[0].messages.map(getMessageText)).toContain(COMPACTION_BOUNDARY_TEXT_V1);
+	expect(contexts[0].messages.map(getMessageText)).toContain(COMPACTION_BOUNDARY_TEXT_V2);
 	return contexts as [Context, Context];
 }
 

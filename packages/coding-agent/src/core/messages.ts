@@ -17,11 +17,14 @@ export const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
 /**
- * Text of the compaction boundary (version 1), copied as a literal into each new `CompactionEntry.boundary`.
- * Editing it changes only compactions written afterwards; stored entries keep their own text.
+ * Historical version 1 wording. Stored entries retain their literal, never rewritten on load.
  */
 export const COMPACTION_BOUNDARY_TEXT_V1 =
 	"Compaction boundary (not a request). Any messages between the compaction summary above and this point were kept from before the compaction: they are older than the summary, and the state they report describes when they were sent. Context-size readings from before the compaction no longer describe the current context; its size is unknown until a newer reading. Messages after this point are new. Standing instructions and running tasks are not affected by this boundary.";
+
+/** Approved version 2, copied only into new compactions (background, blocking and drafts). */
+export const COMPACTION_BOUNDARY_TEXT_V2 =
+	"Compaction boundary (not a request). Any messages between the compaction summary above and this point were kept from before the compaction; they may contain later updates than the summary, and those updates take precedence. The state they report describes when they were sent. Context-size readings from before the compaction no longer describe the current context; its size is unknown until a newer reading. Messages after this point are new. Standing instructions and running tasks are not affected by this boundary.";
 
 export const BRANCH_SUMMARY_PREFIX = `The following is a summary of a branch that this conversation came back from:
 

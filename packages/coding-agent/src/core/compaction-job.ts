@@ -13,6 +13,7 @@ import {
 	estimateProjectedContextTokens,
 	prepareCompaction,
 } from "./compaction/compaction.ts";
+import { COMPACTION_BOUNDARY_TEXT_V2 } from "./messages.ts";
 import {
 	buildSessionProjection,
 	type CompactionEntry,
@@ -22,9 +23,8 @@ import {
 
 import { combineUsage } from "./usage-totals.ts";
 
-// Stored on new background entries only. Old entries retain their original literal.
-export const BACKGROUND_COMPACTION_BOUNDARY =
-	"Compaction boundary (not a request). Any messages between the compaction summary above and this point were kept from before the compaction; they may contain later updates than the summary, and those updates take precedence. The state they report describes when they were sent. Context-size readings from before the compaction no longer describe the current context; its size is unknown until a newer reading. Messages after this point are new. Standing instructions and running tasks are not affected by this boundary.";
+// Same approved literal as every other new compaction. Old entries retain their own text.
+export const BACKGROUND_COMPACTION_BOUNDARY = COMPACTION_BOUNDARY_TEXT_V2;
 
 export interface CompactionJobBranch {
 	branch: SessionEntry[];

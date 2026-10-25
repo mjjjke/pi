@@ -4,7 +4,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
 import { describe, expect, it } from "vitest";
 import { prepareCompaction } from "../../src/core/compaction/compaction.ts";
-import { COMPACTION_BOUNDARY_TEXT_V1, convertToLlm } from "../../src/core/messages.ts";
+import { COMPACTION_BOUNDARY_TEXT_V1, COMPACTION_BOUNDARY_TEXT_V2, convertToLlm } from "../../src/core/messages.ts";
 import {
 	buildContextEntries,
 	buildSessionProjection,
@@ -14,8 +14,11 @@ import {
 	SessionManager,
 } from "../../src/core/session-manager.ts";
 
-const APPROVED_TEXT =
+const APPROVED_TEXT_V1 =
 	"Compaction boundary (not a request). Any messages between the compaction summary above and this point were kept from before the compaction: they are older than the summary, and the state they report describes when they were sent. Context-size readings from before the compaction no longer describe the current context; its size is unknown until a newer reading. Messages after this point are new. Standing instructions and running tasks are not affected by this boundary.";
+
+const APPROVED_TEXT =
+	"Compaction boundary (not a request). Any messages between the compaction summary above and this point were kept from before the compaction; they may contain later updates than the summary, and those updates take precedence. The state they report describes when they were sent. Context-size readings from before the compaction no longer describe the current context; its size is unknown until a newer reading. Messages after this point are new. Standing instructions and running tasks are not affected by this boundary.";
 
 function seeded(): SessionManager {
 	const manager = SessionManager.inMemory();
@@ -26,7 +29,8 @@ function seeded(): SessionManager {
 
 describe("compaction boundary field (A1)", () => {
 	it("the constant is the approved wording", () => {
-		expect(COMPACTION_BOUNDARY_TEXT_V1).toBe(APPROVED_TEXT);
+		expect(COMPACTION_BOUNDARY_TEXT_V1).toBe(APPROVED_TEXT_V1);
+		expect(COMPACTION_BOUNDARY_TEXT_V2).toBe(APPROVED_TEXT);
 	});
 
 	it("appendCompaction writes the literal boundary in the same entry", () => {
@@ -74,6 +78,22 @@ describe("compaction boundary field (A1)", () => {
 		const compactions = lines.filter((line) => line.type === "compaction") as CompactionEntry[];
 		expect(compactions).toHaveLength(1);
 		expect(compactions[0].boundary).toBe(APPROVED_TEXT);
+	});
+
+	it("loading and appending do not rewrite an existing V1 boundary or its projection", () => {
+		const manager = seeded();
+		const kept = manager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+		const candidate = manager.buildCompactionEntry("OLD", kept, 100, undefined, false, undefined, {
+			boundary: APPROVED_TEXT_V1,
+		});
+		manager.appendCompaction(candidate);
+		const bytes = JSON.stringify(candidate);
+		const projection = JSON.stringify(manager.buildSessionProjection().messages);
+		const loaded = SessionManager.inMemory("/", undefined, [manager.getHeader()!, ...manager.getEntries()]);
+		expect(JSON.stringify(loaded.buildSessionProjection().messages)).toBe(projection);
+		loaded.appendMessage({ role: "user", content: "new", timestamp: 3 });
+		expect(JSON.stringify(loaded.getEntry(candidate.id))).toBe(bytes);
+		expect(loaded.buildCompactionEntry("NEW", null, 100).boundary).toBe(APPROVED_TEXT);
 	});
 
 	it("an old compaction without the field stays without it", () => {

@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type Context, type FauxResponseStep, fauxAssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { COMPACTION_BOUNDARY_TEXT_V1, convertToLlm } from "../../src/core/messages.ts";
+import { COMPACTION_BOUNDARY_TEXT_V2, convertToLlm } from "../../src/core/messages.ts";
 import type { CompactionEntry } from "../../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../../src/index.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
@@ -45,7 +45,7 @@ function summarize(pi: ExtensionAPI): void {
 }
 
 function boundaries(messages: Array<Message | AgentMessage>): number {
-	return messages.filter((message) => getMessageText(message) === COMPACTION_BOUNDARY_TEXT_V1).length;
+	return messages.filter((message) => getMessageText(message) === COMPACTION_BOUNDARY_TEXT_V2).length;
 }
 
 describe("AgentSession: compaction boundary lifecycle (A4)", () => {

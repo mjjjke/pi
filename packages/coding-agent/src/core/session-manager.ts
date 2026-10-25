@@ -43,7 +43,7 @@ import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
-	COMPACTION_BOUNDARY_TEXT_V1,
+	COMPACTION_BOUNDARY_TEXT_V2,
 	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionBoundaryMessage,
@@ -1967,7 +1967,7 @@ export class SessionManager {
 				? { systemMessage: { ...structuredClone(systemMessage), timestamp: new Date(timestamp).getTime() } }
 				: {}),
 			standing,
-			boundary: options?.boundary ?? COMPACTION_BOUNDARY_TEXT_V1,
+			boundary: options?.boundary ?? COMPACTION_BOUNDARY_TEXT_V2,
 		};
 		return entry;
 	}

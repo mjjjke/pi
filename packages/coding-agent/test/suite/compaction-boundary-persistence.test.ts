@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { COMPACTION_BOUNDARY_TEXT_V1 } from "../../src/core/messages.ts";
+import { COMPACTION_BOUNDARY_TEXT_V2 } from "../../src/core/messages.ts";
 import { type CompactionEntry, SessionManager, type SessionManager as SM } from "../../src/core/session-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -61,7 +61,7 @@ describe("compaction boundary persistence (A6)", () => {
 		const lines = readFileSync(file, "utf8").trim().split("\n");
 		const withText = lines.filter((line) => line.includes("Compaction boundary (not a request)"));
 		expect(withText).toHaveLength(1);
-		expect(JSON.parse(withText[0])).toMatchObject({ type: "compaction", boundary: COMPACTION_BOUNDARY_TEXT_V1 });
+		expect(JSON.parse(withText[0])).toMatchObject({ type: "compaction", boundary: COMPACTION_BOUNDARY_TEXT_V2 });
 	});
 
 	it("reload, resume and fork project it exactly once", async () => {
@@ -81,7 +81,7 @@ describe("compaction boundary persistence (A6)", () => {
 		const forked = SessionManager.forkFrom(file, dir, join(dir, "forks"));
 		expect(boundaryCount(forked)).toBe(1);
 		const forkCompaction = forked.getBranch().find((entry) => entry.type === "compaction") as CompactionEntry;
-		expect(forkCompaction.boundary).toBe(COMPACTION_BOUNDARY_TEXT_V1);
+		expect(forkCompaction.boundary).toBe(COMPACTION_BOUNDARY_TEXT_V2);
 
 		const branched = SessionManager.open(file, join(dir, "sessions"));
 		const newPath = branched.createBranchedSession(branched.getLeafId() as string);
