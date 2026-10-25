@@ -40,6 +40,8 @@ interface BackgroundCompactionOwnerOptions {
 	/** Standing delivery and session_compact, in today's order; applied follows below. */
 	notifyApplied(entryId: string, job: CompactionJobView): Promise<void>;
 	emit(event: BackgroundCompactionEvent): Promise<void>;
+	/** Synchronous public observers, before disposal can disconnect them. Never awaited. */
+	observe?(event: BackgroundCompactionEvent): void;
 	reportError(error: unknown): void;
 }
 
@@ -96,6 +98,7 @@ export class BackgroundCompactionOwner {
 				// Capture the summarizer synchronously, including before its first auth await.
 				// Ownership and the started event precede reentrant launch-hook work.
 				try {
+					if (view.terminal) return Promise.reject(view.signal.reason);
 					return options.summarize({ ...request, onUsage }).then((value) => {
 						// The primitive's aggregate fallback otherwise bypasses late-call accounting.
 						if (calls === 0 && value.usage) onUsage(value.usage);
@@ -249,8 +252,14 @@ export class BackgroundCompactionOwner {
 			...(view.cause ? { cause: view.cause } : {}),
 			...(usage.length ? { usage: usage.reduce(combineUsage) } : {}),
 		};
-		this.events = this.events.then(() => this.options.emit(event)).catch((error) => this.report(error));
-		return this.events;
+		const dispatch = this.events.then(() => this.options.emit(event)).catch((error) => this.report(error));
+		this.events = dispatch;
+		try {
+			this.options.observe?.(structuredClone(event));
+		} catch (error) {
+			this.report(error);
+		}
+		return dispatch;
 	}
 
 	private report(error: unknown): void {

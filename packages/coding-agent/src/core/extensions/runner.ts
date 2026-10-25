@@ -396,6 +396,10 @@ export class ExtensionRunner {
 	private getStagedMessagesFn: () => Array<CustomMessage | BashExecutionMessage> = () => [];
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
+	private backgroundActions: Pick<
+		ExtensionContextActions,
+		"startBackgroundCompaction" | "cancelBackgroundCompaction" | "getBackgroundCompaction"
+	> = {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
@@ -481,6 +485,11 @@ export class ExtensionRunner {
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
+		this.backgroundActions = {
+			startBackgroundCompaction: contextActions.startBackgroundCompaction,
+			cancelBackgroundCompaction: contextActions.cancelBackgroundCompaction,
+			getBackgroundCompaction: contextActions.getBackgroundCompaction,
+		};
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.requestNewSessionHandler = contextActions.requestNewSession;
 		this.requestBashHandoverFn = contextActions.requestBashHandover ?? (async () => 0);
@@ -1071,6 +1080,32 @@ export class ExtensionRunner {
 				runner.assertActive();
 				runner.compactFn(options);
 			},
+			...(this.backgroundActions.startBackgroundCompaction
+				? {
+						startBackgroundCompaction: (
+							options: Parameters<NonNullable<ExtensionContextActions["startBackgroundCompaction"]>>[0],
+						) => {
+							runner.assertActive();
+							return runner.backgroundActions.startBackgroundCompaction!(options);
+						},
+					}
+				: {}),
+			...(this.backgroundActions.cancelBackgroundCompaction
+				? {
+						cancelBackgroundCompaction: (jobId?: string) => {
+							runner.assertActive();
+							return runner.backgroundActions.cancelBackgroundCompaction!(jobId);
+						},
+					}
+				: {}),
+			...(this.backgroundActions.getBackgroundCompaction
+				? {
+						getBackgroundCompaction: () => {
+							runner.assertActive();
+							return runner.backgroundActions.getBackgroundCompaction!();
+						},
+					}
+				: {}),
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();

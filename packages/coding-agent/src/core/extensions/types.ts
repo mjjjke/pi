@@ -59,9 +59,11 @@ import type {
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ShellConfig } from "../../utils/shell.ts";
+import type { BackgroundCompactionEvent } from "../background-compaction-owner.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+import type { CompactionJobPhase, CompactionJobStartResult } from "../compaction-job.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -315,6 +317,20 @@ export interface ContextUsage {
 	percent: number | null;
 }
 
+export interface BackgroundCompactionOptions {
+	source: "user" | "model";
+	customInstructions?: string;
+}
+export type BackgroundCompactionStartResult = CompactionJobStartResult;
+export interface BackgroundCompactionState {
+	jobId: string;
+	source: string;
+	phase: CompactionJobPhase;
+	hardThreshold: number;
+}
+/** Background jobs never emit compaction_start or session_compact_failed. */
+export type SessionBackgroundCompactionEvent = BackgroundCompactionEvent;
+
 export interface CompactOptions {
 	customInstructions?: string;
 	onComplete?: (result: CompactionResult) => void;
@@ -381,6 +397,12 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
+	/** Explicit non-blocking launch. Optional on hand-built or older core contexts. */
+	startBackgroundCompaction?(options: BackgroundCompactionOptions): BackgroundCompactionStartResult;
+	/** Cancel a pending job; a waiting run stops rather than falling through to blocking compaction. */
+	cancelBackgroundCompaction?(jobId?: string): boolean;
+	/** Current job and check-site hard threshold; context size still comes from getContextUsage. */
+	getBackgroundCompaction?(): BackgroundCompactionState | undefined;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
 	/**
@@ -896,6 +918,8 @@ export interface SessionBeforeCompactEvent {
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
 	signal: AbortSignal;
+	/** Present only on a background launch; the preparation and cut are frozen for that job. */
+	background?: { jobId: string; source: string };
 }
 
 /** Fired after context compaction succeeds */
@@ -921,6 +945,8 @@ export interface SessionCompactEvent {
 	reason: "manual" | "threshold" | "overflow";
 	/** True when the aborted turn is retried after this compaction (overflow recovery) */
 	willRetry: boolean;
+	/** Present only on the irreversible install of a background job. */
+	background?: { jobId: string; source: string };
 }
 
 /**
@@ -996,6 +1022,7 @@ export type SessionEvent =
 	| SessionBeforeForkEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
+	| SessionBackgroundCompactionEvent
 	| SessionContextChangeEvent
 	| StandingInstructionDeliveredEvent
 	| SessionCompactFailedEvent
@@ -1930,6 +1957,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): () => void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): () => void;
+	on(event: "session_background_compaction", handler: ExtensionHandler<SessionBackgroundCompactionEvent>): () => void;
 	on(event: "session_context_change", handler: ExtensionHandler<SessionContextChangeEvent>): () => void;
 	on(
 		event: "standing_instruction_delivered",
@@ -2644,6 +2672,9 @@ export interface ExtensionContextActions {
 	shutdown: () => void;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (options?: CompactOptions) => void;
+	startBackgroundCompaction?: (options: BackgroundCompactionOptions) => BackgroundCompactionStartResult;
+	cancelBackgroundCompaction?: (jobId?: string) => boolean;
+	getBackgroundCompaction?: () => BackgroundCompactionState | undefined;
 	getSystemPrompt: () => string;
 	requestNewSession: (options?: RequestNewSessionOptions) => Promise<RequestNewSessionResult>;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;

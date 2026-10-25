@@ -742,11 +742,12 @@ export class AgentSession {
 						fromExtension: entry.fromHook ?? false,
 						reason: "manual",
 						willRetry: false,
-						...{ background: { jobId: job.id, source: job.source } },
+						background: { jobId: job.id, source: job.source },
 					});
 			},
+			observe: (event) => this._emitIsolated(event),
 			emit: async (event) => {
-				this._emitIsolated(event);
+				if (!this._disposed && !this._extensionRunner.isInvalidated()) await this._extensionRunner.emit(event);
 			},
 			reportError: (error) =>
 				this._extensionRunner.emitError({
@@ -5305,6 +5306,9 @@ export class AgentSession {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
+				startBackgroundCompaction: (options) => this.startBackgroundCompaction(options),
+				cancelBackgroundCompaction: (jobId) => this.cancelBackgroundCompaction(jobId),
+				getBackgroundCompaction: () => this.getBackgroundCompaction(),
 				compact: (options) => {
 					void (async () => {
 						try {
