@@ -461,7 +461,14 @@ async function endAbortedPreparation(
 	await emit({ type: "message_end", message });
 	context.messages.push(message);
 	newMessages.push(message);
-	await config.finishTurn?.({ message, toolResults: [], context, newMessages }, signal);
+	try {
+		await config.finishTurn?.({ message, toolResults: [], context, newMessages }, signal);
+	} catch (error) {
+		// The aborted assistant is already committed. A cancellation-aware finalizer must not
+		// interrupt its terminal events or make Agent's failure handler append a second one.
+		// Do not hide an unrelated finalizer failure merely because the signal is also aborted.
+		if (!isPreparationAbort(error, undefined) && !(signal?.aborted && error === signal.reason)) throw error;
+	}
 	await emit({ type: "turn_end", message, toolResults: [] });
 	await emit({ type: "agent_end", messages: newMessages });
 }

@@ -65,6 +65,8 @@ describe("aborted preparation", () => {
 					if (abort === "signal") controller.abort();
 					else throw new DOMException("Stopped", "AbortError");
 				};
+				// Review A B3: cancellation-aware finalizers must not prevent terminal events.
+				cfg.finishTurn = (_turn, signal) => signal?.throwIfAborted();
 				const context = { messages: [user("existing")] };
 				const emit = (event: AgentEvent) => {
 					events.push(event);
@@ -111,6 +113,7 @@ describe("aborted preparation", () => {
 					if (abort === "signal") controller.abort();
 					else throw new DOMException("Stopped", "AbortError");
 				};
+				cfg.finishTurn = (_turn, signal) => signal?.throwIfAborted();
 				const context = { messages: [user("existing")] };
 				const emit = (event: AgentEvent) => {
 					events.push(event);
@@ -142,6 +145,61 @@ describe("aborted preparation", () => {
 				).toHaveLength(1);
 			});
 		}
+	}
+
+	it("does not append a second aborted assistant when finishTurn observes cancellation", async () => {
+		const events: AgentEvent[] = [];
+		let calls = 0;
+		const agent = new Agent({
+			initialState: { model },
+			streamFn: provider(() => {
+				calls++;
+			}),
+			prepareRequest: () => agent.abort(),
+			finishTurn: (_turn, signal) => signal?.throwIfAborted(),
+		});
+		agent.subscribe((event) => {
+			events.push(event);
+		});
+		await agent.prompt("start");
+		expect(calls).toBe(0);
+		expect(
+			agent.state.messages.filter((message) => message.role === "assistant" && message.stopReason === "aborted"),
+		).toHaveLength(1);
+		expect(events.filter((event) => event.type === "turn_end")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+	});
+
+	for (const rejection of ["signalReason", "unrelated"] as const) {
+		it(`handles ${rejection} finishTurn rejection without swallowing unrelated errors`, async () => {
+			const controller = new AbortController();
+			const reason = new Error("custom cancellation reason");
+			const failure = new Error("unrelated finalizer failure");
+			const events: AgentEvent[] = [];
+			const cfg = config();
+			cfg.prepareRequest = () => controller.abort(reason);
+			cfg.finishTurn = (_turn, signal) => {
+				if (rejection === "unrelated") throw failure;
+				signal?.throwIfAborted();
+			};
+			const run = runAgentLoop(
+				[user("start")],
+				{ messages: [] },
+				cfg,
+				(event) => {
+					events.push(event);
+				},
+				controller.signal,
+				provider(() => {}),
+			);
+			if (rejection === "unrelated") {
+				await expect(run).rejects.toBe(failure);
+				expect(events.filter((event) => event.type === "agent_end")).toHaveLength(0);
+			} else {
+				await run;
+				expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+			}
+		});
 	}
 
 	it("preserves non-abort preparation failures", async () => {
