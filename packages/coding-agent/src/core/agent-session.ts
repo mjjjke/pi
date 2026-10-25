@@ -63,6 +63,7 @@ import { processImage } from "../utils/image-process.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { type BackgroundCompactionEvent, BackgroundCompactionOwner } from "./background-compaction-owner.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
 import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer.ts";
@@ -79,6 +80,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { type CompactionJobStartResult, createCompactionJobTarget } from "./compaction-job.ts";
 import {
 	isCompactionNoticeSource,
 	outsideCompactionNoticeScope,
@@ -209,6 +211,7 @@ type WithParentToolCallId<E> = E extends {
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
+	| BackgroundCompactionEvent
 	| WithParentToolCallId<Exclude<AgentEvent, { type: "agent_end" }>>
 	| {
 			type: "agent_end";
@@ -375,6 +378,8 @@ export interface StartMessagePersistence {
 	readonly message: AgentMessage;
 	/** Whether that message's own append to the session succeeded. */
 	readonly persisted: boolean;
+	/** Gate 1 stopped before the starting message was admitted. */
+	readonly stopped?: true;
 }
 
 /** A developer instruction queued with queueDeveloperMessage() and not yet committed. */
@@ -564,6 +569,9 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private readonly _background: BackgroundCompactionOwner;
+	private _branchGeneration = 0;
+	private readonly _backgroundStanding = new Map<string, Set<string>>();
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -685,6 +693,63 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
+		const target = createCompactionJobTarget(this.sessionManager, () => ({
+			generation: this._branchGeneration,
+			disposed: this._disposed,
+		}));
+		const append = target.append;
+		target.append = (candidate) => {
+			const pending = new Set(
+				this.sessionManager
+					.getStandingState()
+					.filter((state) => state.pending)
+					.map((state) => state.key),
+			);
+			const id = append(candidate);
+			this._backgroundStanding.set(id, pending);
+			return id;
+		};
+		this._background = new BackgroundCompactionOwner({
+			target,
+			requestRunStop: () => this._requestRunStop(),
+			refresh: () => this._refreshFinalizedContext(),
+			notifyApplied: async (entryId, job) => {
+				const entry = this.sessionManager.getEntry(entryId);
+				const pending = this._backgroundStanding.get(entryId);
+				this._backgroundStanding.delete(entryId);
+				if (entry?.type !== "compaction") return;
+				const stillPending = new Set(
+					this.sessionManager
+						.getStandingState()
+						.filter((state) => state.pending)
+						.map((state) => state.key),
+				);
+				await this._emitStandingDelivered(
+					(entry.standing ?? [])
+						.filter((item) => pending?.has(item.key) && !stillPending.has(item.key))
+						.map((item) => ({ key: item.key, content: item.message.content, entryId })),
+				);
+				if (!this._disposed)
+					await this._emitSessionCompact({
+						type: "session_compact",
+						compactionEntry: entry,
+						fromExtension: entry.fromHook ?? false,
+						reason: "manual",
+						willRetry: false,
+						...{ background: { jobId: job.id, source: job.source } },
+					});
+			},
+			emit: async (event) => {
+				this._emitIsolated(event);
+			},
+			reportError: (error) =>
+				this._extensionRunner.emitError({
+					extensionPath: "<runtime>",
+					event: "session_background_compaction",
+					error: error instanceof Error ? error.message : String(error),
+				}),
+		});
+
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
@@ -751,6 +816,11 @@ export class AgentSession {
 	private async _getSummarizationRequestAuth(
 		selectedModel: Model<any>,
 		signal?: AbortSignal,
+		captured = {
+			messages: this.messages,
+			thinkingLevel: this.thinkingLevel,
+			streamFunction: this.agent.streamFunction,
+		},
 	): Promise<{
 		model: Model<any>;
 		apiKey?: string;
@@ -760,13 +830,13 @@ export class AgentSession {
 	}> {
 		// Route a virtual model first: summaries size their input and output from the model they get.
 		const { model, thinkingLevel } = isVirtualModel(selectedModel)
-			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(this.messages), {
+			? await this._modelRuntime.resolveModel(selectedModel, convertToLlm(captured.messages), {
 					reason: "direct",
-					thinkingLevel: this.thinkingLevel,
+					thinkingLevel: captured.thinkingLevel,
 					signal,
 				})
-			: { model: selectedModel, thinkingLevel: this.thinkingLevel };
-		if (this.agent.streamFunction === streamSimple) {
+			: { model: selectedModel, thinkingLevel: captured.thinkingLevel };
+		if (captured.streamFunction === streamSimple) {
 			return { ...(await this._getRequiredRequestAuth(model, signal)), thinkingLevel };
 		}
 
@@ -953,6 +1023,7 @@ export class AgentSession {
 	}
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
+		await this._backgroundGate("delivered");
 		const projection = this.sessionManager.buildSessionProjection();
 		// No compaction after disposal: its fresh controller would be beyond dispose()'s abort.
 		if (this._disposed) return { ...context, messages: projection.messages };
@@ -962,6 +1033,7 @@ export class AgentSession {
 			return { ...context, messages: projection.messages };
 		}
 		await this._runAutoCompaction("threshold", false);
+		this._throwIfRunStopped();
 		return { ...context, messages: this.sessionManager.buildSessionProjection().messages };
 	}
 
@@ -974,6 +1046,7 @@ export class AgentSession {
 		this.agent.isContextMarker = (message) => message.role === "compactionBoundary";
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
+			this._throwIfRunStopped();
 			// Nothing reaches the provider adapter after dispose(), not even an aborted stream.
 			if (this._disposed) throw new Error("The session was disposed; no request is sent.");
 			// No request goes out on a session whose file may hold a partial entry (§3.6).
@@ -1008,6 +1081,7 @@ export class AgentSession {
 			let { previous, context, projection } = await prepare();
 			const model = previous?.model ?? this.agent.state.model;
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			this._throwIfRunStopped();
 			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
 
 			// The selection stays in agent state; only this request uses the routed model. A routing
@@ -1033,9 +1107,11 @@ export class AgentSession {
 			// The route stands: the router already decided this request. The state entry does not change
 			// the projection.
 			if (this._exceedsCompactionThreshold(route.model, projection)) {
-				await this._runAutoCompaction("threshold", false);
+				await this._runAutoCompaction("threshold", false, "delivered", route.model);
+				this._throwIfRunStopped();
 				({ previous, context } = await prepare());
 			}
+			this._throwIfRunStopped();
 			return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
 		};
 	}
@@ -2209,6 +2285,8 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		if (this._disposed) return;
+		this._background.cancel("disposed");
+		this._branchGeneration++;
 		this._disposed = true;
 		this._agentRunAbortRequested = true;
 		// Active admissions belong to the loop until unwind; idle owned items must be
@@ -2705,7 +2783,7 @@ export class AgentSession {
 		let nextTurn: CustomMessage[] = [];
 		const needsSnapshot = this._needsBootstrap();
 		const bootstrap = needsSnapshot || this._stagedInstructions.length > 0 || this._stagedContent.length > 0;
-		const failStart = (error: unknown): never => {
+		const failStart = (error: unknown): void => {
 			this._isAgentRunActive = false;
 			if (trigger.messageType === "custom") {
 				const item = this._customStore.get(trigger.message);
@@ -2722,6 +2800,25 @@ export class AgentSession {
 			// nextTurn messages consumed by this run go back to the front (Sol F4b).
 			this._pendingNextTurnMessages.unshift(...nextTurn);
 			this._resolveIdleWaitIfIdle();
+			if (this._agentRunAbortRequested && error instanceof Error && error.name === "AbortError") {
+				if (trigger.messageType === "custom") return;
+				if (onStartMessagePersistence) {
+					try {
+						onStartMessagePersistence({
+							message: {
+								role: "user",
+								content: [{ type: "text", text: trigger.prompt }, ...(trigger.images ?? [])],
+								timestamp: Date.now(),
+							},
+							persisted: false,
+							stopped: true,
+						});
+					} catch {
+						/* Observer only. */
+					}
+					return;
+				}
+			}
 			throw error;
 		};
 		try {
@@ -2792,11 +2889,13 @@ export class AgentSession {
 				// dispose() during an await below cannot cancel a run that has not started: recheck it too.
 				if (await this._handlePostAgentRun()) {
 					if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) break;
+					if (!(await this._gatePostRunContinuation())) break;
 					await this.agent.continue();
 					continue;
 				}
 				if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary())) break;
 				if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) break;
+				if (!(await this._gatePostRunContinuation())) break;
 				await this.agent.continue();
 			}
 		} finally {
@@ -2842,12 +2941,14 @@ export class AgentSession {
 	 * system patch first when the prompt changed.
 	 */
 	private async _prepareRun(trigger: BeforeAgentStartTrigger, admissionGen: number): Promise<PreparedRun> {
+		await this._backgroundGate("desired");
 		// Check if we need to compact before sending (catches aborted responses).
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) {
 			await this._checkCompaction(lastAssistant, false, [], "desired");
 		}
+		this._throwIfRunStopped();
 
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		let result: Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>;
@@ -3864,10 +3965,14 @@ export class AgentSession {
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
+	private _requestRunStop(): void {
+		if (this._isAgentRunActive) this._agentRunAbortRequested = true;
+		this._background.abortWait();
+		this.agent.abort();
+	}
+
 	async abort(): Promise<void> {
-		if (this._isAgentRunActive) {
-			this._agentRunAbortRequested = true;
-		}
+		this._requestRunStop();
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
@@ -4149,6 +4254,127 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
+	/** Start only on explicit request. The job owns its detached request policy until terminal. */
+	startBackgroundCompaction(options: {
+		source: "user" | "model";
+		customInstructions?: string;
+	}): CompactionJobStartResult {
+		const selected = this.model;
+		if (!selected) return { status: "unavailable", reason: "no-model" };
+		const model = structuredClone(selected);
+		const captured = {
+			messages: structuredClone(this.messages),
+			thinkingLevel: this.thinkingLevel,
+			streamFunction: this.agent.streamFunction,
+		};
+		const retry = structuredClone(this.settingsManager.getRetrySettings());
+		let accountingModel = model;
+		return this._background.start({
+			...options,
+			settings: this.settingsManager.getCompactionSettings(model),
+			blockingCompaction: this.isCompacting,
+			accountUsage: (usage) => {
+				this.sessionManager.appendUsage(
+					"background-compaction",
+					accountingModel.provider,
+					accountingModel.id,
+					usage,
+				);
+			},
+			summarize: async (request) => {
+				const jobId = this._background.current!.id;
+				const event = {
+					type: "session_before_compact" as const,
+					preparation: structuredClone(request.preparation),
+					branchEntries: structuredClone(request.branch),
+					customInstructions: request.customInstructions,
+					reason: "manual" as const,
+					willRetry: false,
+					signal: request.signal,
+					background: { jobId, source: options.source },
+				};
+				const hook = (await this._extensionRunner.emit(event)) as SessionBeforeCompactResult | undefined;
+				if (hook?.cancel) {
+					this._background.cancel("extension-cancel", jobId);
+					throw new DOMException("Compaction cancelled", "AbortError");
+				}
+				request.signal.throwIfAborted();
+				if (hook?.compaction) return { ...hook.compaction, fromHook: true };
+				const auth = await this._getSummarizationRequestAuth(model, request.signal, captured);
+				request.signal.throwIfAborted();
+				accountingModel = auth.model;
+				return compact(
+					request.preparation,
+					auth.model,
+					auth.apiKey,
+					auth.headers,
+					request.customInstructions,
+					request.signal,
+					auth.thinkingLevel,
+					captured.streamFunction,
+					auth.env,
+					retry,
+					undefined,
+					undefined,
+					request.onUsage,
+				);
+			},
+		});
+	}
+
+	getBackgroundCompaction() {
+		const job = this._background.current;
+		if (!job) return undefined;
+		return {
+			jobId: job.id,
+			source: job.source,
+			phase: job.phase,
+			hardThreshold: this._hardCompactionThreshold(this._limitsModel()),
+		};
+	}
+
+	cancelBackgroundCompaction(jobId?: string): boolean {
+		const cancelled = this._background.cancel("user-cancel", jobId);
+		if (cancelled && !this.isStreaming) this._writeStoppedCustomMessages();
+		return cancelled;
+	}
+
+	private _hardCompactionThreshold(model: Model<any> | undefined): number {
+		return model ? model.contextWindow - this.settingsManager.getCompactionSettings(this.model).reserveTokens : 0;
+	}
+
+	private _throwIfRunStopped(): void {
+		if (this._disposed || (this.isStreaming && this._agentRunAbortRequested))
+			throw new DOMException("The operation was aborted", "AbortError");
+		const error = this.sessionManager.getPersistenceError();
+		if (error) throw error;
+	}
+
+	private async _backgroundGate(carry: CompactionCarry, model = this._limitsModel(), wait = false): Promise<boolean> {
+		this._throwIfRunStopped();
+		const options = { carry, hardThreshold: this._hardCompactionThreshold(model) };
+		let result = await this._background.installReady(options);
+		this._throwIfRunStopped();
+		if (result.status === "applied") return true;
+		if (wait && this._background.current) {
+			result = await this._background.waitAndInstall(options);
+			if (result.status === "aborted") throw new DOMException("The operation was aborted", "AbortError");
+			this._throwIfRunStopped();
+		}
+		return result.status === "applied";
+	}
+
+	private async _gatePostRunContinuation(): Promise<boolean> {
+		try {
+			if (!this._failedResponse) await this._backgroundGate("desired");
+			this._throwIfRunStopped();
+			return true;
+		} catch (error) {
+			if (this._agentRunAbortRequested) return false;
+			throw error;
+		}
+	}
+
 	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
@@ -4344,6 +4570,8 @@ export class AgentSession {
 	 * Cancel in-progress compaction (manual or auto).
 	 */
 	abortCompaction(): void {
+		this._background.abortWait();
+		if (this._isAgentRunActive && this.isCompacting) this._requestRunStop();
 		this._compactionAbortController?.abort();
 		this._autoCompactionAbortController?.abort();
 	}
@@ -4534,7 +4762,9 @@ export class AgentSession {
 		reason: "overflow" | "threshold",
 		willRetry: boolean,
 		carry: CompactionCarry = "delivered",
+		checkModel = this._limitsModel(),
 	): Promise<boolean> {
+		if (await this._backgroundGate(carry, checkModel, true)) return willRetry || this.agent.hasQueuedMessages();
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -5166,6 +5396,8 @@ export class AgentSession {
 		if (this._isAgentRunActive || this.isCompacting || this._readiness) {
 			throw new Error("Cannot reload while a run is active, compaction is running, or extensions are binding");
 		}
+		this._background.cancel("reload");
+		this._branchGeneration++;
 		const barrier = this._beginReadiness();
 		try {
 			await this._reload(options);
@@ -5519,6 +5751,8 @@ export class AgentSession {
 
 		// No-op navigation must not turn a flush-created leaf into an accidental branch change.
 		if (targetId === this.sessionManager.getLeafId()) return { cancelled: false };
+		this._background.cancel("tree");
+		this._branchGeneration++;
 		this._writeStoppedCustomMessages();
 		const persistenceError = this.sessionManager.getPersistenceError();
 		if (persistenceError) throw persistenceError;
