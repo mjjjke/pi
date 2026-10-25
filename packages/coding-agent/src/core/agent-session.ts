@@ -588,6 +588,8 @@ export class AgentSession {
 	private _branchGeneration = 0;
 	private _manualBackgroundController?: AbortController;
 	private readonly _backgroundStanding = new Map<string, Set<string>>();
+	/** An irreversible append still owes its public terminal observation after disposal. */
+	private readonly _backgroundAppliedListeners = new Map<string, AgentSessionEventListener[]>();
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -730,6 +732,7 @@ export class AgentSession {
 			requestRunStop: () => this._requestRunStop(),
 			refresh: () => this._refreshFinalizedContext(),
 			notifyApplied: async (entryId, job) => {
+				this._backgroundAppliedListeners.set(job.id, [...this._eventListeners]);
 				const entry = this.sessionManager.getEntry(entryId);
 				const pending = this._backgroundStanding.get(entryId);
 				this._backgroundStanding.delete(entryId);
@@ -755,7 +758,12 @@ export class AgentSession {
 						background: { jobId: job.id, source: job.source },
 					});
 			},
-			observe: (event) => this._emitIsolated(event),
+			observe: (event) => {
+				const committedListeners =
+					event.phase === "applied" ? this._backgroundAppliedListeners.get(event.jobId) : undefined;
+				if (event.phase === "applied") this._backgroundAppliedListeners.delete(event.jobId);
+				this._emitIsolated(event, this._disposed && committedListeners ? committedListeners : this._eventListeners);
+			},
 			emit: async (event) => {
 				if (!this._disposed && !this._extensionRunner.isInvalidated()) await this._extensionRunner.emit(event);
 			},
@@ -1223,8 +1231,8 @@ export class AgentSession {
 	}
 
 	/** Emit to every listener; a throwing listener is reported and does not stop the others. */
-	private _emitIsolated(event: AgentSessionEvent): void {
-		for (const listener of [...this._eventListeners]) {
+	private _emitIsolated(event: AgentSessionEvent, listeners = this._eventListeners): void {
+		for (const listener of [...listeners]) {
 			try {
 				outsideCompactionNoticeScope(() => listener(event));
 			} catch (error) {

@@ -1270,6 +1270,9 @@ export class ExtensionRunner {
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
 			for (const handler of handlers) {
+				// An awaited lifecycle handler may dispose or replace this runtime.
+				// Do not invoke the remaining snapshot with an already-stale context.
+				if (this.isInvalidated()) return result as RunnerEmitResult<TEvent>;
 				try {
 					const handlerResult = await handler(event, ctx);
 
