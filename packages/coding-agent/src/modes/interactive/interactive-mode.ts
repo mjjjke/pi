@@ -176,6 +176,7 @@ import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import {
+	BackgroundCompactionStatusIndicator,
 	BranchSummaryStatusIndicator,
 	CompactionStatusIndicator,
 	IdleStatus,
@@ -546,6 +547,7 @@ export class InteractiveMode {
 
 	// Auto-compaction state
 	private autoCompactionEscapeHandler?: () => void;
+	private backgroundCompactionWait?: { jobId: string; previous?: () => void; handler: () => void };
 
 	// Auto-retry state
 	private retryEscapeHandler?: () => void;
@@ -2338,6 +2340,9 @@ export class InteractiveMode {
 				this.shutdownRequested = true;
 			},
 			getContextUsage: () => this.session.getContextUsage(),
+			startBackgroundCompaction: (options) => this.session.startBackgroundCompaction(options),
+			getBackgroundCompaction: () => this.session.getBackgroundCompaction(),
+			cancelBackgroundCompaction: (jobId) => this.session.cancelBackgroundCompaction(jobId),
 			compact: (options) => {
 				void (async () => {
 					try {
@@ -3154,7 +3159,10 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			if (this.session.isStreaming) {
+			if (this.session.isCompacting) {
+				this.restoreQueuedMessagesToEditor();
+				this.session.abortCompaction();
+			} else if (this.session.isStreaming) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (this.session.isBashRunning) {
 				this.session.abortBash();
@@ -3483,6 +3491,29 @@ export class InteractiveMode {
 		};
 	}
 
+	/** A wait owns only its own temporary Escape handler, never a later dialog's handler. */
+	private beginBackgroundCompactionWait(jobId: string): void {
+		if (this.backgroundCompactionWait?.jobId === jobId) return;
+		if (this.backgroundCompactionWait) this.endBackgroundCompactionWait(this.backgroundCompactionWait.jobId, false);
+		const handler = () => {
+			this.lastEscapeTime = 0;
+			this.restoreQueuedMessagesToEditor({ abort: true });
+		};
+		this.backgroundCompactionWait = { jobId, previous: this.defaultEditor.onEscape, handler };
+		this.defaultEditor.onEscape = handler;
+		this.showStatusIndicator(new BackgroundCompactionStatusIndicator(this.ui));
+	}
+
+	private endBackgroundCompactionWait(jobId: string, stopped: boolean): void {
+		const wait = this.backgroundCompactionWait;
+		if (!wait || wait.jobId !== jobId) return;
+		this.backgroundCompactionWait = undefined;
+		if (this.defaultEditor.onEscape === wait.handler) this.defaultEditor.onEscape = wait.previous;
+		this.clearStatusIndicator("backgroundCompaction");
+		this.lastEscapeTime = 0;
+		if (stopped) this.restoreQueuedMessagesToEditor();
+	}
+
 	private subscribeToAgent(): void {
 		this.unsubscribe = this.session.subscribe(async (event) => {
 			await this.handleEvent(event);
@@ -3764,6 +3795,23 @@ export class InteractiveMode {
 				await this.checkShutdownRequested();
 				break;
 
+			case "session_background_compaction": {
+				if (event.phase === "waiting") this.beginBackgroundCompactionWait(event.jobId);
+				else if (event.phase === "released" || event.phase === "discarded" || event.phase === "failed") {
+					this.endBackgroundCompactionWait(event.jobId, true);
+					if (event.phase !== "released" && event.cause !== "user-cancel") {
+						this.showStatus(`Background compaction discarded: ${event.cause ?? event.phase}`);
+					}
+				} else if (event.phase === "applied") {
+					this.endBackgroundCompactionWait(event.jobId, false);
+					this.rebuildChatFromMessages();
+					this.showStatus("Context compacted");
+					void this.flushCompactionQueue({ willRetry: this.session.isStreaming });
+				}
+				this.ui.requestRender();
+				break;
+			}
+
 			case "compaction_start": {
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -3771,6 +3819,8 @@ export class InteractiveMode {
 				// Keep editor active; submissions are queued during compaction.
 				this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
+					this.lastEscapeTime = 0;
+					this.restoreQueuedMessagesToEditor();
 					this.session.abortCompaction();
 				};
 				const colorFn = isEmbeddedStatus(this.editor)
@@ -3831,7 +3881,8 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new ThemedText(() => theme.fg("error", errorMessage), 1, 0));
 					}
 				}
-				void this.flushCompactionQueue({ willRetry: event.willRetry });
+				if (event.aborted) this.restoreQueuedMessagesToEditor();
+				else void this.flushCompactionQueue({ willRetry: event.willRetry });
 				this.ui.requestRender();
 				break;
 			}
@@ -7217,13 +7268,31 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private async handleCompactCommand(customInstructions?: string): Promise<void> {
-		this.clearStatusIndicator();
-
+	private async handleCompactCommand(args?: string): Promise<void> {
+		const input = args?.trim() ?? "";
+		if (input === "--cancel") {
+			this.showStatus(
+				this.session.cancelBackgroundCompaction() ? "Background compaction cancelled" : "nothing to cancel",
+			);
+			return;
+		}
 		try {
-			await this.session.compact(customInstructions);
-		} catch {
-			// Ignore, will be emitted as an event
+			if (input === "--now" || input.startsWith("--now ")) {
+				const result = await this.session.compactNow(input.slice(5).trim() || undefined);
+				if (result.status === "compacted") void this.flushCompactionQueue({ willRetry: false });
+			} else {
+				const result = this.session.startBackgroundCompaction({
+					source: "user",
+					customInstructions: input || undefined,
+				});
+				if (result.status === "started") this.showStatus("Background compaction started");
+				else if (result.status === "already")
+					this.showStatus("A background compaction is already pending; nothing changed.");
+				else if (result.status === "unavailable")
+					this.showStatus(`Background compaction is unavailable: ${result.reason}. Nothing changed.`);
+			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 

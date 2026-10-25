@@ -26,6 +26,7 @@ function createSession(options: {
 	toolUsage?: AssistantUsage;
 	usingSubscription?: boolean;
 	routedModel?: { model: { id: string }; thinkingLevel?: string };
+	backgroundPhase?: string;
 }): AgentSession {
 	const usage = options.usage;
 	const entries: Array<Record<string, unknown>> = [];
@@ -83,6 +84,7 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getBackgroundCompaction: () => (options.backgroundPhase ? { phase: options.backgroundPhase } : undefined),
 		routedModel: options.routedModel,
 		modelRuntime: {
 			isUsingSubscription: () => options.usingSubscription ?? false,
@@ -120,6 +122,19 @@ describe("formatCwdForFooter", () => {
 describe("FooterComponent width handling", () => {
 	beforeAll(() => {
 		initTheme(undefined, false);
+	});
+
+	it("reads background phases live without changing context readings or requiring an append", () => {
+		const options = { sessionName: "", backgroundPhase: "summarizing" };
+		const footer = new FooterComponent(createSession(options), createFooterData(1));
+		for (const phase of ["summarizing", "claimed", "ready", "applied", "discarded", ""]) {
+			options.backgroundPhase = phase;
+			const line = stripAnsi(footer.render(160)[1]);
+			expect(line).toContain("12.3%/200k");
+			if (phase === "ready") expect(line).toContain("compaction ready");
+			else if (phase === "summarizing" || phase === "claimed") expect(line).toContain("compacting…");
+			else expect(line).not.toMatch(/compacting…|compaction ready/);
+		}
 	});
 
 	it("keeps all lines within width for wide session names", () => {

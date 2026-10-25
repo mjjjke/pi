@@ -4,7 +4,7 @@ import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { keyText } from "./keybinding-hints.ts";
 
-export type StatusIndicatorKind = "working" | "retry" | "compaction" | "branchSummary";
+export type StatusIndicatorKind = "working" | "retry" | "compaction" | "backgroundCompaction" | "branchSummary";
 
 export class StatusIndicator extends Loader {
 	readonly kind: StatusIndicatorKind;
@@ -95,6 +95,18 @@ export class CompactionStatusIndicator extends StatusIndicator {
 			colorFn ?? ((spinner) => theme.fg("accent", spinner)),
 			colorFn ?? ((text) => theme.fg("muted", text)),
 			label,
+		);
+	}
+}
+
+export class BackgroundCompactionStatusIndicator extends StatusIndicator {
+	constructor(ui: TUI) {
+		super(
+			"backgroundCompaction",
+			ui,
+			(spinner) => theme.fg("accent", spinner),
+			(text) => theme.fg("muted", text),
+			`Finishing background summary (${keyText("app.interrupt")} stops the run; the summary continues)`,
 		);
 	}
 }

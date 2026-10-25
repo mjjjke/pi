@@ -210,6 +210,9 @@ export class FooterComponent implements Component {
 			contextPercentStr = contextPercentDisplay;
 		}
 		statsParts.push(contextPercentStr);
+		const background = this.session.getBackgroundCompaction();
+		if (background?.phase === "ready") statsParts.push("compaction ready");
+		else if (background?.phase === "summarizing" || background?.phase === "claimed") statsParts.push("compacting…");
 		if (areExperimentalFeaturesEnabled()) {
 			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
 		}
