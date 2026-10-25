@@ -305,6 +305,43 @@ describe("AgentSession background compaction integration", () => {
 		expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
 	});
 
+	it.each(["held", "released"] as const)(
+		"review B1: auth preflight crossing --now %s remains queued",
+		async (state) => {
+			const f = await setup();
+			const entered = deferred<void>();
+			const auth = deferred<void>();
+			const authResult = await f.h.session.modelRuntime.checkAuth(f.h.getModel().provider);
+			vi.spyOn(f.h.session.modelRuntime, "hasConfiguredAuth").mockReturnValue(false);
+			vi.spyOn(f.h.session.modelRuntime, "checkAuth").mockImplementation(async () => {
+				entered.resolve();
+				await auth.promise;
+				return authResult;
+			});
+			const dispositions: string[] = [];
+			const prompt = f.h.session.prompt("auth delayed", { preflightResult: (result) => dispositions.push(result) });
+			await entered.promise;
+			const waiting = phase(f.h, "waiting");
+			const now = f.h.session.compactNow();
+			await waiting;
+			if (state === "released") {
+				await f.h.session.abort();
+				expect(await now).toMatchObject({ status: "released" });
+			}
+			auth.resolve();
+			await prompt;
+			expect.soft(f.h.faux.state.callCount).toBe(0);
+			expect.soft(dispositions).toEqual(["queued"]);
+			expect.soft(f.h.session.getSteeringMessages()).toEqual(["auth delayed"]);
+			if (state === "held") {
+				await f.h.session.abort();
+				await now;
+			}
+			expect(f.h.session.clearQueue()).toEqual({ steering: ["auth delayed"], followUp: [] });
+			expect(f.h.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+		},
+	);
+
 	it("SDK input preflight spanning --now release queues once without opening a new run", async () => {
 		const inputEntered = deferred<void>();
 		const inputRelease = deferred<void>();
@@ -359,6 +396,18 @@ describe("AgentSession background compaction integration", () => {
 		expect(branch.filter((e) => e.type === "custom_message").map((e) => e.content)).toEqual(["running", "completed"]);
 		expect(branch.slice(cut + 1).some((e) => e.type === "message" && e.message.role === "user")).toBe(true);
 		expect(f.h.eventsOfType("agent_start")).toHaveLength(1);
+	});
+
+	it("review C1: a second starter cannot supersede a claimed manual job", async () => {
+		const f = await setup();
+		const waiting = phase(f.h, "waiting");
+		const now = f.h.session.compactNow("first");
+		await waiting;
+		const id = f.h.session.getBackgroundCompaction()?.jobId;
+		const other = f.h.session.startBackgroundCompaction({ source: "user", customInstructions: "different" });
+		await f.h.session.abort();
+		await now;
+		expect(other).toMatchObject({ status: "already", jobId: id, phase: "claimed" });
 	});
 
 	it("two simultaneous --now callers cannot replace the manual reservation", async () => {
@@ -527,6 +576,28 @@ describe("AgentSession background compaction integration", () => {
 			expect(
 				f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
 			).toHaveLength(1);
+		},
+	);
+
+	it.each(["manual", "gate1"] as const)(
+		"review B2: %s wait recomputes the ordinary model threshold after readiness",
+		async (gate) => {
+			const f = await setup();
+			if (gate === "gate1") await f.h.session.setModel({ ...f.h.getModel(), contextWindow: 4000 });
+			const waiting = phase(f.h, "waiting");
+			if (gate === "gate1") f.h.session.startBackgroundCompaction({ source: "user" });
+			const operation = gate === "manual" ? f.h.session.compactNow() : f.h.session.prompt("held");
+			await waiting;
+			await f.h.session.setModel({ ...f.h.getModel(), contextWindow: 1100 });
+			f.finish();
+			const result = await operation;
+			if (gate === "manual") expect.soft(result).toMatchObject({ status: "discarded", cause: "insufficient" });
+			expect(
+				f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "discarded"),
+			).toMatchObject([{ cause: "insufficient" }]);
+			expect(
+				f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
+			).toHaveLength(0);
 		},
 	);
 

@@ -126,6 +126,87 @@ describe("background compaction extension API", () => {
 		},
 	);
 
+	it("review B5: dispose releases an irreversible manual install without resolving its notification", async () => {
+		const entered = deferred<void>();
+		const release = deferred<void>();
+		const h = await createHarness({
+			settings: { compaction: { keepRecentTokens: 10 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: 0,
+						},
+					}));
+					pi.on("session_compact", async () => {
+						entered.resolve();
+						await release.promise;
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+		h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+		h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
+		h.session.refreshContext();
+		let settled = false;
+		const now = h.session.compactNow().finally(() => {
+			settled = true;
+		});
+		await entered.promise;
+		h.session.dispose();
+		try {
+			await vi.waitFor(() => expect(settled).toBe(true));
+			expect(h.session.isIdle).toBe(true);
+			expect(await now).toMatchObject({ status: "applied" });
+			expect(
+				h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
+			).toHaveLength(1);
+		} finally {
+			release.resolve();
+			await now;
+		}
+	});
+
+	it.each(["reload", "dispose"] as const)(
+		"review B4: %s persists terminal intent before invalidation or shutdown",
+		async (action) => {
+			let active = true;
+			const h = await createHarness({
+				settings: { compaction: { keepRecentTokens: 10 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_compact", async () => new Promise<never>(() => {}));
+						pi.on("session_shutdown", () => {
+							active = false;
+						});
+						pi.on("session_background_compaction", (event) => {
+							if (active && event.phase === "discarded")
+								pi.appendEntry("review-discard-intent", { jobId: event.jobId });
+						});
+					},
+				],
+			});
+			harnesses.push(h);
+			h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+			h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+			h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 3 });
+			h.session.refreshContext();
+			h.session.startBackgroundCompaction({ source: "model" });
+			if (action === "reload") await h.session.reload();
+			else h.session.dispose();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(
+				h.sessionManager
+					.getBranch()
+					.filter((entry) => entry.type === "custom" && entry.customType === "review-discard-intent"),
+			).toHaveLength(1);
+		},
+	);
+
 	it("reload during a manual wait is refused without invalidation; after release it cancels the summary", async () => {
 		const summary = deferred<CompactionResult>();
 		const h = await createHarness({
