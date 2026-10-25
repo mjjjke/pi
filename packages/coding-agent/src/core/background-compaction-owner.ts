@@ -71,7 +71,11 @@ export class BackgroundCompactionOwner {
 	start(
 		options: Parameters<BackgroundCompactionJobs["start"]>[0] & { accountUsage(usage: Usage): void },
 	): CompactionJobStartResult {
-		if (this.jobs.current && this.owned?.customInstructions !== options.customInstructions) {
+		if (
+			this.jobs.current &&
+			this.jobs.current.phase !== "claimed" &&
+			this.owned?.customInstructions !== options.customInstructions
+		) {
 			this.cancel("superseded");
 		}
 		return this.jobs.start({
