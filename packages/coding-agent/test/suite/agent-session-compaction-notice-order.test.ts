@@ -512,9 +512,10 @@ describe("AgentSession: passive messages from session_compact keep request order
 
 			expect(sessionManager.getPersistenceError()?.code).toBe("EACCES");
 			expect(requests).toHaveLength(1);
-			const pending = (harness.session as unknown as { _pendingCustomMessages: Array<{ customType: string }> })
-				._pendingCustomMessages;
-			expect(pending.map((message) => message.customType)).toEqual([NOTICE]);
+			const pending = (
+				harness.session as unknown as { _customStore: Map<unknown, { handle: { customType: string } }> }
+			)._customStore;
+			expect([...pending.values()].map((item) => item.handle.customType)).toEqual([NOTICE]);
 			expect(noticeEvents(harness)).toBe(0);
 			expect(noticeEntries(harness)).toBe(0);
 			const types = harness.events.map((event) => event.type);

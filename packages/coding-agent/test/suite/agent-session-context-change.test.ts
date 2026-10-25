@@ -354,9 +354,9 @@ describe("session_context_change (A8)", () => {
 		expect(sessionManager.getPersistenceError()?.code).toBe("EACCES");
 		expect(calls).toBe(0);
 		expect(harness.session.isStreaming).toBe(false);
-		const pending = (harness.session as unknown as { _pendingCustomMessages: Array<{ customType: string }> })
-			._pendingCustomMessages;
-		expect(pending.map((message) => message.customType)).toEqual(["change-notice"]);
+		const pending = (harness.session as unknown as { _customStore: Map<unknown, { handle: { customType: string } }> })
+			._customStore;
+		expect([...pending.values()].map((item) => item.handle.customType)).toEqual(["change-notice"]);
 	});
 
 	/** Edits the first user entry once, from `position`; the change handler sends a passive notice (and a follow-up). */

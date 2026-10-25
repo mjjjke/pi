@@ -425,6 +425,15 @@ function sameStandingContent(a: string | TextContent[], b: string | TextContent[
 }
 
 /** Content held until the bootstrap commit (B). */
+interface OwnedCustomMessage {
+	handle: CustomMessage;
+	key: string;
+	lane: "passive" | "notice" | "steer" | "followUp" | "trigger";
+	state: "buffered" | "queued" | "held" | "admitted";
+	/** A passive travels in its predecessor's admission batch, never in an Agent queue. */
+	riderOf?: OwnedCustomMessage;
+}
+
 interface StagedContent {
 	message: CustomMessage | BashExecutionMessage;
 	/** message_start/message_end were already emitted at send. */
@@ -538,13 +547,9 @@ export class AgentSession {
 	private _queuedUserInput = new Map<AgentMessage, { text: string; lane: "steering" | "followUp" }>();
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
-	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
-	private _pendingCustomMessages: CustomMessage[] = [];
-	/**
-	 * Buffered passive messages sent by `session_compact` handlers during a run. They are written at the next
-	 * provider request boundary instead of the turn end, so the request sends them where the journal has them.
-	 */
-	private _compactionNotices = new WeakSet<CustomMessage>();
+	/** Insertion order is arrival order. Only an append or staging receipt retires an item. */
+	private readonly _customStore = new Map<AgentMessage, OwnedCustomMessage>();
+	private _isWritingCustom = false;
 	/** One-shot developer instructions held until B (status `staged`), FIFO. No drain but B commits them. */
 	private _stagedInstructions: PendingInstruction[] = [];
 	/** Custom and bash content held until B, in ingress order. */
@@ -682,6 +687,7 @@ export class AgentSession {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		this._installCustomAdmissions();
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
 		this._installAgentRequestProjection();
@@ -1116,8 +1122,9 @@ export class AgentSession {
 		for (const message of this._pendingBashMessages.splice(0)) {
 			this._stagedContent.push({ message, announced: false });
 		}
-		for (const message of this._pendingCustomMessages.splice(0)) {
-			this._stagedContent.push({ message: structuredClone(message), announced: false });
+		for (const item of this._customStore.values()) {
+			if (item.state !== "buffered") continue;
+			this._stageOwnedCustom(item, false);
 		}
 	}
 
@@ -1192,11 +1199,14 @@ export class AgentSession {
 				this.sessionManager.appendMessage(this._pendingBashMessages[0]!);
 				this._pendingBashMessages.shift();
 			}
-			while (includePreflightCustom && this._pendingCustomMessages.length > 0) {
-				const message = this._pendingCustomMessages[0]!;
-				this._appendContentMessage(message);
-				this._pendingCustomMessages.shift();
-				events.push({ type: "message_start", message }, { type: "message_end", message });
+			if (includePreflightCustom) {
+				for (const item of this._customStore.values()) {
+					if (item.state !== "buffered" || item.riderOf) continue;
+					const message = item.handle;
+					this._appendContentMessage(message);
+					this._customStore.delete(message);
+					events.push({ type: "message_start", message }, { type: "message_end", message });
+				}
 			}
 		} finally {
 			this._refreshFinalizedContext();
@@ -1639,7 +1649,11 @@ export class AgentSession {
 	}
 
 	private _getPendingBoundaryMessages(): AgentMessage[] {
-		return [...this.agent.peekQueuedMessages(), ...this._pendingCustomMessages];
+		const queued = this.agent.peekQueuedMessages();
+		return [
+			...queued.filter((message) => !this._customStore.has(message)),
+			...[...this._customStore.values()].map((item) => item.handle),
+		];
 	}
 
 	private _buildBoundaryContext(
@@ -1655,7 +1669,9 @@ export class AgentSession {
 			.at(-1)?.role;
 		const contextCanContinue = finalRole !== undefined && finalRole !== "assistant";
 		// Compaction notices are written at the next request boundary, not as a run of their own.
-		const pendingCustomContext = this._pendingCustomMessages.some((message) => !this._compactionNotices.has(message));
+		const pendingCustomContext = [...this._customStore.values()].some(
+			(item) => item.state === "buffered" && item.lane !== "notice" && !item.riderOf,
+		);
 		return {
 			contextEntries: projection.entries,
 			contextMessages: projection.messages,
@@ -1842,7 +1858,14 @@ export class AgentSession {
 				// Regular LLM message - persist as SessionMessageEntry
 				entryId = this.sessionManager.appendMessage(event.message);
 			}
-			if (entryId) this._entryIdsByMessage.set(event.message, entryId);
+			if (entryId) {
+				this._entryIdsByMessage.set(event.message, entryId);
+				// The loop captures this token for the whole batch before lifecycle awaits. A hook
+				// replacing the message cannot transfer or destroy its pending ownership.
+				for (const [handle, item] of this._customStore) {
+					if (item === event.admissionToken) this._customStore.delete(handle);
+				}
+			}
 			if (entryId && this._runStart?.message === event.message) this._runStart.persisted = true;
 			if (entryId && (event.message.role === "user" || event.message.role === "custom")) this._inputArrived = true;
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
@@ -1874,7 +1897,7 @@ export class AgentSession {
 		// handlers queued.
 		if (event.type === "turn_end") {
 			this._lastAssistantToolResults = event.toolResults;
-			this._flushPendingCustomMessages({ keepCompactionNotices: true });
+			if (!this._agentRunAbortRequested) this._flushPendingCustomMessages({ keepCompactionNotices: true });
 		}
 	};
 
@@ -2753,6 +2776,14 @@ export class AgentSession {
 				if (this._agentRunAbortRequested) this._finishCancelledRetry();
 				this._failedResponse = undefined;
 				this._runSystemPromptOptions = undefined;
+				// The loop no longer owns admitted items. Failed/unreached receipts return to the
+				// store at their original arrival positions; no retry re-enqueues them.
+				for (const item of this._customStore.values()) {
+					if (item.state === "admitted") {
+						item.state = "buffered";
+						item.riderOf = undefined;
+					}
+				}
 				this._flushPendingAtRunEnd();
 				this._pendingNewSessionRequest?.resolve({ cancelled: true });
 				this._pendingNewSessionRequest = undefined;
@@ -3433,7 +3464,7 @@ export class AgentSession {
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
 	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
@@ -3446,42 +3477,118 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.isStreaming && options?.triggerTurn !== false) {
-			if (options?.deliverAs === "followUp") {
-				this.agent.followUp(appMessage);
-			} else {
-				this.agent.steer(appMessage);
-			}
-		} else if (options?.triggerTurn) {
+			return;
+		}
+		if (options?.triggerTurn && this._isEmittingAgentSettled) {
 			const admissionGen = this._admissionGen;
-			if (this._isEmittingAgentSettled) {
-				this._deferredSettledActions.push(async () => {
-					if (this._isAdmissionChanged(admissionGen)) return;
-					await this.sendCustomMessage(message, options);
-				});
-				return;
+			this._deferredSettledActions.push(async () => {
+				if (this._isAdmissionChanged(admissionGen)) return;
+				await this.sendCustomMessage(message, options);
+			});
+			return;
+		}
+		const activeInput = this.isStreaming && options?.triggerTurn !== false;
+		const lane = activeInput
+			? options?.deliverAs === "followUp"
+				? "followUp"
+				: "steer"
+			: options?.triggerTurn
+				? "trigger"
+				: isCompactionNoticeSource(this)
+					? "notice"
+					: "passive";
+		const item: OwnedCustomMessage = {
+			handle: appMessage,
+			key: options?.orderKey === undefined ? `type:${message.customType}` : `key:${options.orderKey}`,
+			lane,
+			state: activeInput ? "queued" : options?.triggerTurn ? "held" : "buffered",
+		};
+		if (lane === "passive") {
+			item.riderOf = [...this._customStore.values()].findLast(
+				(older) =>
+					older.key === item.key &&
+					(older.lane === "steer" || older.lane === "trigger") &&
+					older.state !== "admitted",
+			);
+		}
+		this._customStore.set(appMessage, item);
+		if (activeInput) {
+			if (lane === "followUp") this.agent.followUp(appMessage);
+			else this.agent.steer(appMessage);
+		} else if (options?.triggerTurn) {
+			try {
+				await this._startRun({ messageType: "custom", message: appMessage });
+			} catch (error) {
+				if (this._customStore.has(appMessage)) item.state = "buffered";
+				if (!this.isStreaming) this._flushPendingAtRunEnd();
+				throw error;
 			}
-			await this._startRun({ messageType: "custom", message: appMessage });
-		} else if (this.isStreaming) {
-			// Appending now would put the message between an assistant tool call and its
-			// result, which providers that validate message order reject on replay. Defer
-			// to the end of the turn. Nothing is emitted yet: message events must not
-			// describe messages the session tree does not contain.
-			this._pendingCustomMessages.push(appMessage);
-			if (isCompactionNoticeSource(this)) this._compactionNotices.add(appMessage);
-		} else if (this._isStagingBranch()) {
-			// Before B: held after the snapshot, announced now (#5943).
-			this._stagedContent.push({ message: structuredClone(appMessage), announced: true });
-			this._emit({ type: "message_start", message: appMessage });
-			this._emit({ type: "message_end", message: appMessage });
-		} else {
-			this._appendCustomMessage(appMessage);
+		} else if (!this.isStreaming) {
+			this._flushPendingCustomMessages();
 		}
 	}
 
-	private _appendCustomMessage(appMessage: CustomMessage): void {
-		this._writeCustomMessage(appMessage);
-		this._announceCustomMessage(appMessage);
+	/** Queue entries are handles; the store owns every item through its append/staging receipt. */
+	private _installCustomAdmissions(): void {
+		const previousToken = this.agent.getMessageAdmissionToken;
+		const previousRiders = this.agent.getMessageRiders;
+		this.agent.getMessageAdmissionToken = (message) => {
+			const item = this._customStore.get(message);
+			if (!item) return previousToken?.(message);
+			item.state = "admitted";
+			return item;
+		};
+		this.agent.getMessageRiders = (message) => {
+			const predecessor = this._customStore.get(message);
+			return [
+				...(previousRiders?.(message) ?? []),
+				...[...this._customStore.values()]
+					.filter((item) => item.riderOf === predecessor && predecessor !== undefined)
+					.map((item) => item.handle),
+			];
+		};
+	}
+
+	private _isCustomWritable(item: OwnedCustomMessage): boolean {
+		if (item.state !== "buffered") return false;
+		if (item.riderOf && !this._customStore.has(item.riderOf.handle)) item.riderOf = undefined;
+		if (item.riderOf) return false;
+		if (item.lane === "notice") return true;
+		for (const older of this._customStore.values()) {
+			if (older === item) return true;
+			if (older.key === item.key && older.lane !== "followUp" && older.lane !== "notice") return false;
+		}
+		return false;
+	}
+
+	private _stageOwnedCustom(item: OwnedCustomMessage, announced: boolean): void {
+		this._stagedContent.push({ message: structuredClone(item.handle), announced });
+		this._customStore.delete(item.handle);
+		this.agent.removeQueued(item.handle);
+	}
+
+	/** Synchronous receipt before announcement, including reentrant sends from listeners. */
+	private _writeOwnedCustom(item: OwnedCustomMessage): void {
+		if (!this._customStore.has(item.handle)) return;
+		if (this._isStagingBranch()) this._stageOwnedCustom(item, true);
+		else {
+			this._writeCustomMessage(item.handle);
+			this._customStore.delete(item.handle);
+			this.agent.removeQueued(item.handle);
+		}
+		this._announceCustomMessage(item.handle);
+	}
+
+	/** No request follows a stop. Do not overtake a batch still owned by the loop. */
+	private _writeStoppedCustomMessages(): void {
+		if (this._isWritingCustom || this._isSessionWriteBlocked()) return;
+		if ([...this._customStore.values()].some((item) => item.state === "admitted")) return;
+		this._isWritingCustom = true;
+		try {
+			for (const item of this._customStore.values()) this._writeOwnedCustom(item);
+		} finally {
+			this._isWritingCustom = false;
+		}
 	}
 
 	private _writeCustomMessage(appMessage: CustomMessage): void {
@@ -3513,12 +3620,13 @@ export class AgentSession {
 	private _flushPendingAtRunEnd(): void {
 		try {
 			this._flushPendingBashMessages();
-			this._flushPendingCustomMessages();
+			if (this._agentRunAbortRequested) this._writeStoppedCustomMessages();
+			else this._flushPendingCustomMessages();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			// Once writes are refused, these items live only in this session object: /resume and a
 			// restart build a new session from the file, so they are lost (a transient failure retries).
-			const kept = this._pendingBashMessages.length + this._pendingCustomMessages.length;
+			const kept = this._pendingBashMessages.length + this._customStore.size;
 			const lost =
 				kept > 0 && this._isSessionWriteBlocked()
 					? kept === 1
@@ -3539,16 +3647,19 @@ export class AgentSession {
 	private _flushCompactionNotices(): CustomMessage[] {
 		const written: CustomMessage[] = [];
 		if (this._isSessionWriteBlocked()) return written;
-		for (const appMessage of this._pendingCustomMessages.slice()) {
-			if (!this._compactionNotices.has(appMessage)) continue;
-			// A listener of an earlier announcement may have flushed the buffer.
-			const index = this._pendingCustomMessages.indexOf(appMessage);
-			if (index === -1) continue;
-			this._writeCustomMessage(appMessage);
-			this._pendingCustomMessages.splice(index, 1);
-			this._compactionNotices.delete(appMessage);
-			this._announceCustomMessage(appMessage);
-			written.push(appMessage);
+		for (const item of [...this._customStore.values()]) {
+			if (item.lane !== "notice" || item.state !== "buffered") continue;
+			// Writable older passives of the same key precede a notice; queued inputs never block it.
+			for (const older of this._customStore.values()) {
+				if (older === item) break;
+				if (older.key === item.key && this._isCustomWritable(older)) {
+					this._writeOwnedCustom(older);
+					written.push(older.handle);
+				}
+			}
+			if (!this._customStore.has(item.handle)) continue;
+			this._writeOwnedCustom(item);
+			written.push(item.handle);
 		}
 		return written;
 	}
@@ -3572,19 +3683,16 @@ export class AgentSession {
 	private _flushPendingCustomMessages(options?: { keepCompactionNotices?: boolean }): void {
 		// Kept, not dropped, while writes are blocked: a failing flush must not cut a run's end short.
 		if (this._isSessionWriteBlocked()) return;
+		if (this._isWritingCustom) return;
 		const keepNotices = options?.keepCompactionNotices === true;
-		// Each item leaves the buffer only once written: a failed append keeps it and every later item
-		// (§3.6). Items queued by listeners of an announced message are written in the same pass.
-		for (;;) {
-			const index = keepNotices
-				? this._pendingCustomMessages.findIndex((message) => !this._compactionNotices.has(message))
-				: 0;
-			const appMessage = this._pendingCustomMessages[index];
-			if (index === -1 || !appMessage) return;
-			this._writeCustomMessage(appMessage);
-			this._pendingCustomMessages.splice(index, 1);
-			this._compactionNotices.delete(appMessage);
-			this._announceCustomMessage(appMessage);
+		this._isWritingCustom = true;
+		try {
+			for (const item of this._customStore.values()) {
+				if (!this._isCustomWritable(item) || (keepNotices && item.lane === "notice")) continue;
+				this._writeOwnedCustom(item);
+			}
+		} finally {
+			this._isWritingCustom = false;
 		}
 	}
 
@@ -3723,6 +3831,7 @@ export class AgentSession {
 		this.abortBranchSummary();
 		if (this._isBeforeSettle) this._abortDuringBeforeSettle = true;
 		this.agent.abort();
+		if (!this._isAgentRunActive) this._writeStoppedCustomMessages();
 		await this.waitForIdle();
 	}
 

@@ -66,8 +66,8 @@ describe.skipIf(runsAsRoot)("AgentSession: a session write fails during a run (Â
 
 	/** Passive custom messages still buffered (private state: no public accessor exists). */
 	function pendingCustomTypes(harness: Harness): string[] {
-		const session = harness.session as unknown as { _pendingCustomMessages: Array<{ customType: string }> };
-		return session._pendingCustomMessages.map((message) => message.customType);
+		const session = harness.session as unknown as { _customStore: Map<unknown, { handle: { customType: string } }> };
+		return [...session._customStore.values()].map((item) => item.handle.customType);
 	}
 
 	function expectEndedOnce(harness: Harness): void {

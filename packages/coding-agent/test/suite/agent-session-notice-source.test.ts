@@ -13,8 +13,7 @@ function deferred() {
 }
 
 type NoticeInternals = {
-	_pendingCustomMessages: CustomMessage[];
-	_compactionNotices: WeakSet<CustomMessage>;
+	_customStore: Map<CustomMessage, { handle: CustomMessage; lane: string }>;
 	_emitSessionCompact(event: SessionCompactEvent): Promise<void>;
 	_emitSessionContextChange(entry: ContextEditEntry): Promise<void>;
 };
@@ -115,10 +114,7 @@ describe("AgentSession: notice lane belongs to a dispatch's async source", () =>
 			late.resolve();
 			await lateFinished.promise;
 			const lanes = Object.fromEntries(
-				internals._pendingCustomMessages.map((message) => [
-					message.content,
-					internals._compactionNotices.has(message),
-				]),
+				[...internals._customStore.values()].map((item) => [item.handle.content, item.lane === "notice"]),
 			);
 			expect(lanes).toEqual({
 				"handler-sync": true,
