@@ -2107,6 +2107,7 @@ export class AgentSession {
 
 	/** @internal Settle the outgoing runtime without waiting on its own deferred replacement. */
 	async prepareForSessionReplacement(): Promise<void> {
+		this._background.abortNotifications();
 		if (!this._isDrainingNewSessionRequest) {
 			await this.abort();
 			return;
@@ -2330,6 +2331,7 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		if (this._disposed) return;
+		this._background.abortNotifications();
 		this._admissionGen++;
 		this._admissionClosed = true;
 		// A synchronous dispose cannot await handlers, but each terminal observer
@@ -5624,6 +5626,9 @@ export class AgentSession {
 		}
 		this._bindExtensionCore(this._extensionRunner);
 		this._extensionRunner.setBeforeShutdown(async (event) => {
+			this._requestRunStop();
+			this.abortCompaction();
+			this._background.abortNotifications();
 			this._background.cancel(event.reason === "reload" ? "reload" : "disposed");
 			await this._background.flushEvents();
 		});

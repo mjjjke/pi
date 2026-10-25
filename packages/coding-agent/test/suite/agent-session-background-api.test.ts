@@ -127,7 +127,14 @@ describe("background compaction extension API", () => {
 		},
 	);
 
-	it("review B5: dispose releases an irreversible manual install without resolving its notification", async () => {
+	it.each([
+		["session_compact", "dispose"],
+		["applied", "dispose"],
+		["session_compact", "replacement"],
+		["applied", "replacement"],
+		["session_compact", "shutdown"],
+		["applied", "shutdown"],
+	] as const)("review B5: %s releases its irreversible install on %s", async (blocked, action) => {
 		const entered = deferred<void>();
 		const release = deferred<void>();
 		const h = await createHarness({
@@ -141,10 +148,18 @@ describe("background compaction extension API", () => {
 							tokensBefore: 0,
 						},
 					}));
-					pi.on("session_compact", async () => {
-						entered.resolve();
-						await release.promise;
-					});
+					if (blocked === "session_compact")
+						pi.on("session_compact", async () => {
+							entered.resolve();
+							await release.promise;
+						});
+					else
+						pi.on("session_background_compaction", async (event) => {
+							if (event.phase === "applied") {
+								entered.resolve();
+								await release.promise;
+							}
+						});
 				},
 			],
 		});
@@ -158,9 +173,15 @@ describe("background compaction extension API", () => {
 			settled = true;
 		});
 		await entered.promise;
+		await h.session.prompt("held user");
+		if (action === "replacement") await h.session.prepareForSessionReplacement();
+		if (action === "shutdown")
+			await emitSessionShutdownEvent(h.session.extensionRunner, { type: "session_shutdown", reason: "quit" });
 		h.session.dispose();
 		try {
 			await vi.waitFor(() => expect(settled).toBe(true));
+			expect(h.faux.state.callCount).toBe(0);
+			expect(h.session.clearQueue()).toEqual({ steering: ["held user"], followUp: [] });
 			expect(h.session.isIdle).toBe(true);
 			expect(await now).toMatchObject({ status: "applied" });
 			expect(

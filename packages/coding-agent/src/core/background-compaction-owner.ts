@@ -57,6 +57,7 @@ export class BackgroundCompactionOwner {
 	private owned?: OwnedJob;
 	private waiter?: { job: OwnedJob; controller: AbortController; stopped: boolean };
 	private events: Promise<void> = Promise.resolve();
+	private readonly notifications = new Set<AbortController>();
 
 	constructor(options: BackgroundCompactionOwnerOptions) {
 		this.options = options;
@@ -111,6 +112,11 @@ export class BackgroundCompactionOwner {
 				}
 			},
 		});
+	}
+
+	/** Lifecycle disposal releases post-commit notification work, never its receipt. */
+	abortNotifications(): void {
+		for (const controller of this.notifications) controller.abort();
 	}
 
 	/** Abort only the wait. Its continuation sets the run-stop latch before release. */
@@ -209,12 +215,18 @@ export class BackgroundCompactionOwner {
 		// The primitive's appliedUsageCount is frozen before abort listeners can
 		// report a late call; those extra calls do not belong to the committed entry.
 		this.accountTerminalUsage(owned);
+		const notification = new AbortController();
+		this.notifications.add(notification);
 		try {
 			this.options.refresh();
-			await this.options.notifyApplied(result.entryId, owned.view);
+			await raceBackgroundWait(this.options.notifyApplied(result.entryId, owned.view), [notification.signal]);
 		} finally {
-			// Even disposal or a rejecting listener cannot undo or hide the append.
-			await this.observeTerminal(owned);
+			try {
+				// Even disposal or a rejecting listener cannot undo or hide the append.
+				await raceBackgroundWait(this.observeTerminal(owned, false, notification.signal), [notification.signal]);
+			} finally {
+				this.notifications.delete(notification);
+			}
 		}
 		return result;
 	}
@@ -237,19 +249,28 @@ export class BackgroundCompactionOwner {
 		}
 	}
 
-	private observeTerminal(owned: OwnedJob, beforeInvalidation = false): Promise<void> {
+	private observeTerminal(
+		owned: OwnedJob,
+		beforeInvalidation = false,
+		notificationSignal?: AbortSignal,
+	): Promise<void> {
 		if (!owned.view.terminal) return Promise.resolve();
 		this.accountTerminalUsage(owned);
 		if (owned.terminalEvent) return owned.terminalEvent;
 		if (this.owned === owned) this.owned = undefined;
 		const phase = owned.view.phase;
 		if (phase === "applied" || phase === "failed" || phase === "discarded") {
-			owned.terminalEvent = this.emit(owned, phase, beforeInvalidation);
+			owned.terminalEvent = this.emit(owned, phase, beforeInvalidation, notificationSignal);
 		}
 		return owned.terminalEvent ?? Promise.resolve();
 	}
 
-	private emit(owned: OwnedJob, phase: BackgroundCompactionEvent["phase"], beforeInvalidation = false): Promise<void> {
+	private emit(
+		owned: OwnedJob,
+		phase: BackgroundCompactionEvent["phase"],
+		beforeInvalidation = false,
+		notificationSignal?: AbortSignal,
+	): Promise<void> {
 		const { view } = owned;
 		const usage = view.usage;
 		const event: BackgroundCompactionEvent = {
@@ -263,7 +284,7 @@ export class BackgroundCompactionOwner {
 		const dispatch = (
 			beforeInvalidation && this.options.emitBeforeInvalidation
 				? this.options.emitBeforeInvalidation(event)
-				: this.events.then(() => this.options.emit(event))
+				: this.events.then(() => raceBackgroundWait(this.options.emit(event), [notificationSignal]))
 		).catch((error) => this.report(error));
 		this.events = beforeInvalidation ? Promise.all([this.events, dispatch]).then(() => {}) : dispatch;
 		try {
@@ -287,7 +308,9 @@ export class BackgroundCompactionOwner {
 async function raceBackgroundWait(done: Promise<void>, signals: (AbortSignal | undefined)[]): Promise<void> {
 	const listeners: { signal: AbortSignal; listener: () => void }[] = [];
 	try {
-		await new Promise<void>((resolve) => {
+		await new Promise<void>((resolve, reject) => {
+			// Attach before checking pre-aborted signals, including notification rejections.
+			void done.then(resolve, reject);
 			for (const signal of signals) {
 				if (!signal) continue;
 				if (signal.aborted) {
@@ -298,7 +321,6 @@ async function raceBackgroundWait(done: Promise<void>, signals: (AbortSignal | u
 				listeners.push({ signal, listener });
 				signal.addEventListener("abort", listener, { once: true });
 			}
-			void done.then(resolve);
 		});
 	} finally {
 		for (const { signal, listener } of listeners) signal.removeEventListener("abort", listener);
