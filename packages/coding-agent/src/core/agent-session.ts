@@ -30,6 +30,7 @@ import {
 	type BeforeToolCallResult,
 	type PrepareNextTurnContext,
 	runToolCall,
+	type StreamFn,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import { contentText, getCurrentSystemMessage, getToolStateChanges, retryDelayMs } from "@earendil-works/pi-ai";
@@ -413,6 +414,15 @@ interface PreparedRun {
 
 /** One delivered standing value (keyed developer). */
 type CompactionCarry = "desired" | "delivered";
+
+/** Detached launch policy. Auth is deliberately absent and resolved for each physical call. */
+interface SummarizationRequestContext {
+	messages: AgentMessage[];
+	thinkingLevel: ThinkingLevel;
+	streamFunction: StreamFn;
+	transport: Agent["transport"];
+	retry: ReturnType<SettingsManager["getRetrySettings"]>;
+}
 
 interface StandingDelivery {
 	key: string;
@@ -4277,12 +4287,13 @@ export class AgentSession {
 		const selected = this.model;
 		if (!selected) return { status: "unavailable", reason: "no-model" };
 		const model = structuredClone(selected);
-		const captured = {
+		const captured: SummarizationRequestContext = {
 			messages: structuredClone(this.messages),
 			thinkingLevel: this.thinkingLevel,
 			streamFunction: this.agent.streamFunction,
+			transport: this.agent.transport,
+			retry: structuredClone(this.settingsManager.getRetrySettings()),
 		};
-		const retry = structuredClone(this.settingsManager.getRetrySettings());
 		let accountingModel = model;
 		return this._background.start({
 			...options,
@@ -4319,20 +4330,43 @@ export class AgentSession {
 				}
 				request.signal.throwIfAborted();
 				if (hook?.compaction) return { ...hook.compaction, fromHook: true };
-				const auth = await this._getSummarizationRequestAuth(model, request.signal, captured);
+				// Resolve a virtual selection once against the launch transcript, not once per split/retry.
+				const route = isVirtualModel(model)
+					? await this._modelRuntime.resolveModel(model, convertToLlm(captured.messages), {
+							reason: "direct",
+							thinkingLevel: captured.thinkingLevel,
+							signal: request.signal,
+						})
+					: { model, thinkingLevel: captured.thinkingLevel };
 				request.signal.throwIfAborted();
-				accountingModel = auth.model;
+				const physicalModel = structuredClone(route.model);
+				accountingModel = physicalModel;
+				const stream: StreamFn = async (_model, context, options) => {
+					request.signal.throwIfAborted();
+					const auth = await this._getSummarizationRequestAuth(physicalModel, request.signal, {
+						...captured,
+						thinkingLevel: route.thinkingLevel,
+					});
+					request.signal.throwIfAborted();
+					return captured.streamFunction(auth.model, context, {
+						...options,
+						apiKey: auth.apiKey,
+						headers: auth.headers,
+						env: auth.env,
+						transport: captured.transport,
+					});
+				};
 				return compact(
 					request.preparation,
-					auth.model,
-					auth.apiKey,
-					auth.headers,
+					physicalModel,
+					undefined,
+					undefined,
 					request.customInstructions,
 					request.signal,
-					auth.thinkingLevel,
-					captured.streamFunction,
-					auth.env,
-					retry,
+					route.thinkingLevel,
+					stream,
+					undefined,
+					captured.retry,
 					undefined,
 					undefined,
 					request.onUsage,
