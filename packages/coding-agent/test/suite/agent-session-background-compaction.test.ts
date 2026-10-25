@@ -28,15 +28,19 @@ function phase(h: Harness, expected: string): Promise<void> {
 }
 async function setup(
 	hard = false,
-	onTool?: () => Promise<void>,
+	onTool?: (() => Promise<void>) | (() => Promise<string>),
 	onCompact?: () => Promise<void>,
 	blocking?: Promise<{ compaction: CompactionResult }>,
+	onInput?: () => Promise<void>,
 ) {
 	const summary = deferred<CompactionResult>();
 	let cuts = 0;
 	let starts = 0;
 	const h = await createHarness({
-		models: [{ id: "bgc", contextWindow: 10000, maxTokens: 1000 }],
+		models: [
+			{ id: "bgc", contextWindow: 10000, maxTokens: 1000 },
+			{ id: "small", contextWindow: 3000, maxTokens: 1000 },
+		],
 		tools: onTool
 			? [
 					{
@@ -45,8 +49,8 @@ async function setup(
 						description: "step",
 						parameters: Type.Object({}),
 						execute: async () => {
-							await onTool();
-							return { content: [{ type: "text", text: "done" }], details: {} };
+							const text = await onTool();
+							return { content: [{ type: "text", text: text ?? "done" }], details: {} };
 						},
 					},
 				]
@@ -58,6 +62,7 @@ async function setup(
 					starts++;
 				});
 				if (onCompact) pi.on("session_compact", onCompact);
+				if (onInput) pi.on("input", onInput);
 				pi.on("session_before_compact", (event) => {
 					cuts++;
 					if ("background" in event) return summary.promise.then((compaction) => ({ compaction }));
@@ -300,6 +305,28 @@ describe("AgentSession background compaction integration", () => {
 		expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
 	});
 
+	it("SDK input preflight spanning --now release queues once without opening a new run", async () => {
+		const inputEntered = deferred<void>();
+		const inputRelease = deferred<void>();
+		const f = await setup(false, undefined, undefined, undefined, async () => {
+			inputEntered.resolve();
+			await inputRelease.promise;
+		});
+		const stream = vi.spyOn(f.h.session.agent, "streamFunction");
+		const waiting = phase(f.h, "waiting");
+		const now = f.h.session.compactNow();
+		await waiting;
+		const prompt = f.h.session.prompt("slow input");
+		await inputEntered.promise;
+		await f.h.session.abort();
+		expect(await now).toMatchObject({ status: "released" });
+		inputRelease.resolve();
+		await prompt;
+		expect(stream).not.toHaveBeenCalled();
+		expect(f.h.session.clearQueue()).toEqual({ steering: ["slow input"], followUp: [] });
+		expect(f.h.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+	});
+
 	it("--now holds custom triggers and prompts through awaited install notifications", async () => {
 		const reached = deferred<void>();
 		const release = deferred<void>();
@@ -409,6 +436,97 @@ describe("AgentSession background compaction integration", () => {
 			).toEqual(["running", "stopped"]);
 			if (action === "abort") expect(f.h.session.getBackgroundCompaction()?.phase).toBe("summarizing");
 			else expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
+		},
+	);
+
+	it.each(["mid-run", "post-run", "virtual", "overflow"] as const)(
+		"%s wait: stop sends no provider request, retains user ownership and allows later adoption",
+		async (gate) => {
+			const f = await setup(
+				false,
+				gate === "mid-run"
+					? async () => {
+							// A zero-usage reply followed by a huge tool result must use the projection.
+							await f.h.session.steer("owned user");
+							return "x".repeat(64000);
+						}
+					: undefined,
+			);
+			const stream = vi.spyOn(f.h.session.agent, "streamFunction");
+			f.h.session.startBackgroundCompaction({ source: "user" });
+			if (gate === "virtual") {
+				f.h.session.modelRuntime.registerVirtualModel({
+					provider: f.h.getModel().provider,
+					id: "auto",
+					name: "Auto",
+					thinkingLevels: ["off"],
+					route: () => ({ model: f.h.getModel("small")!, thinkingLevel: "off" }),
+				});
+				f.h.session.agent.state.model = f.h.session.modelRuntime.getModel(f.h.getModel().provider, "auto")!;
+			}
+			f.h.session.subscribe((event) => {
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					if (gate === "post-run")
+						event.message.usage = { ...event.message.usage, input: 9500, totalTokens: 9500 };
+					if (gate === "mid-run")
+						event.message.usage = {
+							...event.message.usage,
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+						};
+				}
+			});
+			f.h.setResponses([
+				gate === "mid-run"
+					? fauxAssistantMessage([fauxToolCall("step", {})])
+					: gate === "overflow"
+						? fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" })
+						: gate === "post-run"
+							? fauxAssistantMessage("done")
+							: fauxAssistantMessage("must not send"),
+				fauxAssistantMessage("later"),
+			]);
+			const waiting = phase(f.h, "waiting");
+			const run = f.h.session.prompt("go");
+			await vi.waitFor(() =>
+				expect(f.h.eventsOfType("session_background_compaction").some((event) => event.phase === "waiting")).toBe(
+					true,
+				),
+			);
+			await waiting;
+			if (gate !== "mid-run") await f.h.session.steer("owned user");
+			const sent = stream.mock.calls.length;
+			expect(sent).toBe(gate === "virtual" ? 0 : 1);
+			await f.h.session.abort();
+			await run;
+			expect(stream).toHaveBeenCalledTimes(sent);
+			expect(f.h.eventsOfType("agent_settled").at(-1)).toMatchObject({ aborted: true });
+			expect(f.h.session.getSteeringMessages()).toEqual(["owned user"]);
+			expect(f.h.session.getBackgroundCompaction()?.phase).toBe("summarizing");
+			const ready = phase(f.h, "ready");
+			f.finish();
+			await ready;
+			// A larger current model makes the huge kept suffix installable; the cut never moves.
+			f.h.session.agent.state.model = { ...f.h.getModel(), contextWindow: 100000 };
+			f.h.setResponses([fauxAssistantMessage("later")]);
+			await f.h.session.prompt("later prompt");
+			expect(f.h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+			expect(
+				f.h.sessionManager
+					.getBranch()
+					.filter(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "user" &&
+							JSON.stringify(entry.message.content).includes("owned user"),
+					),
+			).toHaveLength(1);
+			expect(
+				f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
+			).toHaveLength(1);
 		},
 	);
 
