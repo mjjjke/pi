@@ -587,6 +587,8 @@ export class AgentSession {
 	private readonly _background: BackgroundCompactionOwner;
 	private _branchGeneration = 0;
 	private _manualBackgroundController?: AbortController;
+	/** Cancels preflights spanning a manual release without rejecting accepted input. */
+	private _manualBackgroundStopGeneration = 0;
 	private readonly _backgroundStanding = new Map<string, Set<string>>();
 	/** An irreversible append still owes its public terminal observation after disposal. */
 	private readonly _backgroundAppliedListeners = new Map<string, AgentSessionEventListener[]>();
@@ -2800,6 +2802,7 @@ export class AgentSession {
 		admissionGen = this._admissionGen,
 		deferredStart?: DeferredStart,
 		onStartMessagePersistence?: (outcome: StartMessagePersistence) => void,
+		manualAdmission?: { stopGeneration: number; followUp: boolean; onQueued(): void },
 	): Promise<void> {
 		// Readiness barrier: a run requested during binding or reload starts after it. The loop awaits
 		// only while a barrier exists, so its last check and the reservation below run in the same
@@ -2812,6 +2815,19 @@ export class AgentSession {
 		// After an ambiguous append the session refuses runs until it is reopened (§3.6).
 		const persistenceError = this.sessionManager.getPersistenceError();
 		if (persistenceError) throw persistenceError;
+		// Final synchronous admission check, after readiness, input and auth awaits.
+		// A manual hold or a release spanning preflight transfers the prompt to its queue.
+		if (
+			trigger.messageType === "user" &&
+			manualAdmission &&
+			(this._manualBackgroundController || manualAdmission.stopGeneration !== this._manualBackgroundStopGeneration)
+		) {
+			if (manualAdmission.followUp) await this._queueFollowUp(trigger.prompt, trigger.images);
+			else await this._queueSteer(trigger.prompt, trigger.images);
+			deferredStart?.release();
+			manualAdmission.onQueued();
+			return;
+		}
 		// Input/auth preflight does not reserve a run. A starter that lost that race must not
 		// reset abort state, consume queues, or apply its prompt/tool changes to the winner.
 		if (this._isAgentRunActive) {
@@ -3176,18 +3192,23 @@ export class AgentSession {
 		this._admissionClosed = true;
 	}
 
-	private async _prompt(text: string, options: PromptOptions | undefined, admissionGen: number): Promise<void> {
+	private async _prompt(
+		text: string,
+		options: PromptOptions | undefined,
+		admissionGen: number,
+		manualStopGeneration = this._manualBackgroundStopGeneration,
+	): Promise<void> {
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => {
 				// Rejected, so preflightResult is not called (same as a prompt that throws).
 				if (this._isAdmissionChanged(admissionGen)) return;
-				await this._prompt(text, options, admissionGen);
+				await this._prompt(text, options, admissionGen, manualStopGeneration);
 			});
 			return;
 		}
-		if (!this._readiness) return this._promptWhenReady(text, options, admissionGen);
+		if (!this._readiness) return this._promptWhenReady(text, options, admissionGen, undefined, manualStopGeneration);
 		// Readiness barrier: commands, input hooks and expansion see the ready resources.
-		const run = this._promptAfterReadiness(text, options, admissionGen);
+		const run = this._promptAfterReadiness(text, options, admissionGen, manualStopGeneration);
 		const tracked = run.then(
 			() => {},
 			() => {},
@@ -3201,6 +3222,7 @@ export class AgentSession {
 		text: string,
 		options: PromptOptions | undefined,
 		admissionGen: number,
+		manualStopGeneration: number,
 	): Promise<void> {
 		const deferredStart = this._trackDeferredStart();
 		try {
@@ -3211,7 +3233,7 @@ export class AgentSession {
 			}
 			// Admission may have closed while waiting: no command or input hook runs then.
 			this._throwIfAdmissionChanged(admissionGen);
-			await this._promptWhenReady(text, options, admissionGen, deferredStart);
+			await this._promptWhenReady(text, options, admissionGen, deferredStart, manualStopGeneration);
 		} finally {
 			deferredStart.release();
 		}
@@ -3274,7 +3296,8 @@ export class AgentSession {
 		text: string,
 		options: PromptOptions | undefined,
 		admissionGen: number,
-		deferredStart?: DeferredStart,
+		deferredStart: DeferredStart | undefined,
+		manualStopGeneration: number,
 	): Promise<void> {
 		// Admission is checked on every path (also without a barrier) before commands or input hooks.
 		this._throwIfAdmissionChanged(admissionGen);
@@ -3367,6 +3390,11 @@ export class AgentSession {
 			admissionGen,
 			deferredStart,
 			options?.onStartMessagePersistence,
+			{
+				stopGeneration: manualStopGeneration,
+				followUp: options?.streamingBehavior === "followUp",
+				onQueued: () => preflightResult?.("queued"),
+			},
 		);
 	}
 
@@ -4486,6 +4514,7 @@ export class AgentSession {
 			applied = result.status === "applied";
 			return result.status === "aborted" ? { status: "released" } : result;
 		} finally {
+			if (!applied || controller.signal.aborted) this._manualBackgroundStopGeneration++;
 			if (this._manualBackgroundController === controller) this._manualBackgroundController = undefined;
 			try {
 				if (applied && !controller.signal.aborted && !this._disposed && !this._admissionClosed)
