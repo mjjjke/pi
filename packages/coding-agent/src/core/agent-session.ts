@@ -3704,14 +3704,6 @@ export class AgentSession {
 			this._pendingNextTurnMessages.push(appMessage);
 			return;
 		}
-		if (options?.triggerTurn && this._isEmittingAgentSettled) {
-			const admissionGen = this._admissionGen;
-			this._deferredSettledActions.push(async () => {
-				if (this._isAdmissionChanged(admissionGen)) return;
-				await this.sendCustomMessage(message, options);
-			});
-			return;
-		}
 		const activeInput =
 			this.isStreaming &&
 			options?.triggerTurn !== false &&
@@ -3745,20 +3737,38 @@ export class AgentSession {
 		// Reentrant notifications join this stop writer's arrival-ordered pass. A trigger
 		// must not reserve a run while its predecessor's passive receipt is announced.
 		if (this._isStoppingCustom) return;
+		if (options?.triggerTurn && this._isEmittingAgentSettled) {
+			// Acceptance owns the original handle now. Only its scheduling is deferred:
+			// same-key passives can ride it and teardown can receipt it on this branch.
+			const admissionGen = this._admissionGen;
+			this._deferredSettledActions.push(async () => {
+				if (this._isAdmissionChanged(admissionGen) || !this._customStore.has(appMessage)) return;
+				if (this._agentRunAbortRequested) {
+					this._writeStoppedCustomMessages();
+					return;
+				}
+				if (!this._manualBackgroundController) await this._startOwnedCustomRun(item);
+			});
+			return;
+		}
 		if (activeInput) {
 			if (lane === "followUp") this.agent.followUp(appMessage);
 			else this.agent.steer(appMessage);
 		} else if (options?.triggerTurn) {
 			if (this._manualBackgroundController) return;
-			try {
-				await this._startRun({ messageType: "custom", message: appMessage });
-			} catch (error) {
-				if (this._customStore.has(appMessage)) item.state = "buffered";
-				if (!this.isStreaming) this._flushPendingAtRunEnd();
-				throw error;
-			}
+			await this._startOwnedCustomRun(item);
 		} else if (!this.isStreaming) {
 			this._flushPendingCustomMessages();
+		}
+	}
+
+	private async _startOwnedCustomRun(item: OwnedCustomMessage): Promise<void> {
+		try {
+			await this._startRun({ messageType: "custom", message: item.handle });
+		} catch (error) {
+			if (this._customStore.has(item.handle)) item.state = "buffered";
+			if (!this.isStreaming) this._flushPendingAtRunEnd();
+			throw error;
 		}
 	}
 
@@ -4077,7 +4087,7 @@ export class AgentSession {
 	 * Abort current operation and wait for agent to become idle.
 	 */
 	private _requestRunStop(): void {
-		if (this._isAgentRunActive) this._agentRunAbortRequested = true;
+		if (this._isAgentRunActive || this._isEmittingAgentSettled) this._agentRunAbortRequested = true;
 		this._background.abortWait();
 		this.agent.abort();
 	}

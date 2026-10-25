@@ -37,6 +37,8 @@ const scenarios = [
 	"live-stop",
 	"live-context",
 	"live-install",
+	"settled",
+	"settled-stop",
 	"hold-apply",
 	"hold-abort",
 	"hold-cancel",
@@ -52,7 +54,7 @@ const cases = [7, 19, 47].flatMap((seed) =>
 	),
 );
 
-// Finite §15.12 matrix: 3 seeds × 2 batch modes × 11 lifecycle schedules × 5 append outcomes.
+// Finite §15.12 matrix: 3 seeds × 2 batch modes × 13 lifecycle schedules × 5 append outcomes.
 // nextTurn is explicitly outside O1/O2 (§4.8); its separate transfer is covered below.
 describe("§15.12 finite seeded custom-store matrix", () => {
 	const cleanups: Array<() => void> = [];
@@ -183,6 +185,12 @@ describe("§15.12 finite seeded custom-store matrix", () => {
 					pi.on("session_context_change", async () => {
 						for (let key = 0; key < 3; key++) await send("notice", key);
 					});
+					pi.on("agent_settled", async () => {
+						if (injected || !scenario.startsWith("settled")) return;
+						injected = true;
+						await inputs();
+						if (scenario === "settled-stop") await h.session.abort();
+					});
 					pi.on("turn_end", async (event) => {
 						if (injected || !scenario.startsWith("live")) return;
 						injected = true;
@@ -280,7 +288,7 @@ describe("§15.12 finite seeded custom-store matrix", () => {
 				await inputs();
 			}
 		}
-		if (!scenario.startsWith("live")) {
+		if (scenario.startsWith("hold") || scenario.startsWith("l3")) {
 			await h.session.steer("queued user");
 			expect(h.session.pendingMessageCount).toBe(1);
 			observeOwnership();
@@ -311,7 +319,7 @@ describe("§15.12 finite seeded custom-store matrix", () => {
 		expect(h.faux.state.callCount).toBe(sent);
 		observeOwnership();
 		const receipts = journal();
-		if (!scenario.startsWith("live") && !scenario.endsWith("apply")) {
+		if ((scenario.startsWith("hold") || scenario.startsWith("l3")) && !scenario.endsWith("apply")) {
 			expect(h.session.clearQueue()).toEqual({ steering: ["queued user"], followUp: [] });
 			expect(h.session.clearQueue()).toEqual({ steering: [], followUp: [] });
 		}

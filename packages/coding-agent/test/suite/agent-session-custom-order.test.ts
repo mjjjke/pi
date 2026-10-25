@@ -51,6 +51,45 @@ describe("AgentSession custom ownership", () => {
 		expect((h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore.size).toBe(0);
 	});
 
+	it.each(["live", "dispose", "aborted"] as const)("owns settlement triggers immediately: %s", async (schedule) => {
+		let h!: Harness;
+		let sent = false;
+		const ownershipErrors: unknown[] = [];
+		h = await createHarness({
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					if (schedule === "aborted")
+						pi.on("turn_end", () => {
+							void h.session.abort();
+						});
+					pi.on("agent_settled", async () => {
+						if (sent) return;
+						sent = true;
+						await h.session.sendCustomMessage(custom("A"), { triggerTurn: true, orderKey: "k" });
+						try {
+							expect((h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore.size).toBe(
+								1,
+							);
+						} catch (error) {
+							ownershipErrors.push(error);
+						}
+						await h.session.sendCustomMessage(custom("B"), { triggerTurn: false, orderKey: "k" });
+						if (schedule === "dispose") h.session.dispose();
+					});
+				},
+			],
+		});
+		cleanups.push(h.cleanup);
+		h.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+		await h.session.prompt("start");
+		await h.session.waitForIdle();
+		expect(ownershipErrors).toEqual([]);
+		expect(texts(h)).toEqual(["A", "B"]);
+		expect(h.faux.state.callCount).toBe(schedule === "live" ? 2 : 1);
+		expect((h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore.size).toBe(0);
+	});
+
 	for (const mode of ["all", "one-at-a-time"] as const) {
 		for (const stop of [false, true]) {
 			it.each([7, 19, 47])(`seed %s: bounded receipts in ${mode}, stop=${stop}`, async (seed) => {
