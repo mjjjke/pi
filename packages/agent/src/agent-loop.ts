@@ -20,7 +20,9 @@ import type {
 	AgentContext,
 	AgentEvent,
 	AgentLoopConfig,
+	AgentLoopTurnUpdate,
 	AgentMessage,
+	AgentRequestUpdate,
 	AgentTool,
 	AgentToolCall,
 	AgentToolCallOutcome,
@@ -107,7 +109,11 @@ export async function runAgentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
-	const initialMessages = declareToolChanges(context, prompts);
+	const admissions = admitMessages(prompts, config);
+	const initialMessages = declareToolChanges(
+		context,
+		admissions.map((input) => input.message),
+	);
 	const newMessages: AgentMessage[] = [...initialMessages];
 	const currentContext: AgentContext = {
 		...context,
@@ -117,8 +123,7 @@ export async function runAgentLoop(
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 	for (const message of initialMessages) {
-		await emit({ type: "message_start", message });
-		await emit({ type: "message_end", message });
+		await emitAdmittedMessage(message, admissions, emit);
 	}
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
@@ -172,6 +177,7 @@ async function runLoop(
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
+	let queuedContinuation = false;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -180,11 +186,34 @@ async function runLoop(
 		let hasMoreToolCalls = true;
 
 		// Inner loop: process tool calls and steering messages
-		while (hasMoreToolCalls || pendingMessages.length > 0) {
+		while (
+			hasMoreToolCalls ||
+			pendingMessages.length > 0 ||
+			queuedContinuation ||
+			(config.hasQueuedMessages && explicitContinuation)
+		) {
 			let preparedMessages: AgentMessage[] = [];
 			let replacedContext = false;
+			let admissions: MessageAdmission[];
 			if (lastCompletedTurn) {
-				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+				let nextTurnSnapshot: AgentLoopTurnUpdate | undefined;
+				try {
+					signal?.throwIfAborted();
+					nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+					signal?.throwIfAborted();
+				} catch (error) {
+					if (!isPreparationAbort(error, signal)) throw error;
+					// Legacy callers can already have drained a batch. Admission is irreversible.
+					const abortedAdmissions = admitMessages(pendingMessages, config);
+					await emit({ type: "turn_start" });
+					for (const { message } of abortedAdmissions) {
+						await emitAdmittedMessage(message, abortedAdmissions, emit);
+						currentContext.messages.push(message);
+						newMessages.push(message);
+					}
+					await endAbortedPreparation(currentContext, newMessages, config, signal, emit, error);
+					return;
+				}
 				if (nextTurnSnapshot) {
 					replacedContext = nextTurnSnapshot.context !== undefined;
 					currentContext = nextTurnSnapshot.context ?? currentContext;
@@ -206,7 +235,22 @@ async function runLoop(
 				if (pendingMessages.length === 0) {
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 				}
+				if (config.hasQueuedMessages) {
+					if (!hasMoreToolCalls && pendingMessages.length === 0) {
+						pendingMessages = (await config.getFollowUpMessages?.()) || [];
+					}
+					// A queue clear while preparation waited revokes a queue-only continuation.
+					if (!hasMoreToolCalls && !explicitContinuation && pendingMessages.length === 0) {
+						await emit({ type: "agent_end", messages: newMessages });
+						return;
+					}
+				}
+				queuedContinuation = false;
+				explicitContinuation = false;
+				admissions = admitMessages([...preparedMessages, ...pendingMessages], config);
 				await emit({ type: "turn_start" });
+			} else {
+				admissions = admitMessages(pendingMessages, config);
 			}
 
 			// Refresh the declared loadout from the live tools, unless this boundary's turn update
@@ -217,13 +261,20 @@ async function runLoop(
 			}
 
 			// Process prepared and queued messages before the next assistant response.
-			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
-				await emit({ type: "message_start", message });
-				await emit({ type: "message_end", message });
+			for (const message of declareToolChanges(
+				currentContext,
+				admissions.map((input) => input.message),
+			)) {
+				await emitAdmittedMessage(message, admissions, emit);
 				currentContext.messages.push(message);
 				newMessages.push(message);
 			}
 			pendingMessages = [];
+
+			if (signal?.aborted) {
+				await endAbortedPreparation(currentContext, newMessages, config, signal, emit, signal.reason);
+				return;
+			}
 
 			// Instructions go last, after tool results and this turn's steering messages.
 			for (const message of (await config.getInstructionMessages?.(currentContext)) ?? []) {
@@ -233,14 +284,24 @@ async function runLoop(
 				newMessages.push(message);
 			}
 
-			const requestUpdate = await config.prepareRequest?.(
-				{
-					context: currentContext,
-					model: config.model,
-					thinkingLevel: config.reasoning ?? "off",
-				},
-				signal,
-			);
+			let requestUpdate: AgentRequestUpdate | undefined;
+			try {
+				signal?.throwIfAborted();
+				requestUpdate =
+					(await config.prepareRequest?.(
+						{
+							context: currentContext,
+							model: config.model,
+							thinkingLevel: config.reasoning ?? "off",
+						},
+						signal,
+					)) || undefined;
+				signal?.throwIfAborted();
+			} catch (error) {
+				if (!isPreparationAbort(error, signal)) throw error;
+				await endAbortedPreparation(currentContext, newMessages, config, signal, emit, error);
+				return;
+			}
 			if (requestUpdate) {
 				currentContext = requestUpdate.context ?? currentContext;
 				config = {
@@ -309,11 +370,23 @@ async function runLoop(
 			}
 
 			explicitContinuation = decision?.action === "continue";
+			if (config.hasQueuedMessages) {
+				if (signal?.aborted) {
+					await emit({ type: "turn_start" });
+					await endAbortedPreparation(currentContext, newMessages, config, signal, emit, signal.reason);
+					return;
+				}
+				const queued = config.hasQueuedMessages();
+				queuedContinuation = queued.steering || (!hasMoreToolCalls && queued.followUp);
+				continue;
+			}
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
 			if (hasMoreToolCalls || pendingMessages.length > 0) {
 				explicitContinuation = false;
 			}
 		}
+
+		if (config.hasQueuedMessages) break;
 
 		// Agent would stop here. Check for follow-up messages.
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
@@ -334,6 +407,66 @@ async function runLoop(
 		break;
 	}
 
+	await emit({ type: "agent_end", messages: newMessages });
+}
+
+type MessageAdmission = { message: AgentMessage; admissionToken: unknown };
+
+/** Capture the whole batch before any awaited lifecycle event can stop or transform it. */
+function admitMessages(messages: AgentMessage[], config: AgentLoopConfig): MessageAdmission[] {
+	const getRiders = config.getMessageRiders;
+	const batch = getRiders ? messages.flatMap((message) => [message, ...getRiders(message)]) : messages;
+	return batch.map((message) => ({ message, admissionToken: config.getMessageAdmissionToken?.(message) }));
+}
+
+async function emitAdmittedMessage(
+	message: AgentMessage,
+	admissions: MessageAdmission[],
+	emit: AgentEventSink,
+): Promise<void> {
+	const admissionToken = admissions.find((input) => input.message === message)?.admissionToken;
+	const receipt = admissionToken === undefined ? {} : { admissionToken };
+	await emit({ type: "message_start", message, ...receipt });
+	await emit({ type: "message_end", message, ...receipt });
+}
+
+function isPreparationAbort(error: unknown, signal: AbortSignal | undefined): boolean {
+	return signal?.aborted === true || (error instanceof Error && error.name === "AbortError");
+}
+
+/** Finish an unsent assistant turn here, rather than leaving individual entry points to recover it. */
+async function endAbortedPreparation(
+	context: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	error: unknown,
+): Promise<void> {
+	const message: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "aborted",
+		errorMessage: error instanceof Error ? error.message : "Operation aborted",
+		timestamp: Date.now(),
+	};
+	await emit({ type: "message_start", message });
+	await emit({ type: "message_end", message });
+	context.messages.push(message);
+	newMessages.push(message);
+	await config.finishTurn?.({ message, toolResults: [], context, newMessages }, signal);
+	await emit({ type: "turn_end", message, toolResults: [] });
 	await emit({ type: "agent_end", messages: newMessages });
 }
 

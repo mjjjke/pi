@@ -305,6 +305,31 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 
 	/**
+	 * Non-consuming queue presence check. Opts into preparing the next turn before draining either
+	 * queue, so messages remain queue-owned during preparation. Steering has priority; follow-ups
+	 * are eligible only when no tool continuation remains. Without this hook, legacy drain order is kept.
+	 */
+	hasQueuedMessages?: () => { steering: boolean; followUp: boolean };
+
+	/**
+	 * Opaque receipt identity for an admitted input. Captured for the whole batch before any of its
+	 * lifecycle events (before turn_start at later boundaries), and carried separately from the
+	 * message, so consumers can replace the message without losing its receipt. The owner may mark
+	 * the input admitted here, but must not retire it until its message-end receipt.
+	 * Called for initial prompts, run-start polls and later drains, not assistant/tool-result messages.
+	 * Contract: synchronous, must not throw. Unset means no admission token.
+	 */
+	getMessageAdmissionToken?: (message: AgentMessage) => unknown;
+
+	/**
+	 * Following passive messages admitted with an input, in order. Riders are not queued themselves:
+	 * they neither select a continuation nor count against one-at-a-time mode. Called once per
+	 * admitted input (initial prompts included), never recursively for riders. The caller owns them
+	 * until their message-end receipt; this hook must not retire them or throw.
+	 */
+	getMessageRiders?: (message: AgentMessage) => readonly AgentMessage[];
+
+	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
 	 * Called after the current assistant turn finishes executing its tool calls, unless `finishTurn` ends the run.
@@ -549,10 +574,10 @@ export type AgentEvent =
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
 	// Message lifecycle - emitted for LLM-compatible and custom messages
-	| { type: "message_start"; message: AgentMessage }
+	| { type: "message_start"; message: AgentMessage; admissionToken?: unknown }
 	// Only emitted for assistant messages during streaming
 	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
-	| { type: "message_end"; message: AgentMessage }
+	| { type: "message_end"; message: AgentMessage; admissionToken?: unknown }
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }

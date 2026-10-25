@@ -127,6 +127,8 @@ export interface AgentOptions {
 	prepareRequest?: PrepareRequest;
 	getInstructionMessages?: AgentLoopConfig["getInstructionMessages"];
 	getTools?: AgentLoopConfig["getTools"];
+	getMessageAdmissionToken?: AgentLoopConfig["getMessageAdmissionToken"];
+	getMessageRiders?: AgentLoopConfig["getMessageRiders"];
 	/**
 	 * Context markers: messages that are model context but never input (e.g. a compaction boundary).
 	 * `continue()` skips them when it decides what the transcript ends with.
@@ -174,6 +176,13 @@ class PendingMessageQueue {
 		const drained = this.peek();
 		this.messages = this.messages.slice(drained.length);
 		return drained;
+	}
+
+	remove(message: AgentMessage): boolean {
+		const index = this.messages.indexOf(message);
+		if (index === -1) return false;
+		this.messages.splice(index, 1);
+		return true;
 	}
 
 	clear(): void {
@@ -235,6 +244,10 @@ export class Agent {
 	public getInstructionMessages?: AgentLoopConfig["getInstructionMessages"];
 	/** Live tool loadout refreshed at every request boundary; see {@link AgentLoopConfig.getTools}. Unset by default. */
 	public getTools?: AgentLoopConfig["getTools"];
+	/** Optional receipt identity for admitted inputs; see AgentLoopConfig. */
+	public getMessageAdmissionToken?: AgentLoopConfig["getMessageAdmissionToken"];
+	/** Optional passive riders admitted with their predecessor; see AgentLoopConfig. */
+	public getMessageRiders?: AgentLoopConfig["getMessageRiders"];
 	/** See `AgentOptions.isContextMarker`. */
 	public isContextMarker?: (message: AgentMessage) => boolean;
 	public prepareNextTurn?: (
@@ -273,6 +286,8 @@ export class Agent {
 		this.prepareRequest = runtimeOptions.prepareRequest;
 		this.getInstructionMessages = runtimeOptions.getInstructionMessages;
 		this.getTools = runtimeOptions.getTools;
+		this.getMessageAdmissionToken = runtimeOptions.getMessageAdmissionToken;
+		this.getMessageRiders = runtimeOptions.getMessageRiders;
 		this.isContextMarker = runtimeOptions.isContextMarker;
 		this.prepareNextTurn = runtimeOptions.prepareNextTurn;
 		this.prepareNextTurnWithContext = runtimeOptions.prepareNextTurnWithContext;
@@ -335,6 +350,11 @@ export class Agent {
 	/** Queue a message to run only after the agent would otherwise stop. */
 	followUp(message: AgentMessage): void {
 		this.followUpQueue.enqueue(message);
+	}
+
+	/** Remove one still-queued handle by object identity. Admitted inputs are never removed. */
+	removeQueued(handle: AgentMessage): boolean {
+		return this.steeringQueue.remove(handle) || this.followUpQueue.remove(handle);
 	}
 
 	/** Remove all queued steering messages. */
@@ -515,6 +535,8 @@ export class Agent {
 			prepareRequest: this.prepareRequest,
 			getInstructionMessages: this.getInstructionMessages,
 			getTools: this.getTools,
+			getMessageAdmissionToken: this.getMessageAdmissionToken,
+			getMessageRiders: this.getMessageRiders,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {
@@ -535,6 +557,10 @@ export class Agent {
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
+			hasQueuedMessages: () => ({
+				steering: this.steeringQueue.hasItems(),
+				followUp: this.followUpQueue.hasItems(),
+			}),
 		};
 	}
 
