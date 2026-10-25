@@ -127,7 +127,10 @@ describe("AgentSession codemode tool", () => {
 		// Registered by an extension so they run with the session's tool context, next to the built-in codemode.
 		const registerTools = (pi: ExtensionAPI) => {
 			for (const tool of [echoTool as AgentTool, statsTool, screenshotTool]) {
-				pi.registerTool(createToolDefinitionFromAgentTool(tool));
+				pi.registerTool({
+					...createToolDefinitionFromAgentTool(tool),
+					...(tool.name === "echo" ? { promptGuidelines: ["Use echo to repeat test text."] } : {}),
+				});
 			}
 		};
 		const harness = await createHarness({
@@ -176,8 +179,9 @@ describe("AgentSession codemode tool", () => {
 		expect(requestPrompts[1]).toContain("\n- codemode: ");
 		expect(harness.session.systemPrompt).not.toContain("\n- read: ");
 		// Hidden tools' guidelines move from the rules to their codemode sections (#10343).
-		expect(requestPrompts[1]).not.toContain("Use read to examine files");
-		expect(description("codemode")).toContain("- Use read to examine files instead of cat or sed.");
+		expect(requestPrompts[0]).toContain("- Use echo to repeat test text.");
+		expect(requestPrompts[1]).not.toContain("Use echo to repeat test text.");
+		expect(description("codemode")).toContain("- Use echo to repeat test text.");
 
 		// Without codemode, tools keep their plain descriptions.
 		harness.session.setActiveToolsByName(["echo"]);
@@ -188,11 +192,11 @@ describe("AgentSession codemode tool", () => {
 	it("shows the guidelines of tools that do not fit the inline budget through describeTool()", async () => {
 		const harness = await setup();
 		harness.settingsManager.applyOverrides({ codemode: { mode: "only", inlineBudget: 0 } });
-		harness.session.setActiveToolsByName(["read", "codemode"]);
+		harness.session.setActiveToolsByName(["echo", "codemode"]);
 		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "codemode");
-		expect(codemode?.description).not.toContain("### `read`");
+		expect(codemode?.description).not.toContain("### `echo`");
 		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("codemode", { code: 'text(await describeTool("read"))' })], {
+			fauxAssistantMessage([fauxToolCall("codemode", { code: 'text(await describeTool("echo"))' })], {
 				stopReason: "toolUse",
 			}),
 			fauxAssistantMessage("done"),
@@ -200,7 +204,7 @@ describe("AgentSession codemode tool", () => {
 
 		await harness.session.prompt("go");
 
-		expect(resultText(codemodeResult(harness))).toContain("- Use read to examine files instead of cat or sed.");
+		expect(resultText(codemodeResult(harness))).toContain("- Use echo to repeat test text.");
 	});
 
 	it("runs nested calls in parallel and returns only the script result", async () => {

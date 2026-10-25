@@ -312,7 +312,7 @@ describe("Coding Agent Tools", () => {
 					path: testFile,
 					edits: [{ oldText: "nonexistent", newText: "testing" }],
 				}),
-			).rejects.toThrow(/Could not find the exact text/);
+			).rejects.toThrow(/Could not find the text/);
 		});
 
 		it("should include ENOENT when the edit target does not exist", async () => {
@@ -1249,7 +1249,7 @@ describe("edit tool fuzzy matching", () => {
 				path: testFile,
 				edits: [{ oldText: "this does not exist", newText: "replacement" }],
 			}),
-		).rejects.toThrow(/Could not find the exact text/);
+		).rejects.toThrow(/Could not find the text/);
 	});
 
 	it("should detect duplicates after fuzzy normalization", async () => {

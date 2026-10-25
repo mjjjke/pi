@@ -7,6 +7,8 @@ import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 
 export interface BuildSystemPromptOptions {
+	/** Whether this session renders tool calls in the interactive TUI. Defaults to false. */
+	rendersToolCalls?: boolean;
 	/** Custom system prompt (replaces the default prefix). */
 	customPrompt?: string;
 	/** Exact full prompt replacement set by a before_agent_start handler. */
@@ -59,6 +61,7 @@ const SYSTEM_PROMPT_SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
 /** Normalize prompt input into the mutable, collection-complete shape exposed to extensions. */
 export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOptions): NormalizedBuildSystemPromptOptions {
 	return {
+		rendersToolCalls: input.rendersToolCalls ?? false,
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
 		selectedTools: [...(input.selectedTools ?? ["read", "bash", "edit", "write"])],
@@ -89,6 +92,7 @@ function buildRules(
 	selectedTools: string[],
 	toolGuidelines: Record<string, string[]>,
 	promptGuidelines: string[],
+	rendersToolCalls: boolean,
 ): string {
 	const rules: string[] = [];
 	const seen = new Set<string>();
@@ -101,19 +105,6 @@ function buildRules(
 
 	const hasBash = selectedTools.includes("bash");
 	const hasPowerShell = selectedTools.includes("powershell");
-	const hasGrep = selectedTools.includes("grep");
-	const hasFind = selectedTools.includes("find");
-	const hasLs = selectedTools.includes("ls");
-
-	if ((hasBash || hasPowerShell) && !hasGrep && !hasFind && !hasLs) {
-		if (hasBash && hasPowerShell) {
-			addRule("Use bash or PowerShell for file operations like listing, searching, and finding files");
-		} else if (hasPowerShell) {
-			addRule("Use PowerShell for file operations like listing, searching, and finding files");
-		} else {
-			addRule("Use bash for file operations like ls, rg, find");
-		}
-	}
 
 	// Fork: edit/write are exclusive source-order barriers; other calls between them
 	// remain parallel. Shell dependencies still need one command or a later message
@@ -123,6 +114,13 @@ function buildRules(
 	if (hasShell && mutatesFiles) {
 		addRule(
 			"In one message, edit/write calls run alone in message order: later calls see their effect. Other calls (shell commands, reads, searches) start concurrently in no guaranteed order: a command that needs another command's effect (e.g. git add then commit) goes in the same command with && or in a later message.",
+		);
+	}
+
+	// Rendering is a session fact, not part of any static tool declaration (including codemode).
+	if (rendersToolCalls && hasShell && selectedTools.includes("edit") && selectedTools.includes("write")) {
+		addRule(
+			"The user sees each edit as a colored diff and each write as highlighted content; a file changed through the shell shows them only the command and its output. edit writes nothing unless every oldText matches exactly one region, while sed -i or a script's replace() can silently change nothing or more than intended.",
 		);
 	}
 
@@ -169,7 +167,12 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		const tools =
 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
 		promptSections.tools = `${tools}\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.`;
-		promptSections.rules = buildRules(declaredTools, toolGuidelines, promptGuidelines);
+		promptSections.rules = buildRules(
+			declaredTools,
+			toolGuidelines,
+			promptGuidelines,
+			options.rendersToolCalls === true,
+		);
 		promptSections.docs = `Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${getReadmePath()}
 - Additional docs: ${getDocsPath()}

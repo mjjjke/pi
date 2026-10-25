@@ -21,8 +21,7 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 const replaceEditSchema = Type.Object(
 	{
 		oldText: Type.String({
-			description:
-				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+			description: "Non-empty text identifying the region to replace",
 		}),
 		newText: Type.String({ description: "Replacement text for this targeted edit." }),
 	},
@@ -31,23 +30,20 @@ const replaceEditSchema = Type.Object(
 
 const editSchema = Type.Object(
 	{
-		path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
-		edits: Type.Array(replaceEditSchema, {
+		path: Type.String({
 			description:
-				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
+				"File path, relative or absolute. A leading ~/ (or a bare ~) expands to your home directory; environment variables such as $HOME do not.",
+		}),
+		edits: Type.Array(replaceEditSchema, {
+			description: "One or more replacements in this file",
 		}),
 	},
 	{},
 );
 
 export const editToolSystemPromptContribution = {
-	snippet: "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
-	guidelines: [
-		"Use edit for precise changes (edits[].oldText must match exactly)",
-		"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-		"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
-		"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
-	],
+	snippet: "Change part of an existing text file",
+	guidelines: [],
 } as const;
 
 export type EditToolInput = Static<typeof editSchema>;
@@ -149,7 +145,7 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+			"Replace text in one existing file. Each oldText must match exactly one region of the file as it was before this call, and entries must not overlap. Matching ignores line-ending differences and tolerates trailing whitespace and Unicode compatibility, quote, dash and space differences, also when counting matches; if any entry needs that tolerance, other text on the touched lines may be normalized too. All replacements are validated before writing; a validation failure writes nothing.",
 		promptSnippet: editToolSystemPromptContribution.snippet,
 		promptGuidelines: [...editToolSystemPromptContribution.guidelines],
 		// Fork: mutations form a source-order barrier against shell calls, reads, and other tools.

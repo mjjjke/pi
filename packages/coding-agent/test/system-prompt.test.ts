@@ -97,7 +97,7 @@ describe("buildSystemPrompt", () => {
 		test.each([
 			[["powershell"], "Use PowerShell for file operations"],
 			[["bash", "powershell"], "Use bash or PowerShell for file operations"],
-		] as const)("uses shell-specific guidance for %j", (selectedTools, expected) => {
+		] as const)("omits shell discovery directives for %j", (selectedTools, removed) => {
 			const prompt = buildSystemPrompt({
 				selectedTools: [...selectedTools],
 				contextFiles: [],
@@ -105,7 +105,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain(expected);
+			expect(prompt).not.toContain(removed);
 		});
 
 		const PARALLEL_CALLS_RULE =
@@ -251,7 +251,8 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("<tools>\n- run: Run a task\n");
 			expect(prompt).not.toContain("- read: ");
 			expect(prompt).not.toContain("Use read for files.");
-			expect(prompt).not.toContain("Use bash for file operations");
+			expect(build([])).toContain("- read: Read files");
+			expect(build([])).toContain("- Use read for files.");
 			expect(prompt).toContain("- Prefer run.");
 		});
 

@@ -2699,6 +2699,7 @@ export class AgentSession {
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
+			rendersToolCalls: this._extensionMode === "tui",
 			cwd: this._cwd,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
@@ -5248,6 +5249,8 @@ export class AgentSession {
 		}
 		if (bindings.mode !== undefined) {
 			this._extensionMode = bindings.mode;
+			// Bind before session_start so startup prompts see the mode's stable rendering facts.
+			this._rebuildSystemPrompt(this.getActiveToolNames());
 		}
 		if (bindings.commandContextActions !== undefined) {
 			this._extensionCommandContextActions = bindings.commandContextActions;

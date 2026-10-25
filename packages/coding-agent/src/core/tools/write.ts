@@ -9,13 +9,16 @@ import { writeRenderers } from "./renderers/write.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const writeSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
-	content: Type.String({ description: "Content to write to the file" }),
+	path: Type.String({
+		description:
+			"File path, relative or absolute. A leading ~/ (or a bare ~) expands to your home directory; environment variables such as $HOME do not.",
+	}),
+	content: Type.String({ description: "The complete file content, written verbatim" }),
 });
 
 export const writeToolSystemPromptContribution = {
-	snippet: "Create or overwrite files",
-	guidelines: ["Use write only for new files or complete rewrites."],
+	snippet: "Create a text file or replace one entirely",
+	guidelines: [],
 } as const;
 
 export type WriteToolInput = Static<typeof writeSchema>;
@@ -50,7 +53,7 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+			"Write a UTF-8 text file: creates it, or replaces its whole content if it exists, creating missing parent directories. There is no append mode.",
 		promptSnippet: writeToolSystemPromptContribution.snippet,
 		promptGuidelines: [...writeToolSystemPromptContribution.guidelines],
 		// Fork: mutations form a source-order barrier against shell calls, reads, and other tools.

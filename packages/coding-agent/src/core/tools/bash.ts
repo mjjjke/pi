@@ -47,7 +47,7 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
@@ -64,8 +64,8 @@ const bashSchema = Type.Object({
 });
 
 export const bashToolSystemPromptContribution = {
-	snippet: "Execute bash commands (ls, grep, find, etc.)",
-	guidelines: ["You can inspect PI_* environment variables for current model and session details."],
+	snippet: "Run shell commands",
+	guidelines: [],
 } as const;
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -472,7 +472,7 @@ export function createShellToolDefinition(
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Run a ${config.shellName} command in the working directory. Each call starts a new non-interactive process: directory and environment changes do not carry over, and there is no terminal for interactive input. For a command that finishes in the foreground, the text result keeps at most the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB of combined stdout and stderr.`,
 		promptSnippet: config.promptSnippet,
 		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
 		parameters: bashSchema,

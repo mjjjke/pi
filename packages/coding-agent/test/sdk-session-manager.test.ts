@@ -104,9 +104,9 @@ describe("createAgentSession session manager defaults", () => {
 			thinkingLevel: "high",
 		});
 		expect(session.sessionFile).toBeTruthy();
-		expect(session.systemPrompt).toContain(
-			"You can inspect PI_* environment variables for current model and session details.",
-		);
+		// The SDK has no user-facing tool rendering; environment access remains available.
+		expect(session.systemPrompt).not.toContain("You can inspect PI_* environment variables");
+		expect(session.systemPrompt).not.toContain("The user sees each edit as a colored diff");
 
 		const bashTool = session.agent.state.tools.find((tool) => tool.name === "bash");
 		expect(bashTool).toBeTruthy();

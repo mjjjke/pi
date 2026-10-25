@@ -253,22 +253,22 @@ function countOccurrences(content: string, oldText: string): number {
 function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
 	if (totalEdits === 1) {
 		return new Error(
-			`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
+			`Could not find the text in ${path}. The file may differ from what you remember: read the current text and copy oldText from it.`,
 		);
 	}
 	return new Error(
-		`Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.`,
+		`Could not find edits[${editIndex}] in ${path}. The file may differ from what you remember: read the current text and copy oldText from it.`,
 	);
 }
 
 function getDuplicateError(path: string, editIndex: number, totalEdits: number, occurrences: number): Error {
 	if (totalEdits === 1) {
 		return new Error(
-			`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+			`Found ${occurrences} occurrences of the text in ${path}. Add surrounding text to pick one; edit has no replace-all.`,
 		);
 	}
 	return new Error(
-		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`,
+		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Add surrounding text to pick one; edit has no replace-all.`,
 	);
 }
 
