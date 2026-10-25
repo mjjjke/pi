@@ -33,6 +33,7 @@ describe("AgentSession custom ownership", () => {
 		});
 		cleanups.push(h.cleanup);
 		const activeAtStarts: boolean[] = [];
+		h.session.agent.steeringMode = "one-at-a-time";
 		h.session.subscribe((event) => {
 			if (event.type === "message_end" && getMessageText(event.message) === "final passive") {
 				void h.session.sendCustomMessage(custom("wake trigger"), { triggerTurn: true });
@@ -49,6 +50,72 @@ describe("AgentSession custom ownership", () => {
 		expect(h.session.agent.hasQueuedMessages()).toBe(false);
 		expect((h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore.size).toBe(0);
 	});
+
+	for (const mode of ["all", "one-at-a-time"] as const) {
+		for (const stop of [false, true]) {
+			it.each([7, 19, 47])(`seed %s: bounded receipts in ${mode}, stop=${stop}`, async (seed) => {
+				let h!: Harness;
+				let sent = false;
+				let state = seed;
+				const arrivals: Array<{ text: string; key: string; follow: boolean }> = [];
+				h = await createHarness({
+					settings: { compaction: { enabled: false } },
+					extensionFactories: [
+						(pi) => {
+							pi.on("turn_end", async () => {
+								if (sent) return;
+								sent = true;
+								for (let i = 0; i < 12; i++) {
+									state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+									const lane = state % 3;
+									const key = `k${(state >>> 8) % 3}`;
+									const text = `s${seed}-${i}`;
+									arrivals.push({ text, key, follow: lane === 2 });
+									await h.session.sendCustomMessage(custom(text), {
+										triggerTurn: lane !== 0,
+										deliverAs: lane === 2 ? "followUp" : "steer",
+										orderKey: key,
+									});
+								}
+								if (stop) void h.session.abort();
+							});
+						},
+					],
+				});
+				cleanups.push(h.cleanup);
+				h.session.agent.steeringMode = mode;
+				h.session.agent.followUpMode = mode;
+				const append = h.sessionManager.appendCustomMessageEntry.bind(h.sessionManager);
+				let attempts = 0;
+				// First/second receipt failure, never sticky: settlement must recover ownership.
+				vi.spyOn(h.sessionManager, "appendCustomMessageEntry").mockImplementation((...args) => {
+					if (++attempts === (seed === 7 ? 1 : seed === 19 ? 2 : -1))
+						throw new Error("synthetic transient append");
+					return append(...args);
+				});
+				h.setResponses(
+					Array.from({ length: 20 }, () => (context) => {
+						expect(context.messages).toEqual(convertToLlm(h.sessionManager.buildSessionProjection().messages));
+						return fauxAssistantMessage("reply");
+					}),
+				);
+				await h.session.prompt("start");
+				await h.session.waitForIdle();
+				// Transient append errors can stop the low-level loop. One explicit idle stop
+				// is a bounded recovery step, not another provider turn.
+				await h.session.abort();
+				const journal = texts(h);
+				expect([...journal].sort()).toEqual(arrivals.map((item) => item.text).sort());
+				for (const key of ["k0", "k1", "k2"]) {
+					const ordered = arrivals.filter((item) => item.key === key && !item.follow).map((item) => item.text);
+					expect(journal.filter((text) => ordered.includes(text))).toEqual(ordered);
+				}
+				expect((h.session as unknown as { _customStore: Map<unknown, unknown> })._customStore.size).toBe(0);
+				expect(h.session.agent.hasQueuedMessages()).toBe(false);
+				expect(h.faux.state.callCount).toBeLessThanOrEqual(14);
+			});
+		}
+	}
 
 	it("admits a same-key passive rider with its steer in request and journal order", async () => {
 		let h!: Harness;

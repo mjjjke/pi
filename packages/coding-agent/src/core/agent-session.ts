@@ -1856,6 +1856,23 @@ export class AgentSession {
 	private async _emitAgentSettled(): Promise<void> {
 		this._cacheWarmer?.onAgentSettled();
 		this._isAgentRunActive = false;
+		// The final flush can accept a trigger after the continuation loop exited. Its
+		// queue handle still owns scheduling, but it needs a new run after settlement.
+		// Never wake input from an aborted settlement or transfer an admitted handle.
+		const pending = this.agent
+			.peekQueuedMessages()
+			.find((message) => this._customStore.get(message)?.state === "queued");
+		if (pending && !this._agentRunAbortRequested && !this._disposed && !this._isSessionWriteBlocked()) {
+			const admissionGen = this._admissionGen;
+			this._deferredSettledActions.push(async () => {
+				if (this._isAdmissionChanged(admissionGen) || this._agentRunAbortRequested || this._isSessionWriteBlocked())
+					return;
+				const item = this._customStore.get(pending);
+				if (item?.state !== "queued" || !this.agent.removeQueued(pending)) return;
+				item.state = "held";
+				await this._startRun({ messageType: "custom", message: item.handle });
+			});
+		}
 		this._isEmittingAgentSettled = true;
 		try {
 			const aborted = this._agentRunAbortRequested;
