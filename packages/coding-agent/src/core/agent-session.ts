@@ -2307,11 +2307,16 @@ export class AgentSession {
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
-		this._eventListeners.push(listener);
+		let active = true;
+		const subscription: AgentSessionEventListener = (event) => {
+			if (active) listener(event);
+		};
+		this._eventListeners.push(subscription);
 
-		// Return unsubscribe function for this specific listener
+		// Explicit unsubscription also retires a saved post-append observation.
 		return () => {
-			const index = this._eventListeners.indexOf(listener);
+			active = false;
+			const index = this._eventListeners.indexOf(subscription);
 			if (index !== -1) {
 				this._eventListeners.splice(index, 1);
 			}
