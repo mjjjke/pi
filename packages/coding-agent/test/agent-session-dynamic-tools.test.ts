@@ -73,8 +73,9 @@ describe("AgentSession dynamic tool registration", () => {
 		});
 
 		const bashTool = session.agent.state.tools.find((tool) => tool.name === "bash")!;
-		// Rev 3.2 removes the PI_* directive without removing the environment capability.
-		expect(session.systemPrompt).not.toContain("You can inspect PI_* environment variables");
+		expect(session.systemPrompt).toContain(
+			"You can inspect PI_* environment variables for current model and session details.",
+		);
 		await bashTool.execute("bash-env", { command: "printf ok" });
 		expect(sessionEnv).toMatchObject({
 			PI_SESSION_ID: session.sessionId,
