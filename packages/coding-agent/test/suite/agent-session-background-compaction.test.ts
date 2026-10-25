@@ -488,96 +488,104 @@ describe("AgentSession background compaction integration", () => {
 		},
 	);
 
-	it.each(["mid-run", "post-run", "virtual", "overflow"] as const)(
-		"%s wait: stop sends no provider request, retains user ownership and allows later adoption",
-		async (gate) => {
-			const f = await setup(
-				false,
-				gate === "mid-run"
-					? async () => {
-							// A zero-usage reply followed by a huge tool result must use the projection.
-							await f.h.session.steer("owned user");
-							return "x".repeat(64000);
-						}
-					: undefined,
-			);
-			const stream = vi.spyOn(f.h.session.agent, "streamFunction");
-			f.h.session.startBackgroundCompaction({ source: "user" });
-			if (gate === "virtual") {
-				f.h.session.modelRuntime.registerVirtualModel({
-					provider: f.h.getModel().provider,
-					id: "auto",
-					name: "Auto",
-					thinkingLevels: ["off"],
-					route: () => ({ model: f.h.getModel("small")!, thinkingLevel: "off" }),
-				});
-				f.h.session.agent.state.model = f.h.session.modelRuntime.getModel(f.h.getModel().provider, "auto")!;
-			}
-			f.h.session.subscribe((event) => {
-				if (event.type === "message_end" && event.message.role === "assistant") {
-					if (gate === "post-run")
-						event.message.usage = { ...event.message.usage, input: 9500, totalTokens: 9500 };
-					if (gate === "mid-run")
-						event.message.usage = {
-							...event.message.usage,
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-						};
-				}
+	it.each(
+		(["mid-run", "post-run", "virtual", "overflow"] as const).flatMap((gate) =>
+			(["abort", "reload"] as const).map((action) => ({ gate, action })),
+		),
+	)("$gate wait: $action sends no provider request and retains user ownership", async ({ gate, action }) => {
+		const f = await setup(
+			false,
+			gate === "mid-run"
+				? async () => {
+						// A zero-usage reply followed by a huge tool result must use the projection.
+						await f.h.session.steer("owned user");
+						return "x".repeat(64000);
+					}
+				: undefined,
+		);
+		const stream = vi.spyOn(f.h.session.agent, "streamFunction");
+		f.h.session.startBackgroundCompaction({ source: "user" });
+		if (gate === "virtual") {
+			f.h.session.modelRuntime.registerVirtualModel({
+				provider: f.h.getModel().provider,
+				id: "auto",
+				name: "Auto",
+				thinkingLevels: ["off"],
+				route: () => ({ model: f.h.getModel("small")!, thinkingLevel: "off" }),
 			});
-			f.h.setResponses([
-				gate === "mid-run"
-					? fauxAssistantMessage([fauxToolCall("step", {})])
-					: gate === "overflow"
-						? fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" })
-						: gate === "post-run"
-							? fauxAssistantMessage("done")
-							: fauxAssistantMessage("must not send"),
-				fauxAssistantMessage("later"),
-			]);
-			const waiting = phase(f.h, "waiting");
-			const run = f.h.session.prompt("go");
-			await vi.waitFor(() =>
-				expect(f.h.eventsOfType("session_background_compaction").some((event) => event.phase === "waiting")).toBe(
-					true,
-				),
-			);
-			await waiting;
-			if (gate !== "mid-run") await f.h.session.steer("owned user");
-			const sent = stream.mock.calls.length;
-			expect(sent).toBe(gate === "virtual" ? 0 : 1);
-			await f.h.session.abort();
-			await run;
-			expect(stream).toHaveBeenCalledTimes(sent);
-			expect(f.h.eventsOfType("agent_settled").at(-1)).toMatchObject({ aborted: true });
-			expect(f.h.session.getSteeringMessages()).toEqual(["owned user"]);
-			expect(f.h.session.getBackgroundCompaction()?.phase).toBe("summarizing");
-			const ready = phase(f.h, "ready");
+			f.h.session.agent.state.model = f.h.session.modelRuntime.getModel(f.h.getModel().provider, "auto")!;
+		}
+		f.h.session.subscribe((event) => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				if (gate === "post-run") event.message.usage = { ...event.message.usage, input: 9500, totalTokens: 9500 };
+				if (gate === "mid-run")
+					event.message.usage = {
+						...event.message.usage,
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+					};
+			}
+		});
+		f.h.setResponses([
+			gate === "mid-run"
+				? fauxAssistantMessage([fauxToolCall("step", {})])
+				: gate === "overflow"
+					? fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" })
+					: gate === "post-run"
+						? fauxAssistantMessage("done")
+						: fauxAssistantMessage("must not send"),
+			fauxAssistantMessage("later"),
+		]);
+		const waiting = phase(f.h, "waiting");
+		const run = f.h.session.prompt("go");
+		await vi.waitFor(() =>
+			expect(f.h.eventsOfType("session_background_compaction").some((event) => event.phase === "waiting")).toBe(
+				true,
+			),
+		);
+		await waiting;
+		if (gate !== "mid-run") await f.h.session.steer("owned user");
+		const sent = stream.mock.calls.length;
+		expect(sent).toBe(gate === "virtual" ? 0 : 1);
+		if (action === "reload") await f.h.session.reload();
+		else await f.h.session.abort();
+		await run;
+		expect(stream).toHaveBeenCalledTimes(sent);
+		expect(f.h.eventsOfType("agent_settled").at(-1)).toMatchObject({ aborted: true });
+		expect(f.h.session.getSteeringMessages()).toEqual(["owned user"]);
+		if (action === "reload") {
 			f.finish();
-			await ready;
-			// A larger current model makes the huge kept suffix installable; the cut never moves.
-			f.h.session.agent.state.model = { ...f.h.getModel(), contextWindow: 100000 };
-			f.h.setResponses([fauxAssistantMessage("later")]);
-			await f.h.session.prompt("later prompt");
-			expect(f.h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
-			expect(
-				f.h.sessionManager
-					.getBranch()
-					.filter(
-						(entry) =>
-							entry.type === "message" &&
-							entry.message.role === "user" &&
-							JSON.stringify(entry.message.content).includes("owned user"),
-					),
-			).toHaveLength(1);
-			expect(
-				f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
-			).toHaveLength(1);
-		},
-	);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
+			expect(f.h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+			return;
+		}
+		expect(f.h.session.getBackgroundCompaction()?.phase).toBe("summarizing");
+		const ready = phase(f.h, "ready");
+		f.finish();
+		await ready;
+		// A larger current model makes the huge kept suffix installable; the cut never moves.
+		f.h.session.agent.state.model = { ...f.h.getModel(), contextWindow: 100000 };
+		f.h.setResponses([fauxAssistantMessage("later")]);
+		await f.h.session.prompt("later prompt");
+		expect(f.h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(
+			f.h.sessionManager
+				.getBranch()
+				.filter(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "user" &&
+						JSON.stringify(entry.message.content).includes("owned user"),
+				),
+		).toHaveLength(1);
+		expect(
+			f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
+		).toHaveLength(1);
+	});
 
 	it.each(["manual", "gate1"] as const)(
 		"review B2: %s wait recomputes the ordinary model threshold after readiness",

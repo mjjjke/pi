@@ -5659,13 +5659,21 @@ export class AgentSession {
 	}
 
 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
-		if (this._isAgentRunActive || this.isCompacting || this._readiness) {
+		const backgroundOperation = this._background.current?.phase === "claimed" || !!this._manualBackgroundController;
+		if (this._readiness || ((this._isAgentRunActive || this.isCompacting) && !backgroundOperation)) {
 			throw new Error("Cannot reload while a run is active, compaction is running, or extensions are binding");
 		}
-		this._background.cancel("reload");
-		this._branchGeneration++;
+		// Reserve readiness before releasing a claimed wait: new prompts cannot enter
+		// the outgoing runtime, and the stopped run must unwind before it is replaced.
 		const barrier = this._beginReadiness();
 		try {
+			this._requestRunStop();
+			this.abortCompaction();
+			this._background.cancel("reload", undefined, true);
+			this._background.deliverBeforeInvalidation();
+			this._background.abortNotifications();
+			await this.waitForIdle();
+			this._branchGeneration++;
 			await this._reload(options);
 		} finally {
 			barrier.release();

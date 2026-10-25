@@ -1,6 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CompactionResult } from "../../src/core/compaction/index.ts";
+import { type CompactionResult, estimateProjectedContextTokens } from "../../src/core/compaction/index.ts";
 import type { ExtensionContext, SessionBackgroundCompactionEvent } from "../../src/core/extensions/index.ts";
 import { emitSessionShutdownEvent } from "../../src/core/extensions/runner.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -117,14 +117,14 @@ describe("background compaction extension API", () => {
 			off();
 			expect(h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 			expect(h.session.cancelBackgroundCompaction()).toBe(false);
-			if (action === "reload") await expect(h.session.reload()).rejects.toThrow("Cannot reload");
+			if (action === "reload") await h.session.reload();
 			if (action === "dispose") {
 				h.session.dispose();
 				expect(() => ctx.getBackgroundCompaction!()).toThrow("stale");
 			}
 			release.resolve();
 			expect(await now).toMatchObject({ status: "applied" });
-			expect.soft(laterHandler).toBe(action === "dispose" ? 0 : 1);
+			expect.soft(laterHandler).toBe(action === "cancel" ? 1 : 0);
 			expect(unsubscribedApplied).toBe(0);
 			expect(
 				h.eventsOfType("session_background_compaction").filter((event) => event.phase === "applied"),
@@ -334,7 +334,7 @@ describe("background compaction extension API", () => {
 		}
 	});
 
-	it("reload during a manual wait is refused without invalidation; after release it cancels the summary", async () => {
+	it("reload terminates a claimed manual wait without waiting for its summary", async () => {
 		const summary = deferred<CompactionResult>();
 		const h = await createHarness({
 			settings: { compaction: { keepRecentTokens: 10 } },
@@ -352,17 +352,64 @@ describe("background compaction extension API", () => {
 		const runner = h.session.extensionRunner;
 		const now = h.session.compactNow();
 		await vi.waitFor(() => expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed"));
-		await expect(h.session.reload()).rejects.toThrow("Cannot reload");
-		expect(runner.isInvalidated()).toBe(false);
-		expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed");
-		await h.session.abort();
-		expect(await now).toMatchObject({ status: "released" });
+		await h.session.prompt("held input");
 		await h.session.reload();
+		expect(await now).toMatchObject({ status: "released" });
+		expect(h.session.clearQueue()).toEqual({ steering: ["held input"], followUp: [] });
+		expect(h.faux.state.callCount).toBe(0);
 		expect(runner.isInvalidated()).toBe(true);
 		summary.resolve({ summary: "late", firstKeptEntryId: kept, tokensBefore: 0 });
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(h.session.getBackgroundCompaction()).toBeUndefined();
 		expect(h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+	});
+
+	it("reload terminates a claimed L3 pre-prompt wait, retaining queued input and ignoring late completion", async () => {
+		const summary = deferred<CompactionResult>();
+		const h = await createHarness({
+			models: [{ id: "small", contextWindow: 3000, maxTokens: 1000 }],
+			settings: { compaction: { keepRecentTokens: 10, reserveTokens: 1000 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async () => ({ compaction: await summary.promise }));
+				},
+			],
+		});
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "system", content: "", sections: {}, timestamp: 1 });
+		h.sessionManager.appendMessage({ role: "user", content: "x".repeat(16000), timestamp: 2 });
+		h.sessionManager.appendMessage({
+			...fauxAssistantMessage("old", { timestamp: 3 }),
+			api: h.getModel().api,
+			provider: h.getModel().provider,
+			model: h.getModel().id,
+		});
+		const kept = h.sessionManager.appendMessage({ role: "user", content: "kept".repeat(40), timestamp: 4 });
+		h.session.refreshContext();
+		const tokens = estimateProjectedContextTokens(
+			h.sessionManager.buildSessionProjection(),
+			h.sessionManager.getBranch(),
+		).tokens;
+		h.session.agent.state.model = { ...h.getModel(), contextWindow: tokens + 1000 };
+		expect(h.session.startBackgroundCompaction({ source: "model" }).status).toBe("started");
+		const runner = h.session.extensionRunner;
+		// Attach before shutdown: a stopped, unadmitted SDK prompt reports AbortError.
+		const run = h.session.prompt("unadmitted").then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		await vi.waitFor(() => expect(h.session.getBackgroundCompaction()?.phase).toBe("claimed"));
+		await h.session.steer("queued input");
+		await h.session.reload();
+		expect(await run).toMatchObject({ name: "AbortError" });
+		expect(runner.isInvalidated()).toBe(true);
+		expect(h.session.isIdle).toBe(true);
+		expect(h.session.clearQueue()).toEqual({ steering: ["queued input"], followUp: [] });
+		summary.resolve({ summary: "late", firstKeptEntryId: kept, tokensBefore: 0 });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(h.session.getBackgroundCompaction()).toBeUndefined();
+		expect(h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		expect(h.faux.state.callCount).toBe(0);
 	});
 
 	it("guards stale contexts and observes terminal cancellation before disposal removes listeners", async () => {
