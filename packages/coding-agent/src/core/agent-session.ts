@@ -63,7 +63,11 @@ import { processImage } from "../utils/image-process.ts";
 import { sleep } from "../utils/sleep.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import { type BackgroundCompactionEvent, BackgroundCompactionOwner } from "./background-compaction-owner.ts";
+import {
+	type BackgroundCompactionEvent,
+	type BackgroundCompactionInstallResult,
+	BackgroundCompactionOwner,
+} from "./background-compaction-owner.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
 import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer.ts";
@@ -437,6 +441,7 @@ interface OwnedCustomMessage {
 	state: "buffered" | "queued" | "held" | "admitted";
 	/** A passive travels in its predecessor's admission batch, never in an Agent queue. */
 	riderOf?: OwnedCustomMessage;
+	delivery?: "steer" | "followUp";
 }
 
 interface StagedContent {
@@ -571,6 +576,7 @@ export class AgentSession {
 	private _overflowRecoveryAttempted = false;
 	private readonly _background: BackgroundCompactionOwner;
 	private _branchGeneration = 0;
+	private _manualBackgroundController?: AbortController;
 	private readonly _backgroundStanding = new Map<string, Set<string>>();
 
 	// Branch summarization state
@@ -2546,7 +2552,8 @@ export class AgentSession {
 		return (
 			this._autoCompactionAbortController !== undefined ||
 			this._compactionAbortController !== undefined ||
-			this._branchSummaryAbortController !== undefined
+			this._branchSummaryAbortController !== undefined ||
+			this._manualBackgroundController !== undefined
 		);
 	}
 
@@ -3249,13 +3256,14 @@ export class AgentSession {
 			}
 		}
 
-		if (this._compactionAbortController !== undefined) {
+		if (this._compactionAbortController !== undefined && !this._manualBackgroundController) {
 			throw new Error(
 				"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 			);
 		}
 
 		this._throwIfAdmissionChanged(admissionGen);
+		const manualAtInput = this._manualBackgroundController;
 		// Emit input event for extension interception (before skill/template expansion)
 		if (this._extensionRunner.hasHandlers("input")) releaseDeferred();
 		const processedInput = await this._runInputHandlers(
@@ -3278,14 +3286,14 @@ export class AgentSession {
 		}
 
 		// If streaming (including run preflight), queue via steer() or followUp().
-		if (this.isStreaming) {
-			if (!options?.streamingBehavior) {
+		if (this._manualBackgroundController || manualAtInput?.signal.aborted || this.isStreaming) {
+			if (!this._manualBackgroundController && !manualAtInput?.signal.aborted && !options?.streamingBehavior) {
 				throw new Error(
 					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 				);
 			}
 			this._throwIfAdmissionChanged(admissionGen);
-			if (options.streamingBehavior === "followUp") {
+			if (options?.streamingBehavior === "followUp") {
 				await this._queueFollowUp(expandedText, currentImages);
 			} else {
 				await this._queueSteer(expandedText, currentImages);
@@ -3625,7 +3633,11 @@ export class AgentSession {
 			});
 			return;
 		}
-		const activeInput = this.isStreaming && options?.triggerTurn !== false && !this._isStoppingCustom;
+		const activeInput =
+			this.isStreaming &&
+			options?.triggerTurn !== false &&
+			!this._isStoppingCustom &&
+			!this._manualBackgroundController;
 		const lane = activeInput
 			? options?.deliverAs === "followUp"
 				? "followUp"
@@ -3640,6 +3652,7 @@ export class AgentSession {
 			key: options?.orderKey === undefined ? `type:${message.customType}` : `key:${options.orderKey}`,
 			lane,
 			state: activeInput ? "queued" : options?.triggerTurn ? "held" : "buffered",
+			delivery: options?.deliverAs === "followUp" ? "followUp" : "steer",
 		};
 		if (lane === "passive") {
 			item.riderOf = [...this._customStore.values()].findLast(
@@ -3657,6 +3670,7 @@ export class AgentSession {
 			if (lane === "followUp") this.agent.followUp(appMessage);
 			else this.agent.steer(appMessage);
 		} else if (options?.triggerTurn) {
+			if (this._manualBackgroundController) return;
 			try {
 				await this._startRun({ messageType: "custom", message: appMessage });
 			} catch (error) {
@@ -4272,7 +4286,11 @@ export class AgentSession {
 		return this._background.start({
 			...options,
 			settings: this.settingsManager.getCompactionSettings(model),
-			blockingCompaction: this.isCompacting,
+			blockingCompaction: !!(
+				this._compactionAbortController ||
+				this._autoCompactionAbortController ||
+				this._branchSummaryAbortController
+			),
 			accountUsage: (usage) => {
 				this.sessionManager.appendUsage(
 					"background-compaction",
@@ -4375,6 +4393,107 @@ export class AgentSession {
 		}
 	}
 
+	/** Explicit blocking adoption. The manual reservation covers append and all notifications. */
+	async compactNow(
+		customInstructions?: string,
+	): Promise<
+		BackgroundCompactionInstallResult | { status: "released" } | { status: "compacted"; result: CompactionResult }
+	> {
+		if (this._manualBackgroundController) throw new Error("Compaction is already in progress");
+		do {
+			await this.abort();
+		} while (this.isStreaming);
+		if (this._manualBackgroundController) throw new Error("Compaction is already in progress");
+		const controller = new AbortController();
+		this._manualBackgroundController = controller;
+		let applied = false;
+		try {
+			const started = this.startBackgroundCompaction({ source: "user", customInstructions });
+			if (started.status === "unavailable") {
+				const result = await this._compactBlocking(customInstructions);
+				applied = true;
+				return { status: "compacted", result };
+			}
+			const result = await this._background.waitAndInstall({
+				carry: "desired",
+				hardThreshold: this._hardCompactionThreshold(this._limitsModel()),
+				waitSignal: controller.signal,
+			});
+			applied = result.status === "applied";
+			return result.status === "aborted" ? { status: "released" } : result;
+		} finally {
+			if (this._manualBackgroundController === controller) this._manualBackgroundController = undefined;
+			try {
+				if (applied && !controller.signal.aborted && !this._disposed && !this._admissionClosed)
+					this._releaseCompactionInput();
+				else this._writeStoppedCustomMessages();
+			} catch (error) {
+				this._extensionRunner.emitError({
+					...SESSION_PERSISTENCE_REPORT,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			} finally {
+				this._resolveIdleWaitIfIdle();
+			}
+		}
+	}
+
+	/** Installation opens admission before starting held input; release/stop never starts it. */
+	private _releaseCompactionInput(): void {
+		const triggers = [...this._customStore.values()].filter(
+			(item) => item.state === "held" && item.lane === "trigger",
+		);
+		const first = triggers.shift();
+		for (const item of triggers) {
+			item.state = "queued";
+			item.lane = item.delivery ?? "steer";
+			if (item.lane === "followUp") this.agent.followUp(item.handle);
+			else this.agent.steer(item.handle);
+		}
+		let run: Promise<void> | undefined;
+		if (first) run = this._startRun({ messageType: "custom", message: first.handle });
+		else {
+			for (const [handle, queued] of this._queuedUserInput) {
+				if (!this.agent.removeQueued(handle)) continue;
+				this._queuedUserInput.delete(handle);
+				const mirror = queued.lane === "steering" ? this._steeringMessages : this._followUpMessages;
+				const index = mirror.indexOf(queued.text);
+				if (index !== -1) mirror.splice(index, 1);
+				this._emitQueueUpdate();
+				run = this._startRun({
+					messageType: "user",
+					prompt: queued.text,
+					images:
+						handle.role === "user" && Array.isArray(handle.content)
+							? handle.content.filter((part): part is ImageContent => part.type === "image")
+							: undefined,
+				});
+				break;
+			}
+		}
+		void run?.catch((error) =>
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "send_message",
+				error: error instanceof Error ? error.message : String(error),
+			}),
+		);
+	}
+
+	private async _raceCompaction<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+		let stop = () => {};
+		try {
+			return await new Promise<T>((resolve, reject) => {
+				stop = () => reject(new DOMException("Compaction cancelled", "AbortError"));
+				if (signal.aborted) stop();
+				else signal.addEventListener("abort", stop, { once: true });
+				void operation.then(resolve, reject);
+			});
+		} finally {
+			signal.removeEventListener("abort", stop);
+		}
+	}
+
 	/** Generate Pi's built-in compaction summary for manual and automatic compaction. */
 	private async _runDefaultCompaction(
 		preparation: CompactionPreparation,
@@ -4423,6 +4542,10 @@ export class AgentSession {
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
+		return this._compactBlocking(customInstructions);
+	}
+
+	private async _compactBlocking(customInstructions?: string): Promise<CompactionResult> {
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
@@ -4450,15 +4573,18 @@ export class AgentSession {
 			let extensionCompaction: CompactionResult | undefined;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const result = (await this._extensionRunner.emit({
-					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntries,
-					customInstructions,
-					reason: "manual",
-					willRetry: false,
-					signal: this._compactionAbortController.signal,
-				})) as SessionBeforeCompactResult | undefined;
+				const result = (await this._raceCompaction(
+					this._extensionRunner.emit({
+						type: "session_before_compact",
+						preparation,
+						branchEntries: pathEntries,
+						customInstructions,
+						reason: "manual",
+						willRetry: false,
+						signal: this._compactionAbortController.signal,
+					}),
+					this._compactionAbortController.signal,
+				)) as SessionBeforeCompactResult | undefined;
 
 				if (result?.cancel) {
 					cancelledByExtension = true;
@@ -4486,12 +4612,15 @@ export class AgentSession {
 				details = extensionCompaction.details;
 			} else {
 				// Shared default summary generator, also used by automatic compaction.
-				const result = await this._runDefaultCompaction(
-					preparation,
-					model,
-					customInstructions,
+				const result = await this._raceCompaction(
+					this._runDefaultCompaction(
+						preparation,
+						model,
+						customInstructions,
+						this._compactionAbortController.signal,
+						"manual",
+					),
 					this._compactionAbortController.signal,
-					"manual",
 				);
 				summary = result.summary;
 				firstKeptEntryId = result.firstKeptEntryId;
@@ -4571,6 +4700,7 @@ export class AgentSession {
 	 */
 	abortCompaction(): void {
 		this._background.abortWait();
+		this._manualBackgroundController?.abort();
 		if (this._isAgentRunActive && this.isCompacting) this._requestRunStop();
 		this._compactionAbortController?.abort();
 		this._autoCompactionAbortController?.abort();
@@ -4764,7 +4894,12 @@ export class AgentSession {
 		carry: CompactionCarry = "delivered",
 		checkModel = this._limitsModel(),
 	): Promise<boolean> {
-		if (await this._backgroundGate(carry, checkModel, true)) return willRetry || this.agent.hasQueuedMessages();
+		try {
+			if (await this._backgroundGate(carry, checkModel, true)) return willRetry || this.agent.hasQueuedMessages();
+		} catch (error) {
+			if (this._agentRunAbortRequested) return false;
+			throw error;
+		}
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -4793,15 +4928,18 @@ export class AgentSession {
 			let extensionCompaction: CompactionResult | undefined;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const extensionResult = (await this._extensionRunner.emit({
-					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntries,
-					customInstructions: undefined,
-					reason,
-					willRetry,
-					signal: abortController.signal,
-				})) as SessionBeforeCompactResult | undefined;
+				const extensionResult = (await this._raceCompaction(
+					this._extensionRunner.emit({
+						type: "session_before_compact",
+						preparation,
+						branchEntries: pathEntries,
+						customInstructions: undefined,
+						reason,
+						willRetry,
+						signal: abortController.signal,
+					}),
+					abortController.signal,
+				)) as SessionBeforeCompactResult | undefined;
 
 				if (extensionResult?.cancel) {
 					cancelledByExtension = true;
@@ -4830,12 +4968,9 @@ export class AgentSession {
 				details = extensionCompaction.details;
 			} else {
 				// Shared default summary generator, also used by manual compaction.
-				const compactResult = await this._runDefaultCompaction(
-					preparation,
-					model,
-					undefined,
+				const compactResult = await this._raceCompaction(
+					this._runDefaultCompaction(preparation, model, undefined, abortController.signal, reason),
 					abortController.signal,
-					reason,
 				);
 				summary = compactResult.summary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
@@ -4881,6 +5016,7 @@ export class AgentSession {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "compaction failed";
 			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
+			if (aborted && this.isStreaming) this._requestRunStop();
 			if (started) {
 				const errorMessage = aborted
 					? undefined
