@@ -3495,11 +3495,17 @@ export class InteractiveMode {
 	private beginBackgroundCompactionWait(jobId: string): void {
 		if (this.backgroundCompactionWait?.jobId === jobId) return;
 		if (this.backgroundCompactionWait) this.endBackgroundCompactionWait(this.backgroundCompactionWait.jobId, false);
+		const previous = this.defaultEditor.onEscape;
 		const handler = () => {
+			// A dialog may restore this closure after release. It no longer owns Escape then.
+			if (this.backgroundCompactionWait?.handler !== handler) {
+				(this.backgroundCompactionWait?.handler ?? previous)?.();
+				return;
+			}
 			this.lastEscapeTime = 0;
 			this.restoreQueuedMessagesToEditor({ abort: true });
 		};
-		this.backgroundCompactionWait = { jobId, previous: this.defaultEditor.onEscape, handler };
+		this.backgroundCompactionWait = { jobId, previous, handler };
 		this.defaultEditor.onEscape = handler;
 		this.showStatusIndicator(new BackgroundCompactionStatusIndicator(this.ui));
 	}

@@ -184,12 +184,18 @@ describe("Interactive background compaction Esc (real setupKeyHandlers and core)
 		await vi.waitFor(() =>
 			expect(h.eventsOfType("session_background_compaction").some((e) => e.phase === "waiting")).toBe(true),
 		);
+		const displacedWaitHandler = mode.defaultEditor.onEscape;
 		const dialog = vi.fn();
 		mode.defaultEditor.onEscape = dialog;
 		h.session.cancelBackgroundCompaction();
 		await now;
 		await vi.waitFor(() => expect(mode.clearStatusIndicator).toHaveBeenCalledWith("backgroundCompaction"));
 		expect(mode.defaultEditor.onEscape).toBe(dialog);
+		// A dialog may later restore the handler it displaced. It must delegate after its wait ended.
+		mode.defaultEditor.onEscape = displacedWaitHandler;
+		mode.defaultEditor.onEscape?.();
+		mode.defaultEditor.onEscape?.();
+		expect(mode.showTreeSelector).toHaveBeenCalledTimes(1);
 	});
 
 	it("/compact starts in background; --cancel does not wait for a signal-ignoring hook", async () => {

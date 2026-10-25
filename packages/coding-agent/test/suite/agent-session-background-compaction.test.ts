@@ -371,6 +371,64 @@ describe("AgentSession background compaction integration", () => {
 		expect(f.h.session.isIdle).toBe(true);
 	});
 
+	it.each(["abort", "cancel"] as const)(
+		"mid-run L3 %s stops before queue admission and receipts running/stopped once",
+		async (action) => {
+			const f = await setup(false, async () => {
+				await f.h.session.sendCustomMessage(
+					{ customType: "large", content: "x".repeat(64000), display: false },
+					{ triggerTurn: false },
+				);
+				await f.h.session.sendCustomMessage(
+					{ customType: "task", content: "running", display: false },
+					{ deliverAs: "steer", orderKey: "task" },
+				);
+				await f.h.session.steer("unsent");
+			});
+			f.h.session.startBackgroundCompaction({ source: "user" });
+			f.h.setResponses([fauxAssistantMessage([fauxToolCall("step", {})]), fauxAssistantMessage("must not send")]);
+			const waiting = phase(f.h, "waiting");
+			const run = f.h.session.prompt("go");
+			await waiting;
+			await f.h.session.sendCustomMessage(
+				{ customType: "task", content: "stopped", display: false },
+				{ triggerTurn: false, orderKey: "task" },
+			);
+			if (action === "abort") await f.h.session.abort();
+			else f.h.session.cancelBackgroundCompaction();
+			await run;
+			expect(f.h.getPendingResponseCount()).toBe(1);
+			expect(f.h.eventsOfType("agent_settled").at(-1)).toMatchObject({ aborted: true });
+			expect(f.h.session.clearQueue()).toEqual({ steering: ["unsent"], followUp: [] });
+			expect(
+				f.h.sessionManager
+					.getBranch()
+					.flatMap((entry) =>
+						entry.type === "custom_message" && entry.customType === "task" ? [entry.content] : [],
+					),
+			).toEqual(["running", "stopped"]);
+			if (action === "abort") expect(f.h.session.getBackgroundCompaction()?.phase).toBe("summarizing");
+			else expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
+		},
+	);
+
+	it("a ready job too large for a newly selected model terminates without an automatic background relaunch", async () => {
+		const f = await setup();
+		f.h.session.setAutoCompactionEnabled(false);
+		f.h.session.startBackgroundCompaction({ source: "user" });
+		const ready = phase(f.h, "ready");
+		f.finish();
+		await ready;
+		f.h.session.agent.state.model = { ...f.h.getModel(), contextWindow: 1100 };
+		await f.h.session.prompt("new model");
+		expect(f.h.sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(0);
+		expect(
+			f.h.eventsOfType("session_background_compaction").filter((event) => event.phase === "discarded"),
+		).toMatchObject([{ cause: "insufficient" }]);
+		expect(f.h.session.getBackgroundCompaction()).toBeUndefined();
+		expect(f.cuts).toBe(1);
+	});
+
 	it("Q13 stops at a signal-ignoring blocking hook before draining the next batch", async () => {
 		const never = deferred<{ compaction: CompactionResult }>();
 		const f = await setup(
