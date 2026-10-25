@@ -591,10 +591,15 @@ export class RpcClient {
 		const fullCommand = { ...command, id } as RpcCommand;
 
 		return new Promise((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				this.pendingRequests.delete(id);
-				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-			}, 30000);
+			// An explicit summary wait commonly exceeds 30s. Its caller can release it with abort();
+			// process/stdin failure still rejects it through rejectPendingRequests().
+			const timeout =
+				command.type === "compact" && command.mode === "now"
+					? undefined
+					: setTimeout(() => {
+							this.pendingRequests.delete(id);
+							reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
+						}, 30000);
 
 			this.pendingRequests.set(id, {
 				resolve: (response) => {

@@ -387,7 +387,7 @@ To abort the active run, reserve admission, and wait for installation:
 {"id":"cut-now","type":"compact","mode":"now"}
 ```
 
-Prompts queue during this wait. The response data is the installation outcome: `{status: "applied", entryId}`, `{status: "released"}` on `abort`, or `{status: "discarded", cause}` / `{status: "unavailable"}` when adoption is unavailable. If launch is unavailable, the existing blocking compaction runs instead and returns `{status: "compacted", result}` with the usual compaction result. `abort` releases a wait without cancelling the summary or sending queued input. `RpcClient.compact()` starts a background job; `RpcClient.compactNow()` waits.
+Prompts queue during this wait. The response data is the installation outcome: `{status: "applied", entryId}`, `{status: "released"}` on `abort`, or `{status: "discarded", cause}` / `{status: "unavailable"}` when adoption is unavailable. If launch is unavailable, the existing blocking compaction runs instead and returns `{status: "compacted", result}` with the usual compaction result. `abort` releases a wait without cancelling the summary or sending queued input. `RpcClient.compact()` starts a background job; `RpcClient.compactNow()` waits without the normal 30-second command deadline. Send `abort` to release that wait; process failure still rejects it.
 
 ### cancel_background_compaction
 
