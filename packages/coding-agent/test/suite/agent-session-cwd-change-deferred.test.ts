@@ -1,4 +1,5 @@
 import { rmSync } from "node:fs";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cwdFixture } from "./cwd-change-fixture.ts";
 import { getMessageText } from "./harness.ts";
@@ -122,6 +123,194 @@ describe("deferred cwd requests", () => {
 			).toHaveLength(1);
 		},
 	);
+
+	it("provider errors still settle into an applied change", async () => {
+		const f = await fixture({ settings: { retry: { enabled: false } } });
+		f.seed.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "offline error" })]);
+		const run = f.runtime.session.prompt("error");
+		const request = f.runtime.session.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		await run;
+		expect(await request.completion).toBe("applied");
+	});
+
+	it("queued steer and follow-up, then a settle-triggered custom run all use the old cwd", async () => {
+		const f = await fixture();
+		let finish!: () => void;
+		const waiting = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const observed: string[] = [];
+		f.seed.setResponses([
+			async () => {
+				await waiting;
+				observed.push(f.runtime.cwd);
+				return fauxAssistantMessage("first");
+			},
+			...Array.from({ length: 4 }, () => () => {
+				observed.push(f.runtime.cwd);
+				return fauxAssistantMessage("next");
+			}),
+		]);
+		const old = f.runtime.session;
+		let chained = false;
+		old.subscribe((event) => {
+			if (event.type === "agent_settled" && !chained) {
+				chained = true;
+				void old.sendCustomMessage(
+					{ customType: "task", content: "task completion", display: true },
+					{ triggerTurn: true },
+				);
+			}
+		});
+		const run = old.prompt("hello");
+		const request = old.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		await old.steer("steer");
+		await old.followUp("follow up");
+		finish();
+		await run;
+		expect(await request.completion).toBe("applied");
+		expect(observed.length).toBeGreaterThanOrEqual(3);
+		expect(observed.every((cwd) => cwd === f.a)).toBe(true);
+	});
+
+	it.each(["answer-first", "reload-first"] as const)(
+		"trust waiting across reload: %s applies once, without another dialog",
+		async (order) => {
+			const f = await fixture();
+			await f.runtime.session.prompt("hello");
+			let answer!: (value: boolean) => void;
+			const trust = vi.fn(
+				() =>
+					new Promise<boolean>((resolve) => {
+						answer = resolve;
+					}),
+			);
+			f.runtime.setResolveTargetTrust(trust);
+			const old = f.runtime.session;
+			const request = old.requestCwdChange(f.b);
+			if (request.status !== "pending") throw new Error("rejected");
+			await tick();
+			let releaseReload!: () => void;
+			const reloadWait = new Promise<void>((resolve) => {
+				releaseReload = resolve;
+			});
+			const reload = old.reload({ beforeSessionStart: () => reloadWait });
+			if (order === "answer-first") {
+				answer(true);
+				await tick();
+				releaseReload();
+				await reload;
+			} else {
+				releaseReload();
+				await reload;
+				answer(true);
+			}
+			expect(await request.completion).toBe("applied");
+			expect(trust).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it("a run arriving during trust is delivered once and the change re-pends with the answer cached", async () => {
+		const f = await fixture();
+		await f.runtime.session.prompt("hello");
+		let answer!: (value: boolean) => void;
+		let finish!: () => void;
+		const trust = vi.fn(
+			() =>
+				new Promise<boolean>((resolve) => {
+					answer = resolve;
+				}),
+		);
+		f.runtime.setResolveTargetTrust(trust);
+		const old = f.runtime.session;
+		const request = old.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		await tick();
+		const waiting = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		f.seed.setResponses([
+			async () => {
+				await waiting;
+				return fauxAssistantMessage("task done");
+			},
+		]);
+		const run = old.sendCustomMessage(
+			{ customType: "task", content: "completion", display: true },
+			{ triggerTurn: true },
+		);
+		answer(true);
+		await tick();
+		expect(f.runtime.cwd).toBe(f.a);
+		expect(old.pendingCwdChange?.state).toBe("pending");
+		finish();
+		await run;
+		expect(await request.completion).toBe("applied");
+		expect(trust).toHaveBeenCalledTimes(1);
+		expect(f.runtime.session.messages.filter((m) => m.role === "custom" && m.customType === "task")).toHaveLength(1);
+	});
+
+	it("a drained requestNewSession receipts the cancelled cwd on the old file, not the new one", async () => {
+		let first = true;
+		let completion: Promise<string> | undefined;
+		let destination = "";
+		const f = await fixture({
+			persist: true,
+			extension: (pi) => {
+				pi.on("agent_end", async (_event, ctx) => {
+					if (!first) return;
+					first = false;
+					const change = ctx.requestCwdChange!(destination);
+					if (change.status !== "pending") throw new Error("rejected");
+					completion = change.completion;
+					await ctx.requestNewSession();
+				});
+			},
+		});
+		destination = f.b;
+		const old = f.runtime.session;
+		await old.prompt("replace in loop");
+		expect(await completion).toBe("cancelled");
+		expect(f.runtime.session).not.toBe(old);
+		expect(
+			old.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === "pi.cwd"),
+		).toHaveLength(1);
+		expect(f.runtime.session.messages).toEqual([]);
+	});
+
+	it.each([false, true])("plain compact keeps a pending change; --now=%s cancels it", async (now) => {
+		const f = await fixture({
+			settings: { compaction: { enabled: false, keepRecentTokens: 10, reserveTokens: 0 } },
+			extension: (pi) => {
+				pi.on("session_before_compact", () => new Promise(() => {}));
+			},
+		});
+		await f.runtime.session.prompt(`old ${"x".repeat(1000)}`);
+		await f.runtime.session.prompt(`recent ${"y".repeat(200)}`);
+		const old = f.runtime.session;
+		const request = old.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		if (now) {
+			const compact = old.compactNow();
+			expect(await request.completion).toBe("cancelled");
+			await tick();
+			old.abortCompaction();
+			await compact;
+		} else {
+			const events: string[] = [];
+			old.subscribe((event) => {
+				if (event.type === "session_background_compaction" && event.cause) events.push(event.cause);
+			});
+			expect(old.startBackgroundCompaction({ source: "user" }).status).toBe("started");
+			expect(old.pendingCwdChange).toBeDefined();
+			expect(await request.completion).toBe("applied");
+			expect(events).toContain("reload");
+		}
+	});
 
 	it("target removed during trust fails once without relocation", async () => {
 		const f = await fixture();

@@ -11,10 +11,17 @@ import {
 import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { type Settings, SettingsManager } from "../../src/core/settings-manager.ts";
+import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import { createHarness } from "./harness.ts";
 
 export async function cwdFixture(
-	options: { extension?: ExtensionFactory; settings?: Settings; tools?: string[]; persist?: boolean } = {},
+	options: {
+		extension?: ExtensionFactory;
+		settings?: Settings;
+		tools?: string[];
+		persist?: boolean;
+		codemode?: boolean;
+	} = {},
 ) {
 	const seed = await createHarness({
 		models: [
@@ -43,6 +50,9 @@ export async function cwdFixture(
 				noPromptTemplates: true,
 				noThemes: true,
 				extensionFactories: [
+					...(options.codemode
+						? [{ name: "codemode", builtin: true as const, factory: createCodemodeExtension() }]
+						: []),
 					(pi) => {
 						pi.registerProvider(seed.getModel().provider, {
 							baseUrl: seed.getModel().baseUrl,
@@ -72,8 +82,20 @@ export async function cwdFixture(
 	const manager = options.persist ? SessionManager.create(a, join(root, "sessions-a")) : SessionManager.inMemory(a);
 	const runtime = await createAgentSessionRuntime(factory, { cwd: a, agentDir, sessionManager: manager });
 	runtime.setSessionDirResolver((cwd) => join(root, cwd === a ? "sessions-a" : "sessions-b"));
-	runtime.setRebindSession(async (session) => session.bindExtensions({ mode: "tui" }));
-	await runtime.session.bindExtensions({ mode: "tui" });
+	const bind = async () =>
+		runtime.session.bindExtensions({
+			mode: "tui",
+			commandContextActions: {
+				waitForIdle: () => runtime.session.waitForIdle(),
+				newSession: (options) => runtime.newSession(options),
+				fork: (entryId, options) => runtime.fork(entryId, options),
+				navigateTree: (targetId, options) => runtime.session.navigateTree(targetId, options),
+				switchSession: (path, options) => runtime.switchSession(path, options),
+				reload: () => runtime.session.reload(),
+			},
+		});
+	runtime.setRebindSession(bind);
+	await bind();
 	seed.setResponses(Array.from({ length: 30 }, () => fauxAssistantMessage("ok")));
 	return {
 		runtime,
