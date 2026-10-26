@@ -27,6 +27,7 @@ import {
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
+import { createCwdSessionDirResolver, cwdSessionArgs } from "./cli/cwd-change.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
@@ -69,7 +70,7 @@ import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { initTheme, setThemeJsonValidator, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { validateThemeJson } from "./modes/interactive/theme/theme-schema.ts";
 import { cleanupManagedInstall, handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
-import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import { isLocalPath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP_NAME} -ne".`;
@@ -701,10 +702,13 @@ export async function main(args: string[], options?: MainOptions) {
 	// the target session cwd is known. The startup-cwd settings manager is used only for
 	// sessionDir lookup during session selection.
 	const envSessionDir = process.env[ENV_SESSION_DIR];
-	const sessionDir =
-		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
-		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
-		startupSettingsManager.getSessionDir();
+	const dirFor = createCwdSessionDirResolver({
+		launchCwd: cwd,
+		agentDir,
+		flag: parsed.sessionDir,
+		environment: envSessionDir,
+	});
+	const sessionDir = dirFor(cwd);
 	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
 	if (missingSessionCwdIssue) {
@@ -745,13 +749,16 @@ export async function main(args: string[], options?: MainOptions) {
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+	let launchApiKeyProvider: string | undefined;
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd,
 		agentDir,
 		sessionManager,
 		sessionStartEvent,
 		projectTrustContext,
+		carry,
 	}) => {
+		const isCwd = sessionStartEvent?.reason === "cwd";
 		const isInitialRuntime = sessionStartEvent === undefined;
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
 		const cachedProjectTrust = projectTrustByCwd.get(cwd);
@@ -764,6 +771,7 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
+		if (carry) runtimeSettingsManager.holdSessionValues(carry.heldSettings);
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -835,22 +843,23 @@ export async function main(args: string[], options?: MainOptions) {
 			cliThinkingFromModel,
 			diagnostics: sessionOptionDiagnostics,
 		} = buildSessionOptions(
-			parsed,
+			isCwd ? cwdSessionArgs(parsed) : parsed,
 			scopedModels,
-			sessionManager.buildSessionContext().messages.length > 0,
+			isCwd || sessionManager.buildSessionContext().messages.length > 0,
 			modelRuntime,
 			settingsManager,
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
 
+		if (isInitialRuntime) launchApiKeyProvider = sessionOptions.model?.provider;
 		if (parsed.apiKey) {
-			if (!sessionOptions.model) {
+			if (!launchApiKeyProvider) {
 				diagnostics.push({
 					type: "error",
 					message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
 				});
 			} else {
-				await modelRuntime.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
+				await modelRuntime.setRuntimeApiKey(launchApiKeyProvider, parsed.apiKey);
 			}
 		}
 
@@ -858,6 +867,7 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
+			carry,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
@@ -866,7 +876,7 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
-		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
+		const cliThinkingOverride = !isCwd && (parsed.thinking !== undefined || cliThinkingFromModel);
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);
 		}
@@ -882,6 +892,28 @@ export async function main(args: string[], options?: MainOptions) {
 		cwd: sessionManager.getCwd(),
 		agentDir,
 		sessionManager,
+	});
+	runtime.setSessionDirResolver(dirFor);
+	runtime.setAmbientCwdHandler((target) => process.chdir(target));
+	runtime.setResolveTargetTrust(async (target, context) => {
+		const cached = projectTrustByCwd.get(target);
+		if (cached !== undefined) return cached;
+		const trusted = await resolveProjectTrusted({
+			cwd: target,
+			trustStore,
+			trustOverride: parsed.projectTrustOverride,
+			defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),
+			projectTrustContext:
+				context ??
+				createProjectTrustContext({
+					cwd: target,
+					mode: appMode,
+					settingsManager: startupSettingsManager,
+					hasUI: false,
+				}),
+		});
+		projectTrustByCwd.set(target, trusted);
+		return trusted;
 	});
 	time("createAgentSessionRuntime");
 	const { services, session, modelFallbackMessage } = runtime;
