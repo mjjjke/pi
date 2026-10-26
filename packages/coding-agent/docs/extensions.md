@@ -81,7 +81,8 @@ Automatic retries, recovery, compaction, or queued work can continue afterward.
 <a id="agent_start--agent_end--agent_before_settle--agent_settled"></a>
 
 `agent_before_settle` is the final actionable boundary: it can append entries and request one continuation.
-`agent_settled` is final and notification-only; use it when an integration needs to know Pi will not continue automatically.
+`agent_settled` is final and notification-only for that run. A pending model cwd change can apply on the
+next idle tick and start a new run in a replacement runtime (see [cwd requests](#ctxrequestcwdchangepath-options)).
 
 <a id="extensionapi-methods"></a>
 
@@ -117,7 +118,7 @@ Use each event’s declared result type rather than assuming every return value 
 
 Events cover resource discovery, sessions, agent and message lifecycle, providers, tools, and raw input.
 
-`before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`. `event.messageType` says what started the run: `"user"` for a prompt or `pi.sendUserMessage()`, with `prompt` and `images`; `"custom"` for `pi.sendMessage(..., { triggerTurn: true })`, with the starting `message` and no `prompt`. A returned `message` is added to either kind of run; check `messageType` to skip runs started by custom messages. Prefer changing prompt sections, selected tools, or guidelines so Pi can append a transcript delta. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for that run while the transcript continues recording the structured sections. Providers receive the forced text as their leading system prompt.
+`before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`. `event.messageType` says what started the run: `"user"` for a prompt or `pi.sendUserMessage()`, with `prompt` and `images`; `"custom"` for `pi.sendMessage(..., { triggerTurn: true })` or an applied model cwd request, with the starting `message` and no `prompt`. A returned `message` is added to either kind of run; check `messageType` to skip runs started by custom messages. Prefer changing prompt sections, selected tools, or guidelines so Pi can append a transcript delta. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for that run while the transcript continues recording the structured sections. Providers receive the forced text as their leading system prompt.
 
 Idle custom runs deferred from `agent_settled` also run this preflight. Their `message` preserves the complete custom envelope, including `customType`, `content`, `display`, and `details`. Custom content does not pass through `input`, commands, skills, or prompt-template expansion and is not normalized as a user image attachment. Queued steer/follow-up delivery, retries, compaction recovery, and boundary continuations stay in the prepared session run and do not repeat this hook. This fork additionally cancels user and custom preflight when session admission closes, rejects losing concurrent starters before they can change the active run, and holds explicit passive custom messages received during custom preflight until the turn boundary.
 
@@ -410,8 +411,18 @@ calls run after that bootstrap. Startup handlers must wait until the first run h
 Admission is not execution: after the current run settles, core applies the change on the next tick at
 the first idle point with no queued input, foreground compaction, shell command or readiness barrier.
 Do not await `completion` from a tool or lifecycle handler. It resolves to `"applied"`, `"cancelled"`,
-`"untrusted"` or `"failed"`. Core writes one passive outcome per admitted request; it never starts a
-response to that notice.
+`"untrusted"` or `"failed"`. Core writes one outcome per admitted request. An applied model request
+starts one new run in the destination after its `session_start` handlers finish. The request includes
+the persisted cwd notice, destination startup context (such as a handoff snapshot), then the appended
+system patch; it adds no user message and does not duplicate the notice. `before_agent_start` receives
+`messageType: "custom"` with the already-recorded cwd notice as its trigger envelope.
+
+A prompt submitted during destination startup owns that run instead of starting a second automatic
+run; asynchronous input/auth preflight holds the automatic wakeup until the prompt starts or is handled.
+Queued input joins the run through the normal queues. A stop, quit, tree navigation, replacement or
+disposal suppresses the wakeup, including after publication while destination startup is pending.
+Cancelled, untrusted, failed and rejected changes do not start a run; the user's own `/cd` stays passive.
+The notice remains a context marker, so an unrelated `continue()` never answers it.
 Only one request can occupy the slot, including while destination trust is being resolved.
 
 Stopping the conversation (`abort()`), tree navigation, session replacement and disposal cancel a

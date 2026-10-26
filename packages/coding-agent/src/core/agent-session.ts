@@ -665,6 +665,7 @@ export class AgentSession {
 	private _isDrainingNewSessionRequest = false;
 	private _pendingNewSessionRequest: PendingNewSessionRequest | undefined;
 	private _pendingCwdChange?: PendingCwdChange;
+	private _cwdContinuation?: { message: CustomMessage; inputs: number; ready: boolean };
 	private _cwdChangeHandler?: CwdChangeHandler;
 	private _validateCwdChange?: (path: string) => string;
 	private _cwdImmediate?: ReturnType<typeof setImmediate>;
@@ -931,10 +932,49 @@ export class AgentSession {
 	}
 
 	private _cancelPendingCwd(cause: string): void {
+		this._cwdContinuation = undefined;
 		const slot = this._pendingCwdChange;
-		if (!slot || slot.state === "applying") return;
+		if (!slot) return;
+		slot.continuationCancelled = true;
+		if (slot.state === "applying") return;
 		this._pendingCwdChange = undefined;
 		if (slot.source === "model") this._cwdOutcome(slot, "cancelled", cause);
+	}
+
+	/** @internal Arm before destination binding; a stop or another starter consumes the wakeup. */
+	prepareCwdContinuation(): () => void {
+		const notice = this.messages.findLast(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "pi.cwd",
+		);
+		if (!notice) return () => {};
+		// Preflight handlers receive a trigger, not mutable access to already-recorded history.
+		const pending = { message: structuredClone(notice), inputs: 0, ready: false };
+		this._cwdContinuation = pending;
+		return () => {
+			pending.ready = true;
+			this._startCwdContinuation(pending);
+		};
+	}
+
+	private _startCwdContinuation(pending: NonNullable<AgentSession["_cwdContinuation"]>): void {
+		if (
+			this._cwdContinuation !== pending ||
+			!pending.ready ||
+			pending.inputs ||
+			this._disposed ||
+			this._admissionClosed
+		)
+			return;
+		// Reuse the persisted notice as the trigger envelope, never append it a second time.
+		void this._startRun(
+			{ messageType: "custom", message: pending.message },
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			true,
+		).catch((error) => this._reportBootstrapError(error));
 	}
 
 	private _cwdOutcome(slot: PendingCwdChange, kind: "cancelled" | "failed", cause: string, untrusted = false): void {
@@ -2608,7 +2648,9 @@ export class AgentSession {
 		// Cancellation announces synchronously; observers must not admit new work.
 		this._disposing = true;
 		this.closeAdmission();
-		this._cancelPendingCwd("the session was closed or replaced");
+		// The runtime's internal cwd transfer is not a user stop of the applied request.
+		if (!options?.keepSessionResources || this._pendingCwdChange?.state !== "applying")
+			this._cancelPendingCwd("the session was closed or replaced");
 		if (this._cwdImmediate) clearImmediate(this._cwdImmediate);
 		this._cwdImmediate = undefined;
 		this._background.abortNotifications();
@@ -3101,6 +3143,7 @@ export class AgentSession {
 		deferredStart?: DeferredStart,
 		onStartMessagePersistence?: (outcome: StartMessagePersistence) => void,
 		manualAdmission?: { stopGeneration: number; followUp: boolean; onQueued(): void },
+		startRecorded = false,
 	): Promise<void> {
 		// Readiness barrier: a run requested during binding or reload starts after it. The loop awaits
 		// only while a barrier exists, so its last check and the reservation below run in the same
@@ -3110,6 +3153,9 @@ export class AgentSession {
 			await this._readiness;
 		}
 		this._throwIfAdmissionChanged(admissionGen);
+		// A stop during a newer readiness barrier must not revive the cwd wakeup afterwards.
+		if (startRecorded && (trigger.messageType !== "custom" || this._cwdContinuation?.message !== trigger.message))
+			return;
 		// After an ambiguous append the session refuses runs until it is reopened (§3.6).
 		const persistenceError = this.sessionManager.getPersistenceError();
 		if (persistenceError) throw persistenceError;
@@ -3134,6 +3180,7 @@ export class AgentSession {
 			);
 		}
 		this._isAgentRunActive = true;
+		this._cwdContinuation = undefined;
 		this._agentRunAbortRequested = false;
 		deferredStart?.release();
 		let prepared: PreparedRun;
@@ -3223,8 +3270,13 @@ export class AgentSession {
 				return failStart(error);
 			}
 		}
-		const messages: AgentMessage[] = [...(update ? [update] : []), prepared.start, ...nextTurn, ...prepared.returned];
-		const runStart = { message: prepared.start, persisted: false };
+		const messages: AgentMessage[] = [
+			...(update ? [update] : []),
+			...(startRecorded ? [] : [prepared.start]),
+			...nextTurn,
+			...prepared.returned,
+		];
+		const runStart = { message: prepared.start, persisted: startRecorded };
 		this._runStart = runStart;
 		onStarted?.();
 
@@ -3474,7 +3526,18 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		await this._prompt(text, options, this._admissionGen);
+		// Input already in preflight owns this wakeup, even if an input/auth hook outlives binding.
+		// If it is handled without a run, release the wakeup after that preflight instead.
+		const pending = this._cwdContinuation;
+		if (pending) pending.inputs++;
+		try {
+			await this._prompt(text, options, this._admissionGen);
+		} finally {
+			if (pending) {
+				pending.inputs--;
+				this._startCwdContinuation(pending);
+			}
+		}
 	}
 
 	/**
@@ -3482,6 +3545,7 @@ export class AgentSession {
 	 * queued or starts a run, and later prompts are rejected. Used by RPC shutdown.
 	 */
 	closeAdmission(): void {
+		this._cwdContinuation = undefined;
 		this._admissionGen++;
 		this._admissionClosed = true;
 	}

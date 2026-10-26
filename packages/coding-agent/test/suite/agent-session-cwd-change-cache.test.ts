@@ -95,6 +95,31 @@ function prefix(before: string, after: string, transport: "anthropic" | "respons
 }
 
 describe("cwd final-wire cache contract", () => {
+	it("the automatic model-cd run extends the previous final-wire prefix", async () => {
+		const f = await cwdFixture();
+		try {
+			const contexts: Context[] = [];
+			f.seed.setResponses(
+				Array.from({ length: 4 }, () => (context) => {
+					contexts.push(structuredClone(context));
+					return fauxAssistantMessage("ok");
+				}),
+			);
+			f.runtime.setCwdChangeHandler((target, options) => f.runtime.changeCwd(target, options));
+			await f.runtime.session.prompt("move and keep working");
+			const request = f.runtime.session.requestCwdChange(f.b);
+			if (request.status !== "pending") throw new Error("rejected");
+			expect(await request.completion).toBe("applied");
+			await f.runtime.session.waitForIdle();
+			expect(contexts).toHaveLength(2);
+			for (const transport of ["anthropic", "responses"] as const) {
+				const bodies = await Promise.all(contexts.map((context) => wire(context, transport)));
+				prefix(bodies[0]!, bodies[1]!, transport);
+			}
+		} finally {
+			await f.cleanup();
+		}
+	});
 	it.each(["baseline", "images", "equal-reload", "codemode-only", "codemode-disabled"] as const)(
 		"%s preserves every old request byte on Anthropic and Responses",
 		async (scenario) => {

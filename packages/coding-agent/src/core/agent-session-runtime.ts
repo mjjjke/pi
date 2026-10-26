@@ -274,7 +274,10 @@ export class AgentSessionRuntime {
 						projectTrustContext: options.projectTrustContextFactory?.(plan.to),
 					}),
 				);
+				const destination = this.session;
+				const continueRun = slot.source === "model" ? destination.prepareCwdContinuation() : undefined;
 				await this.finishSessionReplacement(options.withSession);
+				if (this.session === destination && !slot.continuationCancelled) continueRun?.();
 				return { changed: true, from: plan.from, to: plan.to, ...(warning ? { warning } : {}) };
 			} catch (error) {
 				if (manager.getCwd() === plan.to) throw error;

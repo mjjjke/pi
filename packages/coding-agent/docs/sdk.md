@@ -82,7 +82,13 @@ outgoing shutdown and before destination factories run.
 
 `setCwdChangeHandler(apply)` enables the optional extension `ctx.requestCwdChange()` API. Bind it only in a
 mode that can apply the operation and handle post-publication failures. Pi binds it in interactive mode,
-not RPC or print. See [deferred cwd requests](extensions.md#ctxrequestcwdchangepath-options).
+not RPC or print. An applied request from that API starts one destination run after `session_start`
+handlers finish, carrying the recorded outcome and destination startup context, without a new user
+message. Input submitted during startup owns that run instead of causing a second automatic run;
+input/auth preflight holds the automatic wakeup until that input starts or is handled. Stops, quit,
+tree navigation, replacement and disposal suppress the wakeup. Failed, refused or cancelled changes
+and `source: "user"` do not start a run. The cwd notice stays a context marker: ordinary `continue()`
+does not answer it. See [deferred cwd requests](extensions.md#ctxrequestcwdchangepath-options).
 
 ## Prompting
 
@@ -116,7 +122,8 @@ Session events report message updates, tool execution, queues, compaction, retri
 
 `message_end` contains the authoritative completed message. `agent_end` marks the end of one low-level agent run, but automatic recovery or queued work can still follow.
 
-Use `agent_settled` when the host needs to know that Pi will not continue automatically.
+`agent_settled` ends that run. A pending model cwd change can still apply on the next idle tick,
+replace the runtime and start one destination run; rebind subscriptions through the runtime host.
 
 ## Configuring a session
 

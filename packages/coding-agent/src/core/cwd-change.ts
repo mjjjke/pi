@@ -29,6 +29,8 @@ export interface PendingCwdChange {
 	source: "user" | "model";
 	state: "pending" | "trust" | "applying";
 	trusted?: boolean;
+	/** A stop after publication keeps the applied outcome but suppresses its new run. */
+	continuationCancelled?: boolean;
 	resolve: (outcome: CwdChangeCompletion) => void;
 }
 

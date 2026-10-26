@@ -1112,14 +1112,14 @@ export interface BeforeAgentStartUserEvent extends BeforeAgentStartEventBase {
 	images?: ImageContent[];
 }
 
-/** A run started by `pi.sendMessage(..., { triggerTurn: true })` while idle. */
+/** A run started by an idle triggering custom message or an applied model cwd request. */
 export interface BeforeAgentStartCustomEvent extends BeforeAgentStartEventBase {
 	messageType: "custom";
 	/** The custom message that starts the run. */
 	message: CustomMessage;
 }
 
-/** Fired before a run starts from a user message or an idle custom message with `triggerTurn`. */
+/** Fired before a user/custom run, including continuation after an applied model cwd request. */
 export type BeforeAgentStartEvent = BeforeAgentStartUserEvent | BeforeAgentStartCustomEvent;
 
 /** Fired when an agent loop starts */
