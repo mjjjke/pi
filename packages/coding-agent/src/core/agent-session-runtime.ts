@@ -3,7 +3,13 @@ import { basename, join, parse, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession, CwdCarry } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
-import { type ChangeCwdOptions, type ChangeCwdResult, type CwdChangeHandler, cwdAppliedNotice } from "./cwd-change.ts";
+import {
+	type ChangeCwdOptions,
+	type ChangeCwdResult,
+	type CwdChangeHandler,
+	cwdAppliedNotice,
+	resolveCwdTarget,
+} from "./cwd-change.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -166,7 +172,7 @@ export class AgentSessionRuntime {
 		this.session.setCwdChangeHandler(this.cwdChangeHandler, (path) => {
 			if (!path.trim()) throw new Error("Not changed: cd needs a directory in args.");
 			const manager = this.session.sessionManager;
-			const plan = manager.planCwdChange(path, this.sessionDirResolver);
+			const plan = manager.planCwdChange(resolveCwdTarget(path, manager.getCwd()), this.sessionDirResolver);
 			manager.preflightCwdChange(plan);
 			return plan.to;
 		});
@@ -183,7 +189,7 @@ export class AgentSessionRuntime {
 		if (error) return { changed: false, error };
 		let plan: CwdChangePlan;
 		try {
-			plan = manager.planCwdChange(target, this.sessionDirResolver);
+			plan = manager.planCwdChange(resolveCwdTarget(target, manager.getCwd()), this.sessionDirResolver);
 			manager.preflightCwdChange(plan);
 		} catch (error) {
 			return { changed: false, error: error instanceof Error ? error.message : String(error) };

@@ -771,7 +771,18 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed.projectTrustOverride ??
 				(!hasTrustRequiringResources || trustStore.get(cwd) === true));
 		const runtimeSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted });
-		if (carry) runtimeSettingsManager.holdSessionValues(carry.heldSettings);
+		const heldDifferences: string[] = [];
+		if (carry) {
+			const images = runtimeSettingsManager.getBlockImages();
+			const codemode = runtimeSettingsManager.getSettings().codemode?.mode ?? "on";
+			if (images !== carry.heldSettings.images.blockImages)
+				heldDifferences.push(
+					`images.blockImages ${carry.heldSettings.images.blockImages} (this project: ${images})`,
+				);
+			if (codemode !== carry.heldSettings.codemode.mode)
+				heldDifferences.push(`codemode.mode ${carry.heldSettings.codemode.mode} (this project: ${codemode})`);
+			runtimeSettingsManager.holdSessionValues(carry.heldSettings);
+		}
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -820,6 +831,14 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		const { settingsManager, modelRuntime, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
+			...(heldDifferences.length
+				? [
+						{
+							type: "info" as const,
+							message: `Kept from before /cd until /resume or restart: ${heldDifferences.join("  ")}`,
+						},
+					]
+				: []),
 			...projectTrustDiagnostics,
 			...services.diagnostics,
 			...collectSettingsDiagnostics(settingsManager),

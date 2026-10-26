@@ -4,6 +4,7 @@ import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@ear
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { renderCwdMessage } from "./cwd-message.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -26,7 +27,7 @@ export class CustomMessageComponent extends Container {
 	) {
 		super();
 		this.message = message;
-		this.customRenderer = customRenderer;
+		this.customRenderer = message.customType === "pi.cwd" ? renderCwdMessage : customRenderer;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 

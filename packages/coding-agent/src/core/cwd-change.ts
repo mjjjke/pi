@@ -1,3 +1,4 @@
+import { resolvePath } from "../utils/paths.ts";
 import type { ProjectTrustContext, ReplacedSessionContext } from "./extensions/types.ts";
 
 export interface ChangeCwdOptions {
@@ -28,6 +29,17 @@ export interface PendingCwdChange {
 	state: "pending" | "trust" | "applying";
 	trusted?: boolean;
 	resolve: (outcome: CwdChangeCompletion) => void;
+}
+
+export function resolveCwdTarget(input: string, cwd: string): string {
+	let path = input.trim();
+	if (
+		path.length >= 2 &&
+		((path.startsWith('"') && path.endsWith('"')) || (path.startsWith("'") && path.endsWith("'")))
+	)
+		path = path.slice(1, -1);
+	if (!path) throw new Error("Not changed: cd needs a directory in args.");
+	return resolvePath(path, cwd);
 }
 
 export function cwdAppliedNotice(from: string, to: string): string {

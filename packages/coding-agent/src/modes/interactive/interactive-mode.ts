@@ -86,6 +86,7 @@ import {
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
 import { estimateProjectedContextTokens } from "../../core/compaction/index.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
+import { type ChangeCwdOptions, type ChangeCwdResult, resolveCwdTarget } from "../../core/cwd-change.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
 	AssistantMessageDisplayPhase,
@@ -620,6 +621,7 @@ export class InteractiveMode {
 		void this.handleRightClickPaste();
 	};
 	private autoTrustOnReloadCwd: string | undefined;
+	private cwdBox?: Container;
 	private themeController: InteractiveThemeController;
 
 	// Convenience accessors
@@ -644,7 +646,13 @@ export class InteractiveMode {
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
+			if (this.cwdBox) {
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.cwdBox);
+				this.ui.setFocus(this.cwdBox);
+			}
 		});
+		this.runtimeHost.setCwdChangeHandler((target, options) => this.performCwdChange(target, options));
 		this.runtimeHost.setRebindSession(async () => {
 			await this.rebindCurrentSession({ renderBeforeBind: true });
 			this.themeController.applyFromSettings();
@@ -2377,6 +2385,7 @@ export class InteractiveMode {
 				throw new Error("ctx.requestNewSession() can only be called from an agent_end extension handler.");
 			},
 			requestBashHandover: (options) => this.session.requestBashHandover(options),
+			requestCwdChange: (target, options) => this.session.requestCwdChange(target, options),
 		});
 
 		// Set up the extension shortcut handler on the default editor
@@ -3177,6 +3186,10 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
+			if (this.session.pendingCwdChange && this.session.isIdle) {
+				void this.session.abort();
+				return;
+			}
 			if (this.session.isCompacting) {
 				this.restoreQueuedMessagesToEditor();
 				this.session.abortCompaction();
@@ -3422,6 +3435,11 @@ export class InteractiveMode {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");
 				await this.handleCompactCommand(customInstructions);
+				return;
+			}
+			if (text === "/cd" || /^\/cd\s/.test(text)) {
+				this.editor.setText("");
+				await this.handleCdCommand(text.slice(3));
 				return;
 			}
 			if (text === "/reload") {
@@ -6648,6 +6666,87 @@ export class InteractiveMode {
 	// =========================================================================
 	// Command handlers
 	// =========================================================================
+
+	private async handleCdCommand(args: string): Promise<void> {
+		const cwd = this.sessionManager.getCwd();
+		if (!args.trim()) {
+			this.showStatus(`Working directory: ${this.formatDisplayPath(cwd)}`);
+			return;
+		}
+		const target = resolveCwdTarget(args, cwd);
+		if (target === cwd) {
+			this.showStatus(`Already in ${this.formatDisplayPath(cwd)}`);
+			return;
+		}
+		if (this.session.isStreaming) {
+			this.showWarning("Wait for the current response to finish before changing directory.");
+			return;
+		}
+		if (this.session.isCompacting) {
+			this.showWarning("Wait for compaction to finish before changing directory.");
+			return;
+		}
+		if (this.session.isBashRunning) {
+			this.showWarning("Wait for the shell command to finish before changing directory.");
+			return;
+		}
+		if (this.session.pendingCwdChange) {
+			this.showWarning(
+				`A working-directory change to ${this.formatDisplayPath(this.session.pendingCwdChange.to)} is in progress.`,
+			);
+			return;
+		}
+		const result = await this.performCwdChange(target, { source: "user" });
+		if (!result.changed) {
+			if (result.error === "untrusted")
+				this.showWarning(`cd: not changed: ${this.formatDisplayPath(target)} is not trusted.`);
+			else if (result.error === "busy")
+				this.showWarning("Wait for the current response to finish before changing directory.");
+			else if (result.error !== "cancelled") this.showError(result.error);
+		}
+	}
+
+	private async performCwdChange(target: string, options: ChangeCwdOptions): Promise<ChangeCwdResult> {
+		const text = this.editor.getText();
+		const box = new Container();
+		box.addChild(new DynamicBorder());
+		box.addChild(new Text(`Changing working directory to ${this.formatDisplayPath(target)}…`, 1, 1));
+		box.addChild(new DynamicBorder());
+		this.cwdBox = box;
+		this.editorContainer.clear();
+		this.editorContainer.addChild(box);
+		this.ui.setFocus(box);
+		this.ui.requestRender(true);
+		try {
+			const result = await this.runtimeHost.changeCwd(target, {
+				...options,
+				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+			});
+			if (result.changed) {
+				if (
+					!this.session.messages.some((message) => message.role === "custom" && message.customType === "pi.cwd") &&
+					!this.session.stagedMessages.some(
+						(message) => message.role === "custom" && message.customType === "pi.cwd",
+					)
+				)
+					this.showStatus(`Working directory: ${this.formatDisplayPath(target)}`);
+				if (result.warning) this.showWarning(result.warning);
+				if (this.runtimeHost.modelFallbackMessage) this.showWarning(this.runtimeHost.modelFallbackMessage);
+				for (const diagnostic of this.runtimeHost.diagnostics)
+					if (diagnostic.type === "info") this.showStatus(diagnostic.message);
+			}
+			return result;
+		} catch (error) {
+			return this.handleFatalRuntimeError("Failed to change working directory", error);
+		} finally {
+			this.cwdBox = undefined;
+			this.editor.setText(text);
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		}
+	}
 
 	private async handleReloadCommand(): Promise<void> {
 		if (this.session.isStreaming) {
