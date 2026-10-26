@@ -24,6 +24,21 @@ describe("session-held history projection settings", () => {
 		expect(fresh.getSettings().codemode?.mode).toBe("only");
 	});
 
+	it("an explicit image setter wins over the destination project and can be changed again", async () => {
+		const storage = new InMemorySettingsStorage();
+		storage.withLock("project", () => JSON.stringify({ images: { blockImages: true } }));
+		const settings = SettingsManager.fromStorage(storage);
+		settings.holdSessionValues({ images: { blockImages: false }, codemode: { mode: "on" } });
+		settings.setBlockImages(false);
+		expect(settings.getBlockImages()).toBe(false);
+		settings.setBlockImages(true);
+		expect(settings.getBlockImages()).toBe(true);
+		settings.setBlockImages(false);
+		await settings.reload();
+		expect(settings.getBlockImages()).toBe(false);
+		expect(SettingsManager.fromStorage(storage).getBlockImages()).toBe(true);
+	});
+
 	it("an explicit image setter drops only that hold", async () => {
 		const storage = new InMemorySettingsStorage();
 		const settings = SettingsManager.fromStorage(storage);

@@ -1363,6 +1363,11 @@ export class SettingsManager {
 	}
 
 	setBlockImages(blocked: boolean): void {
+		// An explicit choice replaces the cd hold with a normal runtime override, so project
+		// settings cannot immediately undo the user's change. A new manager ends that override.
+		if (this.held.images?.blockImages !== undefined || this.overrides.images?.blockImages !== undefined) {
+			this.overrides.images = { ...this.overrides.images, blockImages: blocked };
+		}
 		if (this.held.images) delete this.held.images.blockImages;
 		if (!this.globalSettings.images) {
 			this.globalSettings.images = {};
