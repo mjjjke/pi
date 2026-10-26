@@ -568,8 +568,8 @@ export class AgentSessionRuntime {
 	 * running the handlers again.
 	 */
 	async dispose(options?: { handlersDispatched?: boolean }): Promise<void> {
-		this.session.cancelCwdChange();
 		this.session.closeAdmission();
+		this.session.cancelCwdChange();
 		if (!options?.handlersDispatched) {
 			await emitSessionShutdownEvent(this.session.extensionRunner, {
 				type: "session_shutdown",

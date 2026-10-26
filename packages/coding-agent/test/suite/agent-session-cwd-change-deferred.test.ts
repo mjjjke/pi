@@ -70,6 +70,42 @@ describe("deferred cwd requests", () => {
 		},
 	);
 
+	it.each(["session", "runtime"] as const)(
+		"%s disposal rejects a reentrant cwd request from its cancellation receipt listener",
+		async (owner) => {
+			const f = await fixture();
+			const old = f.runtime.session;
+			await old.prompt("bootstrapped");
+			const first = old.requestCwdChange(f.b);
+			if (first.status !== "pending") throw new Error(first.reason);
+			let second: ReturnType<typeof old.requestCwdChange> | undefined;
+			const receipts: string[] = [];
+			old.subscribe((event) => {
+				if (
+					event.type !== "message_end" ||
+					event.message.role !== "custom" ||
+					event.message.customType !== "pi.cwd"
+				)
+					return;
+				const details = event.message.details as { requestId: string };
+				receipts.push(details.requestId);
+				if (details.requestId === first.requestId) second = old.requestCwdChange(f.b);
+			});
+			if (owner === "session") old.dispose();
+			else await f.runtime.dispose();
+			expect(await first.completion).toBe("cancelled");
+			await tick();
+			expect(second?.status).toBe("rejected");
+			expect(old.pendingCwdChange).toBeUndefined();
+			expect(receipts).toEqual([first.requestId]);
+			const outcomes = old.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "custom_message" && entry.customType === "pi.cwd");
+			expect(outcomes).toHaveLength(1);
+			expect(outcomes[0]).toMatchObject({ details: { kind: "cancelled", requestId: first.requestId } });
+		},
+	);
+
 	it("keeps pending across reload and accepts a new request after it applied", async () => {
 		const f = await fixture();
 		await f.runtime.session.prompt("hello");

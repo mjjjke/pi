@@ -2600,13 +2600,13 @@ export class AgentSession {
 	 */
 	dispose(options?: { keepSessionResources?: boolean }): void {
 		if (this._disposed || this._disposing) return;
+		// Cancellation announces synchronously; observers must not admit new work.
+		this._disposing = true;
+		this.closeAdmission();
 		this._cancelPendingCwd("the session was closed or replaced");
 		if (this._cwdImmediate) clearImmediate(this._cwdImmediate);
 		this._cwdImmediate = undefined;
-		this._disposing = true;
 		this._background.abortNotifications();
-		this._admissionGen++;
-		this._admissionClosed = true;
 		// A synchronous dispose cannot await handlers, but each terminal observer
 		// must start before invalidation. Shutdown custom sends join the stop writer.
 		this._isStoppingCustom = true;
