@@ -15,8 +15,10 @@ import {
 import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 import {
+	accessSync,
 	appendFileSync,
 	closeSync,
+	constants,
 	createReadStream,
 	existsSync,
 	fchmodSync,
@@ -25,13 +27,17 @@ import {
 	fsyncSync,
 	futimesSync,
 	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
+	realpathSync,
 	renameSync,
 	type Stats,
 	statSync,
+	symlinkSync,
 	unlinkSync,
 	writeFileSync,
 } from "fs";
@@ -57,6 +63,7 @@ export interface SessionHeader {
 	version?: number; // v1 sessions don't have this
 	id: string;
 	timestamp: string;
+	/** Current working directory. The first pi.cwd state entry records the original directory in `from`. */
 	cwd: string;
 	parentSession?: string;
 }
@@ -296,7 +303,7 @@ export interface SessionContext {
 export interface SessionInfo {
 	path: string;
 	id: string;
-	/** Working directory where the session was started. Empty string for old sessions. */
+	/** Current working directory. Empty string for old sessions; the first pi.cwd state's `from` is the original. */
 	cwd: string;
 	/** User-defined display name from session_info entries. */
 	name?: string;
@@ -1147,6 +1154,12 @@ export interface AtomicSessionWriteOptions {
 	beforePublish?: () => void;
 	/** `replace` only: keep the target's access and modification times (migration-only rewrites). */
 	preserveTimes?: boolean;
+	/** Relocation create only: keep the source file's mode bits. */
+	permissions?: number;
+	/** Internal commit notification, immediately after publication (must not throw). */
+	onPublished?: () => void;
+	/** Internal relocation warning channel for a temp unlink failure after publication. */
+	onCleanupError?: (error: unknown) => void;
 }
 
 /**
@@ -1182,7 +1195,8 @@ function assertNoExtendedAcls(target: string, targetExists: boolean): void {
 
 /**
  * Write a whole session file atomically: temp file in the same directory, fsync, then link (create) or
- * rename (replace). A failure leaves the target as it was and no temp file behind.
+ * rename (replace). Before publication, a failure leaves the target as it was. Temp cleanup is best
+ * effort; relocation uses onPublished/onCleanupError to distinguish a committed write from a refusal.
  *
  * `create` gives the file the default permissions (as a `"wx"` write would). `replace` creates the temp
  * owner-only, then copies the target's permission bits, (best effort) its owner and group, and with
@@ -1193,12 +1207,13 @@ function assertNoExtendedAcls(target: string, targetExists: boolean): void {
  */
 export function writeSessionFileAtomic(
 	target: string,
-	entries: readonly FileEntry[],
+	entries: readonly FileEntry[] | Buffer,
 	options: AtomicSessionWriteOptions,
 ): void {
 	removeStaleSessionTemps(target);
 	const temp = sessionTempPath(target);
 	let tempExists = false;
+	let tempStat: Stats | undefined;
 	try {
 		let original: Stats | undefined;
 		if (options.mode === "replace") {
@@ -1212,9 +1227,9 @@ export function writeSessionFileAtomic(
 		const fd = openSync(temp, "wx", options.mode === "replace" ? 0o600 : 0o666);
 		tempExists = true;
 		try {
-			for (const entry of entries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
+			if (Buffer.isBuffer(entries)) writeFileSync(fd, entries);
+			else for (const entry of entries) writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+			if (options.permissions !== undefined) fchmodSync(fd, options.permissions);
 			if (original) {
 				const stats = original;
 				if (stats.uid !== process.getuid?.() || stats.gid !== process.getgid?.()) {
@@ -1229,22 +1244,38 @@ export function writeSessionFileAtomic(
 				if (options.preserveTimes) futimesSync(fd, stats.atimeMs / 1000, stats.mtimeMs / 1000);
 			}
 			fsyncSync(fd);
+			tempStat = fstatSync(fd);
 		} finally {
 			closeSync(fd);
 		}
 		options.beforePublish?.();
-		if (options.mode === "create") {
-			linkSync(temp, target);
-		} else {
-			renameSync(temp, target);
-			tempExists = false;
+		try {
+			if (options.mode === "create") linkSync(temp, target);
+			else {
+				renameSync(temp, target);
+				tempExists = false;
+			}
+		} catch (error) {
+			// A wrapper may throw after the syscall succeeded. The published inode, not the exception,
+			// decides whether relocation committed; never mistake an unrelated collision for our file.
+			if (options.onPublished && tempStat) {
+				try {
+					const published = statSync(target);
+					if (published.dev === tempStat.dev && published.ino === tempStat.ino) options.onPublished();
+				} catch {
+					// No evidence of publication: retain the pre-commit failure.
+				}
+			}
+			throw error;
 		}
+		options.onPublished?.();
 	} finally {
 		if (tempExists) {
 			try {
 				unlinkSync(temp);
-			} catch {
-				// Best effort; removeStaleSessionTemps() deletes it on the next attempt.
+			} catch (error) {
+				// Best effort; relocation must report failures after its commit, not roll back.
+				options.onCleanupError?.(new Error(`unlink ${temp}: ${errorMessage(error)}`, { cause: error }));
 			}
 		}
 	}
@@ -1317,6 +1348,207 @@ function readSessionHeaderForDiscovery(filePath: string): SessionHeader | null {
 	}
 }
 
+/** Internal persistence API; the runtime supplies launch/sessionDir policy, not SessionManager. */
+export type SessionDirResolver = (cwd: string) => string | undefined;
+
+export interface CwdChangePlan {
+	readonly from: string;
+	readonly to: string;
+	readonly sessionId: string;
+	readonly previousSessionFile: string | undefined;
+	readonly sessionFile: string | undefined;
+	readonly sessionDir: string;
+	readonly mode: "move" | "in-place" | "memory";
+	/** Retained for synchronous revalidation immediately before relocation. */
+	readonly dirFor: SessionDirResolver;
+}
+
+export interface CwdChangeState {
+	v: 1;
+	from: string;
+	to: string;
+	previousSessionFile?: string;
+	source: "user" | "model";
+	reason?: string;
+	requestId?: string;
+}
+
+export interface CwdChangeEntryOptions {
+	source: "user" | "model";
+	reason?: string;
+	requestId?: string;
+	/** Omit when the runtime must stage the notice until the first run. */
+	notice?: string;
+}
+
+interface SessionMoveMarker {
+	v: 1;
+	id: string;
+	to: string;
+}
+
+function readMoveMarker(file: string): SessionMoveMarker | undefined {
+	try {
+		const marker = JSON.parse(readFileSync(`${file}.moved`, "utf8")) as Partial<SessionMoveMarker>;
+		if (
+			marker?.v === 1 &&
+			typeof marker.id === "string" &&
+			typeof marker.to === "string" &&
+			resolve(marker.to) === marker.to
+		) {
+			return marker as SessionMoveMarker;
+		}
+	} catch {
+		// Malformed, absent or unreadable markers never hide a session.
+	}
+	return undefined;
+}
+
+function supersedingSession(file: string): string | undefined {
+	const marker = readMoveMarker(file);
+	if (!marker || marker.to === file) return undefined;
+	const source = readSessionHeaderForDiscovery(file);
+	const target = readSessionHeaderForDiscovery(marker.to);
+	return source?.id === marker.id && target?.id === marker.id ? marker.to : undefined;
+}
+
+/** All discovery paths stay read-only; without a marker in this listing there is no extra I/O. */
+function isSuperseded(dir: string, name: string, names: ReadonlySet<string>): boolean {
+	return names.has(`${name}.moved`) && supersedingSession(join(dir, name)) !== undefined;
+}
+
+function syncSessionDirectory(dir: string): void {
+	let fd: number | undefined;
+	try {
+		fd = openSync(dir, "r");
+		fsyncSync(fd);
+	} catch (error) {
+		throw new Error(`cd: fsync ${dir}: ${errorMessage(error)}`, { cause: error });
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+function writeMoveMarker(old: string, id: string, to: string): void {
+	const marker = `${old}.moved`;
+	const temp = sessionTempPath(marker);
+	removeStaleSessionTemps(marker);
+	try {
+		const fd = openSync(temp, "wx", 0o600);
+		try {
+			writeFileSync(fd, JSON.stringify({ v: 1, id, to }));
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(temp, marker);
+		syncSessionDirectory(dirname(old));
+	} finally {
+		try {
+			unlinkSync(temp);
+		} catch {
+			/* A marker temp never participates in discovery. */
+		}
+	}
+}
+
+function unlinkCwdFile(file: string): void {
+	try {
+		unlinkSync(file);
+	} catch (error) {
+		throw new Error(`cd: unlink ${file}: ${errorMessage(error)}`, { cause: error });
+	}
+}
+
+function latestCwdState(entries: readonly FileEntry[]): CwdChangeState | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type === "custom" && entry.customType === "pi.cwd") {
+			const state = entry.data as Partial<CwdChangeState> | undefined;
+			return state?.v === 1 ? (state as CwdChangeState) : undefined;
+		}
+	}
+	return undefined;
+}
+
+/** One predecessor only: every new relocation must finish this cleanup before writing a new marker. */
+function reconcilePredecessor(live: string, id: string, entries: readonly FileEntry[]): void {
+	const previous = latestCwdState(entries)?.previousSessionFile;
+	if (!previous || previous === live) return;
+	const markerPath = `${previous}.moved`;
+	if (!existsSync(markerPath)) return;
+	const marker = readMoveMarker(previous);
+	if (marker?.to !== live || marker.id !== id) {
+		throw new Error(`cd: reconcile marker ${markerPath} does not name ${live}`);
+	}
+	if (existsSync(previous) && readSessionHeaderForDiscovery(previous)?.id !== id) {
+		throw new Error(`cd: reconcile ${previous} has a different session id; left unchanged`);
+	}
+	// If this sync fails, O and M MUST remain: a power loss could still drop N's directory entry.
+	syncSessionDirectory(dirname(live));
+	if (existsSync(previous)) unlinkCwdFile(previous);
+	syncSessionDirectory(dirname(previous));
+	unlinkCwdFile(markerPath);
+}
+
+function assertArtifactAlias(oldFile: string, newFile: string): void {
+	if (oldFile === newFile) return;
+	const alias = `${newFile}.artifacts`;
+	try {
+		lstatSync(alias); // Includes dangling symlinks: they are conflicts, not absent paths.
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	try {
+		if (realpathSync(alias) === realpathSync(`${oldFile}.artifacts`)) return;
+	} catch {
+		// An unresolvable path cannot be this session's artifacts.
+	}
+	throw new Error(`cd: ${alias} exists and is not this session's artifacts`);
+}
+
+function prepareArtifactAlias(oldFile: string, newFile: string): void {
+	mkdirSync(`${oldFile}.artifacts`, { recursive: true, mode: 0o700 });
+	const canonical = realpathSync(`${oldFile}.artifacts`);
+	assertArtifactAlias(oldFile, newFile);
+	if (oldFile !== newFile && !existsSync(`${newFile}.artifacts`)) {
+		symlinkSync(canonical, `${newFile}.artifacts`, "dir");
+	}
+}
+
+/** Replace only the parsed header's physical line. Every other byte (including corrupt lines) survives. */
+function relocatedSessionBytes(
+	raw: Buffer,
+	cwd: string,
+	id: string,
+	entries: readonly SessionEntry[],
+): { bytes: Buffer; header: SessionHeader } {
+	let start = 0;
+	while (start < raw.length) {
+		const newline = raw.indexOf(0x0a, start);
+		const end = newline < 0 ? raw.length : newline;
+		const parsed = parseSessionEntryLine(raw.subarray(start, end).toString("utf8"));
+		if (parsed) {
+			if (parsed.type !== "session" || parsed.id !== id) throw new Error("cd: source session header changed");
+			const header = { ...parsed, cwd };
+			const tail = raw.subarray(newline < 0 ? raw.length : newline + 1);
+			const terminator = tail.length > 0 && tail[tail.length - 1] !== 0x0a ? "\n" : "";
+			return {
+				header,
+				bytes: Buffer.concat([
+					raw.subarray(0, start),
+					Buffer.from(`${JSON.stringify(header)}\n`),
+					tail,
+					Buffer.from(terminator + entries.map((entry) => `${JSON.stringify(entry)}\n`).join("")),
+				]),
+			};
+		}
+		start = end + 1;
+	}
+	throw new Error("cd: source session has no header");
+}
+
 function getSessionHeaderCwd(header: SessionHeader): string | undefined {
 	const cwd = (header as { cwd?: unknown }).cwd;
 	return typeof cwd === "string" ? cwd : undefined;
@@ -1331,8 +1563,9 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 	const resolvedSessionDir = normalizePath(sessionDir);
 	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
 	try {
-		const files = readdirSync(resolvedSessionDir)
-			.filter((file) => file.endsWith(".jsonl"))
+		const names = new Set(readdirSync(resolvedSessionDir));
+		const files = [...names]
+			.filter((file) => file.endsWith(".jsonl") && !isSuperseded(resolvedSessionDir, file, names))
 			.map((file) => join(resolvedSessionDir, file))
 			.map((path) => ({ path, mtime: statSync(path).mtimeMs }))
 			.sort((a, b) => b.mtime - a.mtime);
@@ -1529,8 +1762,9 @@ async function listSessionsFromDir(
 
 	try {
 		const dirEntries = await readdir(dir);
+		const names = new Set(dirEntries);
 		const files = dirEntries
-			.filter((file) => file.endsWith(".jsonl"))
+			.filter((file) => file.endsWith(".jsonl") && !isSuperseded(dir, file, names))
 			.sort((a, b) => b.localeCompare(a))
 			.map((file) => ({ path: join(dir, file) }));
 		const total = files.length;
@@ -1627,7 +1861,15 @@ export class SessionManager {
 	}
 
 	private _setSessionFile(sessionFile: string, preloaded?: LoadedSessionFile): void {
-		this.sessionFile = resolvePath(sessionFile);
+		const requested = resolvePath(sessionFile);
+		const redirected = supersedingSession(requested);
+		this.sessionFile = redirected ?? requested;
+		if (redirected) {
+			preloaded = undefined;
+			this.sessionDir = dirname(redirected);
+			const header = readSessionHeaderForDiscovery(redirected);
+			if (header?.cwd) this.cwd = resolvePath(header.cwd);
+		}
 		this.loadWarnings = [];
 		this.persistenceError = undefined;
 		this.tailMayNeedNewline = false;
@@ -1652,6 +1894,11 @@ export class SessionManager {
 			this.flushed = true;
 			this.tailMayNeedNewline = loaded.endsWithoutNewline === true;
 			this._loadEntries(entries, undefined, loaded);
+			try {
+				reconcilePredecessor(this.sessionFile, this.sessionId, this.fileEntries);
+			} catch (error) {
+				this.loadWarnings.push(errorMessage(error));
+			}
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1795,6 +2042,234 @@ export class SessionManager {
 
 	getCwd(): string {
 		return this.cwd;
+	}
+
+	/**
+	 * Read-only persistence planning. Relative resolver values are destination-relative; hosts must
+	 * resolve launch flags/env once themselves. No resolver means the SDK default session layout.
+	 * Runtime policy (idle, trust, model/system-update support) belongs to the runtime, not this layer.
+	 */
+	planCwdChange(target: string, dirFor: SessionDirResolver = getDefaultSessionDirPath): CwdChangePlan {
+		if (this.persistenceError) throw this.persistenceError;
+		const to = resolve(this.cwd, normalizePath(target));
+		if (to === this.cwd) throw new Error(`cd: already in ${to}`);
+		if (!statSync(to).isDirectory()) throw new Error(`cd: ${to} is not a directory`);
+		accessSync(to, constants.R_OK | constants.X_OK);
+		const oldDir = resolve(this.cwd, normalizePath(dirFor(this.cwd) ?? getDefaultSessionDirPath(this.cwd)));
+		const sessionDir = resolve(to, normalizePath(dirFor(to) ?? getDefaultSessionDirPath(to)));
+		const old = this.sessionFile;
+		const managed = old !== undefined && dirname(old) === oldDir;
+		const sessionFile = old && managed ? join(sessionDir, basename(old)) : old;
+		const mode = !this.persist || !this.flushed ? "memory" : sessionFile === old ? "in-place" : "move";
+		if (old && this.flushed) {
+			accessSync(old, constants.W_OK);
+			if (supersedingSession(old))
+				throw new Error(`cd: marker ${old}.moved is inconsistent with the current session`);
+		}
+		if (sessionFile && sessionFile !== old && existsSync(sessionFile)) {
+			// The previous relocation may have left its old copy. Only its validated marker permits
+			// preflight to remove it; an arbitrary same-id file is never evidence for deletion.
+			const predecessor = latestCwdState(this.fileEntries)?.previousSessionFile;
+			if (sessionFile !== predecessor || supersedingSession(sessionFile) !== old) {
+				throw new Error(`cd: a session file already exists at ${sessionFile}`);
+			}
+		}
+		if (sessionFile && !this.flushed && existsSync(sessionFile)) {
+			throw new Error(`cd: a session file already exists at ${sessionFile}`);
+		}
+		if (old && sessionFile) assertArtifactAlias(old, sessionFile);
+		return Object.freeze({
+			from: this.cwd,
+			to,
+			sessionId: this.sessionId,
+			previousSessionFile: old,
+			sessionFile,
+			sessionDir,
+			mode,
+			dirFor,
+		});
+	}
+
+	/**
+	 * Fail-closed preflight, also usable before a runtime's asynchronous trust gate. Its only writes
+	 * finish the preceding relocation and remove a void destination marker. Repeated by relocate.
+	 */
+	preflightCwdChange(plan: CwdChangePlan): void {
+		if (
+			plan.from !== this.cwd ||
+			plan.sessionId !== this.sessionId ||
+			plan.previousSessionFile !== this.sessionFile
+		) {
+			throw new Error("cd: stale cwd change plan");
+		}
+		const current = this.planCwdChange(plan.to, plan.dirFor);
+		if (
+			current.sessionFile !== plan.sessionFile ||
+			current.sessionDir !== plan.sessionDir ||
+			current.mode !== plan.mode
+		) {
+			throw new Error("cd: stale cwd change plan (session directory policy changed)");
+		}
+		if (this.sessionFile && this.flushed) reconcilePredecessor(this.sessionFile, this.sessionId, this.fileEntries);
+		const next = plan.sessionFile;
+		if (next && next !== this.sessionFile && !existsSync(next) && existsSync(`${next}.moved`))
+			unlinkCwdFile(`${next}.moved`);
+		if (next && next !== this.sessionFile && existsSync(next))
+			throw new Error(`cd: a session file already exists at ${next}`);
+	}
+
+	/** Detached state and optional applied notice, sharing ids/parents with the exact bytes to publish. */
+	buildCwdChangeEntries(plan: CwdChangePlan, options: CwdChangeEntryOptions): SessionEntry[] {
+		if (
+			plan.from !== this.cwd ||
+			plan.previousSessionFile !== this.sessionFile ||
+			plan.sessionId !== this.sessionId
+		) {
+			throw new Error("cd: stale cwd change plan");
+		}
+		const timestamp = new Date().toISOString();
+		const state: CustomEntry<CwdChangeState> = {
+			type: "custom",
+			customType: "pi.cwd",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp,
+			data: {
+				v: 1,
+				from: plan.from,
+				to: plan.to,
+				...(plan.previousSessionFile !== plan.sessionFile ? { previousSessionFile: plan.previousSessionFile } : {}),
+				source: options.source,
+				...(options.reason !== undefined ? { reason: options.reason } : {}),
+				...(options.requestId !== undefined ? { requestId: options.requestId } : {}),
+			},
+		};
+		if (options.notice === undefined) return [state];
+		return [
+			state,
+			{
+				type: "custom_message",
+				customType: "pi.cwd",
+				id: generateId(new Set([...this.byId.keys(), state.id])),
+				parentId: state.id,
+				timestamp,
+				content: options.notice,
+				display: true,
+				details: { kind: "applied", from: plan.from, to: plan.to, transitionId: state.id },
+			},
+		];
+	}
+
+	/**
+	 * Publish the complete destination before changing memory or deleting the source. Throws only
+	 * before publication. A committed result (including memory-only changes) is never rolled back;
+	 * cleanup/durability failures are warnings, retried on open and before the next relocation.
+	 */
+	relocate(plan: CwdChangePlan, entries: readonly SessionEntry[]): { committed: true; warning?: string } {
+		let parent = this.leafId;
+		const byId = new Map(this.byId);
+		for (const entry of entries) {
+			if (
+				entry.parentId !== parent ||
+				byId.has(entry.id) ||
+				(entry.type !== "custom" && entry.type !== "custom_message") ||
+				entry.customType !== "pi.cwd"
+			) {
+				throw new Error("cd: stale or invalid cwd change entries");
+			}
+			byId.set(entry.id, entry);
+			parent = entry.id;
+		}
+		const state = entries[0];
+		const data = state?.type === "custom" ? (state.data as CwdChangeState | undefined) : undefined;
+		if (
+			!data ||
+			data.v !== 1 ||
+			data.from !== plan.from ||
+			data.to !== plan.to ||
+			data.previousSessionFile !==
+				(plan.previousSessionFile !== plan.sessionFile ? plan.previousSessionFile : undefined)
+		) {
+			throw new Error("cd: invalid cwd change state entry");
+		}
+		this.preflightCwdChange(plan);
+		const old = this.sessionFile;
+		const next = plan.sessionFile;
+		let header = { ...this.getHeader()!, cwd: plan.to };
+		let bytes: Buffer | undefined;
+		let revision: Stats | undefined;
+		if (plan.mode !== "memory" && old) {
+			revision = statSync(old);
+			const rewritten = relocatedSessionBytes(readFileSync(old), plan.to, this.sessionId, entries);
+			header = rewritten.header;
+			bytes = rewritten.bytes;
+		}
+		// Allocate the post-commit view now. Publication is followed only by assignments.
+		const fileEntries: FileEntry[] = [
+			header,
+			...this.fileEntries.filter((entry) => entry.type !== "session"),
+			...entries,
+		];
+		if (old && next) {
+			mkdirSync(dirname(next), { recursive: true });
+			prepareArtifactAlias(old, next);
+		}
+		const warnings: string[] = [];
+		let committed = false;
+		try {
+			if (plan.mode === "move" && old && next) {
+				writeMoveMarker(old, this.sessionId, next);
+			}
+			if (bytes && next && old && revision) {
+				const original = revision;
+				writeSessionFileAtomic(next, bytes, {
+					mode: plan.mode === "move" ? "create" : "replace",
+					permissions: original.mode & 0o7777,
+					beforePublish: () => {
+						const now = statSync(old);
+						if (
+							now.size !== original.size ||
+							now.mtimeMs !== original.mtimeMs ||
+							now.ino !== original.ino ||
+							now.dev !== original.dev
+						) {
+							throw new Error(`cd: ${old} changed while it was being relocated`);
+						}
+					},
+					onPublished: () => {
+						committed = true;
+					},
+					onCleanupError: (error) => warnings.push(errorMessage(error)),
+				});
+			} else committed = true;
+		} catch (error) {
+			if (committed) warnings.push(errorMessage(error));
+			else {
+				if (plan.mode === "move" && old) {
+					try {
+						unlinkSync(`${old}.moved`);
+					} catch {
+						/* A void marker is harmless and reusable. */
+					}
+				}
+				throw error;
+			}
+		}
+		this.fileEntries = fileEntries;
+		this.byId = byId;
+		this.leafId = parent;
+		this.cwd = plan.to;
+		this.sessionDir = plan.sessionDir;
+		this.sessionFile = next;
+		this.flushed = plan.mode !== "memory";
+		this.tailMayNeedNewline = false;
+		try {
+			if (next && plan.mode === "move") reconcilePredecessor(next, this.sessionId, fileEntries);
+			else if (next && plan.mode === "in-place") syncSessionDirectory(dirname(next));
+		} catch (error) {
+			warnings.push(errorMessage(error));
+		}
+		return { committed: true, ...(warnings.length ? { warning: warnings.join("; ") } : {}) };
 	}
 
 	getSessionDir(): string {
@@ -2548,7 +3023,8 @@ export class SessionManager {
 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
-		const resolvedPath = resolvePath(path);
+		const requestedPath = resolvePath(path);
+		const resolvedPath = supersedingSession(requestedPath) ?? requestedPath;
 		let header: SessionHeader | null = null;
 		let preloaded: LoadedSessionFile | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
@@ -2668,8 +3144,9 @@ export class SessionManager {
 		const resolvedCwd = resolvePath(cwd);
 
 		try {
-			for (const file of readdirSync(dir)) {
-				if (!file.endsWith(".jsonl")) continue;
+			const names = new Set(readdirSync(dir));
+			for (const file of names) {
+				if (!file.endsWith(".jsonl") || isSuperseded(dir, file, names)) continue;
 				const path = join(dir, file);
 				const header = readSessionHeaderForDiscovery(path);
 				if (header?.id !== id) continue;
@@ -2751,7 +3228,10 @@ export class SessionManager {
 				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
 				async (dir) => {
 					try {
-						return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+						const names = new Set(await readdir(dir));
+						return [...names]
+							.filter((file) => file.endsWith(".jsonl") && !isSuperseded(dir, file, names))
+							.map((file) => join(dir, file));
 					} catch {
 						return [];
 					}

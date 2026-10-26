@@ -91,7 +91,7 @@ interface SessionEntryBase {
 
 ### SessionHeader
 
-First line of the file. Metadata only, not part of the tree (no `id`/`parentId`).
+First line of the file. Metadata only, not part of the tree (no `id`/`parentId`). `cwd` is the session's **current working directory**, not necessarily where it began. The original directory is the first `pi.cwd` custom state entry's `data.from`, when present.
 
 ```json
 {"type":"session","version":4,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project"}
@@ -217,6 +217,42 @@ Extension state persistence. Does NOT participate in LLM context.
 Use `customType` to identify your extension's entries on reload. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
 
 Pi stores [virtual model](virtual-models.md) router state as custom entries with `customType` `pi.virtual-model-state` and `data` `{ provider, modelId, state }`.
+
+Core persistence records a working-directory change as `customType: "pi.cwd"` with data
+`{ v: 1, from, to, previousSessionFile?, source: "user" | "model", reason?, requestId? }`.
+An applied notice, when journaled, is a `custom_message` with the same custom type,
+`display: true` and `details: { kind: "applied", from, to, transitionId }`; `transitionId`
+is the state entry's id. The state is always recorded, even when the runtime stages the notice.
+
+The internal persistence API is `SessionManager.planCwdChange(target, dirFor?)`,
+`preflightCwdChange(plan)`, `buildCwdChangeEntries(plan, options)` and `relocate(plan, entries)`.
+The resolver returns the session directory a launch in its argument would use (relative values are
+resolved against that directory); without it, the default layout is used. Launch-relative flags/env
+must be resolved once by the host. Planning is read-only. Preflight can finish the last relocation's
+cleanup; relocation repeats preflight, then prepares artifacts before publication. Runtime/trust/model
+policy and notice wording are not persistence concerns.
+
+Managed files keep their basename and move to the destination session directory. Explicit files outside
+the managed directory stay pinned; a shared custom directory rewrites in place. Unflushed sessions
+change only in memory until the first conversation message. The header is replaced, but all other
+existing bytes, including unparseable records, are kept; a torn tail gets a terminating newline.
+
+A move first writes `<old>.moved` (`{ v: 1, id, to: <new> }`, atomic rename and directory fsync), then
+publishes a complete, fsynced destination by hard link. **Successful publication is the commit**
+(rename for in-place rewrites). Post-publication errors return a committed result with a warning,
+never a rollback. Discovery skips an old file only when its marker names an existing file with the
+same session id. An absent or different-id target never hides the original. Explicitly opening the
+old path redirects one hop. Discovery does not write; opening the live file retries its one
+predecessor's cleanup. Before another relocation, cleanup must succeed or relocation is refused.
+Cleanup fsyncs the destination directory before deleting the old copy, then fsyncs the old directory
+and removes its marker. If that first directory sync fails, the old copy and marker remain: losing the
+new directory entry then exposes the intact old copy again. This is process-crash recoverable;
+power-loss safety depends on filesystem fsync ordering. Concurrent writers remain unsupported.
+
+Artifacts never move: `<old>.artifacts/` is created owner-only when absent, resolved to its canonical
+path, and each new session path receives a direct symlink alias **before** publication. A conflicting
+alias refuses relocation. Existing aliases, including those from return visits, are reused and never
+removed by relocation; historical and background-task paths keep working.
 
 ### CustomMessageEntry
 
