@@ -861,6 +861,11 @@ export class AgentSession {
 	requestCwdChange(path: string, options?: { reason?: string }): RequestCwdChangeResult {
 		if (!this._cwdChangeHandler)
 			return { status: "rejected", reason: "Not changed: cd is not supported in this mode." };
+		if (this._needsBootstrap())
+			return {
+				status: "rejected",
+				reason: "Not changed: the session has not bootstrapped; wait for the first run to start.",
+			};
 		if (this._pendingCwdChange)
 			return {
 				status: "rejected",

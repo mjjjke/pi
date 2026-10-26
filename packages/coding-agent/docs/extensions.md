@@ -404,11 +404,14 @@ Interactive hosts expose this optional method to request a working-directory cha
 conversation. It returns `{ status: "pending", requestId, from, to, completion }` or
 `{ status: "rejected", reason }` synchronously. `options.reason` records the initiator's reason. Paths
 are absolute, home-relative or relative to the current session cwd; no shell expansion is performed.
+Requests before the active branch has bootstrapped its initial system snapshot are rejected; model
+calls run after that bootstrap. Startup handlers must wait until the first run has started.
 
 Admission is not execution: after the current run settles, core applies the change on the next tick at
 the first idle point with no queued input, foreground compaction, shell command or readiness barrier.
 Do not await `completion` from a tool or lifecycle handler. It resolves to `"applied"`, `"cancelled"`,
-`"untrusted"` or `"failed"`. Core writes one passive outcome; it never starts a response to that notice.
+`"untrusted"` or `"failed"`. Core writes one passive outcome per admitted request; it never starts a
+response to that notice.
 Only one request can occupy the slot, including while destination trust is being resolved.
 
 Stopping the conversation (`abort()`), tree navigation, session replacement and disposal cancel a

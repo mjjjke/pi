@@ -26,18 +26,38 @@ describe("deferred cwd requests", () => {
 		expect(f.runtime.session.extensionRunner.createContext().requestCwdChange).toBeUndefined();
 	});
 
+	it.each(["session", "extension"] as const)("rejects pre-bootstrap cwd requests through %s", async (caller) => {
+		const f = await fixture({ persist: true });
+		const old = f.runtime.session;
+		const entries = structuredClone(old.sessionManager.getEntries());
+		const request =
+			caller === "session" ? old.requestCwdChange(f.b) : old.extensionRunner.createContext().requestCwdChange!(f.b);
+		expect(request).toEqual({
+			status: "rejected",
+			reason: "Not changed: the session has not bootstrapped; wait for the first run to start.",
+		});
+		expect(old.pendingCwdChange).toBeUndefined();
+		old.dispose();
+		await tick();
+		expect(f.runtime.cwd).toBe(f.a);
+		expect(old.stagedMessages).toEqual([]);
+		expect(old.sessionManager.getEntries()).toEqual(entries);
+	});
+
 	it("applies on the next tick after settle, never inside a settle handler; rejects a second request", async () => {
 		const f = await fixture();
+		let request: ReturnType<typeof f.runtime.session.requestCwdChange> | undefined;
 		f.runtime.session.subscribe((event) => {
+			if (event.type === "agent_start") {
+				request = f.runtime.session.extensionRunner.createContext().requestCwdChange!(f.b);
+				expect(request.status).toBe("pending");
+				expect(f.runtime.session.extensionRunner.createContext().requestCwdChange!(f.b).status).toBe("rejected");
+			}
 			if (event.type === "agent_settled") expect(f.runtime.cwd).toBe(f.a);
 		});
-		const run = f.runtime.session.prompt("hello");
-		const request = f.runtime.session.extensionRunner.createContext().requestCwdChange!(f.b);
-		expect(request.status).toBe("pending");
-		expect(f.runtime.session.extensionRunner.createContext().requestCwdChange!(f.b).status).toBe("rejected");
-		await run;
+		await f.runtime.session.prompt("hello");
 		expect(f.runtime.cwd).toBe(f.a);
-		if (request.status !== "pending") throw new Error("request rejected");
+		if (request?.status !== "pending") throw new Error("request rejected");
 		expect(await request.completion).toBe("applied");
 		expect(f.runtime.cwd).toBe(f.b);
 		expect(f.runtime.session.messages.filter((m) => m.role === "custom" && m.customType === "pi.cwd")).toHaveLength(
@@ -314,6 +334,7 @@ describe("deferred cwd requests", () => {
 
 	it("provider errors still settle into an applied change", async () => {
 		const f = await fixture({ settings: { retry: { enabled: false } } });
+		await f.runtime.session.prompt("bootstrapped");
 		f.seed.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "offline error" })]);
 		const run = f.runtime.session.prompt("error");
 		const request = f.runtime.session.requestCwdChange(f.b);
@@ -324,6 +345,7 @@ describe("deferred cwd requests", () => {
 
 	it("queued steer and follow-up, then a settle-triggered custom run all use the old cwd", async () => {
 		const f = await fixture();
+		await f.runtime.session.prompt("bootstrapped");
 		let finish!: () => void;
 		const waiting = new Promise<void>((resolve) => {
 			finish = resolve;
