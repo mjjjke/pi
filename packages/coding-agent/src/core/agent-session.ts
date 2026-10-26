@@ -33,7 +33,13 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getCurrentSystemMessage, getToolStateChanges, retryDelayMs } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	getCurrentSystemMessage,
+	getToolStateChanges,
+	retryDelayMs,
+	supportsMidConversationSystemMessages,
+} from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -320,6 +326,19 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	carry?: CwdCarry;
+}
+
+/** Runtime-owned, move-only state transferred to the same conversation at another cwd. */
+export interface CwdCarry {
+	model?: { provider: string; id: string };
+	thinkingLevel: ThinkingLevel;
+	activeToolNames: string[];
+	previousDefaultTools: string[];
+	stagedContent: StagedContent[];
+	stagedInstructions: PendingInstruction[];
+	nextTurn: CustomMessage[];
+	heldSettings: { images: { blockImages: boolean }; codemode: { mode: "on" | "only" } };
 }
 
 export interface ExtensionBindings {
@@ -792,11 +811,88 @@ export class AgentSession {
 		this._installHiddenDeclarationsProjection();
 		this._installAgentForcedPromptProjection();
 
+		const carry = config.carry;
+		const addedDefaults =
+			carry && this._usesDefaultTools
+				? applyToolModifiers(
+						this.settingsManager.getDefaultTools() ?? DEFAULT_TOOL_NAMES,
+						this._defaultToolModifiers,
+					).filter((name) => !carry.previousDefaultTools.includes(name))
+				: [];
+		if (carry) {
+			this._pendingToolNames = new Set(carry.activeToolNames.filter((name) => this._isAllowedTool(name)));
+			this._stagedContent = carry.stagedContent;
+			this._stagedInstructions = carry.stagedInstructions;
+			this._pendingNextTurnMessages = carry.nextTurn;
+		}
 		this._buildRuntime({
-			activeToolNames: this._initialActiveToolNames,
+			activeToolNames: carry ? [...carry.activeToolNames, ...addedDefaults] : this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
-		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
+		if (this._usesDefaultTools && !carry) this._restoreToolsFromTranscript(this._defaultToolModifiers);
+	}
+
+	/** Preflight policy for a cwd transfer. Persistence and target checks belong to the manager. */
+	getCwdChangeError(allowBusy = false): string | undefined {
+		if (this._disposed || this._disposing || this._admissionClosed) return "cancelled";
+		if (this.settingsManager.getSettings().codemode?.mode === "only")
+			return 'cd: not supported while codemode.mode is "only" (it would change tool declarations already sent).';
+		if (this._hiddenDeclarations.size > 0) {
+			const owner =
+				[...this._toolDefinitions.values()].find((entry) => entry.definition.prepareLoadout)?.definition.name ??
+				"a tool";
+			return `cd: not supported while ${owner} hides tool declarations (it would change tool declarations already sent).`;
+		}
+		if (!this._needsBootstrap() && this.model && !supportsMidConversationSystemMessages(this.model))
+			return `cd: ${this.model.provider}/${this.model.id} cannot receive the system prompt update a directory change needs; switch model first.`;
+		if (
+			!allowBusy &&
+			(!this.isIdle ||
+				this._readiness ||
+				this.isBashRunning ||
+				this.agent.hasQueuedMessages() ||
+				[...this._customStore.values()].some((item) => item.state !== "buffered"))
+		)
+			return "busy";
+		return this.sessionManager.getPersistenceError()?.message;
+	}
+
+	/** Reserve readiness and admission synchronously; release on a pre-publication failure. */
+	beginCwdTransition(): () => void {
+		const barrier = this._beginReadiness();
+		this._admissionClosed = true;
+		this._background.cancel("reload", undefined, true);
+		this._drainPendingInstructions();
+		return () => {
+			if (!this._disposed) this._admissionClosed = false;
+			barrier.release();
+		};
+	}
+
+	/** Called after shutdown handlers, before disposal. No content is journaled early. */
+	takeCwdCarry(): CwdCarry {
+		const carry: CwdCarry = {
+			model: this.model && { provider: this.model.provider, id: this.model.id },
+			thinkingLevel: this.thinkingLevel,
+			activeToolNames: [...new Set([...this.getActiveToolNames(), ...this._pendingToolNames])],
+			previousDefaultTools: this._usesDefaultTools
+				? applyToolModifiers(
+						this.settingsManager.getDefaultTools() ?? DEFAULT_TOOL_NAMES,
+						this._defaultToolModifiers,
+					)
+				: [],
+			stagedContent: this._stagedContent,
+			stagedInstructions: this._stagedInstructions.filter((pending) => pending.owner === undefined),
+			nextTurn: this._pendingNextTurnMessages,
+			heldSettings: {
+				images: { blockImages: this.settingsManager.getBlockImages() },
+				codemode: { mode: this.settingsManager.getSettings().codemode?.mode ?? "on" },
+			},
+		};
+		this._stagedContent = [];
+		this._stagedInstructions = [];
+		this._pendingNextTurnMessages = [];
+		return carry;
 	}
 
 	get modelRuntime(): ModelRuntime {
@@ -1073,7 +1169,8 @@ export class AgentSession {
 		this.agent.getTools = () => this.agent.state.tools.slice();
 		// The compaction boundary is context, never input: a transcript ending with it still ends with what
 		// precedes it, so continue() runs queued input after a final reply instead of answering the boundary.
-		this.agent.isContextMarker = (message) => message.role === "compactionBoundary";
+		this.agent.isContextMarker = (message) =>
+			message.role === "compactionBoundary" || (message.role === "custom" && message.customType === "pi.cwd");
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
 			this._throwIfRunStopped();
@@ -2336,7 +2433,7 @@ export class AgentSession {
 	 * Remove all listeners and disconnect from agent.
 	 * Call this when completely done with the session.
 	 */
-	dispose(): void {
+	dispose(options?: { keepSessionResources?: boolean }): void {
 		if (this._disposed || this._disposing) return;
 		this._disposing = true;
 		this._background.abortNotifications();
@@ -2394,7 +2491,7 @@ export class AgentSession {
 			this._cacheWarmer.onWarmed = undefined;
 			this._cacheWarmer.cancel();
 		}
-		cleanupSessionResources(this.sessionId);
+		if (!options?.keepSessionResources) cleanupSessionResources(this.sessionId);
 	}
 
 	// =========================================================================
@@ -5671,7 +5768,11 @@ export class AgentSession {
 			this._requestRunStop();
 			this.abortCompaction();
 			this._background.abortNotifications();
-			this._background.cancel(event.reason === "reload" ? "reload" : "disposed", undefined, true);
+			this._background.cancel(
+				event.reason === "reload" || event.reason === "cwd" ? "reload" : "disposed",
+				undefined,
+				true,
+			);
 			this._background.deliverBeforeInvalidation();
 			// Terminal consumers have started on the valid outgoing branch. Unrelated
 			// signal-ignoring observers must not own shutdown's completion.

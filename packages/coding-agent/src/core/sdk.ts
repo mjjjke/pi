@@ -4,7 +4,7 @@ import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, type CwdCarry } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -103,6 +103,8 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Same-conversation transfer state supplied by AgentSessionRuntime.changeCwd(). */
+	carry?: CwdCarry;
 }
 
 /** Result from createAgentSession */
@@ -198,6 +200,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	if (options.carry) settingsManager.holdSessionValues(options.carry.heldSettings);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
 	if (!resourceLoader) {
@@ -211,8 +214,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
-	let model = options.model;
-	let modelFallbackMessage: string | undefined;
+	const carriedModel = options.carry?.model;
+	let model = carriedModel ? modelRuntime.getModel(carriedModel.provider, carriedModel.id) : options.model;
+	let modelFallbackMessage =
+		carriedModel && !model ? `Could not restore model ${carriedModel.provider}/${carriedModel.id}` : undefined;
 
 	// Assistant messages name the physical model that answered, so a virtual selection is only in
 	// model_change entries.
@@ -221,7 +226,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	);
 
 	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && sessionModel) {
+	if (!model && !options.carry && hasExistingSession && sessionModel) {
 		const restoredModel = modelRuntime.getModel(sessionModel.provider, sessionModel.modelId);
 		if (restoredModel && modelRuntime.hasConfiguredAuth(restoredModel.provider)) {
 			model = restoredModel;
@@ -250,7 +255,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
-	let thinkingLevel = options.thinkingLevel;
+	let thinkingLevel = options.carry?.thinkingLevel ?? options.thinkingLevel;
 
 	// If session has data, restore thinking level from it
 	if (thinkingLevel === undefined && hasExistingSession) {
@@ -476,6 +481,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		carry: options.carry,
 	});
 
 	const extensionsResult = resourceLoader.getExtensions();

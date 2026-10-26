@@ -881,7 +881,9 @@ export interface McpServersChangeEvent {
 export interface SessionStartEvent {
 	type: "session_start";
 	/** Why this session start happened. */
-	reason: "startup" | "reload" | "new" | "resume" | "fork";
+	reason: "startup" | "reload" | "new" | "resume" | "fork" | "cwd";
+	/** Previous working directory for a same-conversation cwd transfer. */
+	previousCwd?: string;
 	/** Previously active session file. Present for "new", "resume", and "fork". */
 	previousSessionFile?: string;
 }
@@ -979,7 +981,9 @@ export interface SessionCompactFailedEvent {
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
-	reason: "quit" | "reload" | "new" | "resume" | "fork";
+	reason: "quit" | "reload" | "new" | "resume" | "fork" | "cwd";
+	/** Destination working directory for a same-conversation cwd transfer. */
+	targetCwd?: string;
 	/** Destination session file when shutting down due to session replacement. */
 	targetSessionFile?: string;
 }

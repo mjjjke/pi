@@ -1,8 +1,9 @@
 import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { basename, join, parse, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
-import type { AgentSession } from "./agent-session.ts";
+import type { AgentSession, CwdCarry } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import { type ChangeCwdOptions, type ChangeCwdResult, cwdAppliedNotice } from "./cwd-change.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -12,7 +13,14 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { createSessionSetupManager, SessionManager, type SessionSetupManager } from "./session-manager.ts";
+import {
+	type CwdChangePlan,
+	createSessionSetupManager,
+	type SessionDirResolver,
+	SessionManager,
+	type SessionSetupManager,
+} from "./session-manager.ts";
+import { hasTrustRequiringProjectResources } from "./trust-manager.ts";
 
 /**
  * Result returned by runtime creation.
@@ -38,6 +46,7 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
 	projectTrustContext?: ProjectTrustContext;
+	carry?: CwdCarry;
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
 /**
@@ -79,6 +88,10 @@ export class AgentSessionRuntime {
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
+	private sessionDirResolver?: SessionDirResolver;
+	private ambientCwd?: (cwd: string) => void;
+	private resolveTargetTrust?: (cwd: string, context?: ProjectTrustContext) => Promise<boolean>;
+	private changingCwd = false;
 
 	constructor(
 		_session: AgentSession,
@@ -128,6 +141,108 @@ export class AgentSessionRuntime {
 	 */
 	setBeforeSessionInvalidate(beforeSessionInvalidate?: () => void): void {
 		this.beforeSessionInvalidate = beforeSessionInvalidate;
+	}
+
+	setSessionDirResolver(resolver?: SessionDirResolver): void {
+		this.sessionDirResolver = resolver;
+	}
+
+	setAmbientCwdHandler(handler?: (cwd: string) => void): void {
+		this.ambientCwd = handler;
+	}
+
+	setResolveTargetTrust(handler?: (cwd: string, context?: ProjectTrustContext) => Promise<boolean>): void {
+		this.resolveTargetTrust = handler;
+	}
+
+	async changeCwd(target: string, options: ChangeCwdOptions): Promise<ChangeCwdResult> {
+		if (this.changingCwd) return { changed: false, error: "A working-directory change is in progress." };
+		const session = this.session;
+		const manager = session.sessionManager;
+		const error = session.getCwdChangeError();
+		if (error) return { changed: false, error };
+		let plan: CwdChangePlan;
+		try {
+			plan = manager.planCwdChange(target, this.sessionDirResolver);
+			manager.preflightCwdChange(plan);
+		} catch (error) {
+			return { changed: false, error: error instanceof Error ? error.message : String(error) };
+		}
+		this.changingCwd = true;
+		let release: (() => void) | undefined;
+		try {
+			const trusted = this.resolveTargetTrust
+				? await this.resolveTargetTrust(plan.to, options.projectTrustContextFactory?.(plan.to))
+				: !hasTrustRequiringProjectResources(plan.to);
+			if (this.session !== session) return { changed: false, error: "cancelled" };
+			const revalidation = session.getCwdChangeError();
+			if (revalidation) return { changed: false, error: revalidation };
+			if (!trusted) return { changed: false, error: "untrusted" };
+			try {
+				manager.preflightCwdChange(plan);
+				release = session.beginCwdTransition();
+				const hasSnapshot = session.messages.some((message) => message.role === "system");
+				const notice = cwdAppliedNotice(plan.from, plan.to);
+				const entries = manager.buildCwdChangeEntries(plan, {
+					...options,
+					notice: hasSnapshot ? notice : undefined,
+				});
+				const result = manager.relocate(plan, entries);
+				// From publication onwards failures are fatal runtime failures or warnings, never a rollback.
+				let warning = result.warning;
+				await emitSessionShutdownEvent(session.extensionRunner, {
+					type: "session_shutdown",
+					reason: "cwd",
+					targetCwd: plan.to,
+					targetSessionFile: plan.sessionFile,
+				});
+				this.beforeSessionInvalidate?.();
+				const carry = session.takeCwdCarry();
+				if (!hasSnapshot && carry.stagedContent.length > 0)
+					carry.stagedContent.push({
+						message: {
+							role: "custom",
+							customType: "pi.cwd",
+							content: notice,
+							display: true,
+							details: { kind: "applied", from: plan.from, to: plan.to, transitionId: entries[0]!.id },
+							timestamp: Date.now(),
+						},
+						announced: false,
+					});
+				session.dispose({ keepSessionResources: true });
+				try {
+					this.ambientCwd?.(plan.to);
+				} catch (error) {
+					warning = [warning, `cd: ambient working directory could not change (${String(error)})`]
+						.filter(Boolean)
+						.join("\n");
+				}
+				this.apply(
+					await this.createRuntime({
+						cwd: plan.to,
+						agentDir: this.services.agentDir,
+						sessionManager: manager,
+						carry,
+						sessionStartEvent: {
+							type: "session_start",
+							reason: "cwd",
+							previousCwd: plan.from,
+							previousSessionFile: plan.previousSessionFile,
+						},
+						projectTrustContext: options.projectTrustContextFactory?.(plan.to),
+					}),
+				);
+				await this.finishSessionReplacement(options.withSession);
+				return { changed: true, from: plan.from, to: plan.to, ...(warning ? { warning } : {}) };
+			} catch (error) {
+				if (manager.getCwd() === plan.to) throw error;
+				return { changed: false, error: error instanceof Error ? error.message : String(error) };
+			}
+		} finally {
+			release?.();
+			this.changingCwd = false;
+		}
 	}
 
 	private async emitBeforeSwitch(
