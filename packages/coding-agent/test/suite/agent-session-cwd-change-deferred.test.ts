@@ -124,6 +124,60 @@ describe("deferred cwd requests", () => {
 		},
 	);
 
+	it("quit cancels before asynchronous shutdown handlers can let the trust answer commit", async () => {
+		let releaseShutdown!: () => void;
+		const shutdownWait = new Promise<void>((resolve) => {
+			releaseShutdown = resolve;
+		});
+		const f = await fixture({
+			extension: (pi) => {
+				pi.on("session_shutdown", async (event) => {
+					if (event.reason === "quit") await shutdownWait;
+				});
+			},
+		});
+		await f.runtime.session.prompt("hello");
+		let answer!: (value: boolean) => void;
+		f.runtime.setResolveTargetTrust(
+			() =>
+				new Promise<boolean>((resolve) => {
+					answer = resolve;
+				}),
+		);
+		const request = f.runtime.session.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		await tick();
+		const closing = f.runtime.dispose();
+		answer(true);
+		await tick();
+		expect(f.runtime.cwd).toBe(f.a);
+		releaseShutdown();
+		await closing;
+		expect(await request.completion).toBe("cancelled");
+	});
+
+	it("cwd outcome markers never make a boundary continuable", async () => {
+		const f = await fixture();
+		await f.runtime.session.prompt("hello");
+		await f.runtime.session.sendCustomMessage({ customType: "pi.cwd", content: "observation", display: true });
+		const session = f.runtime.session as unknown as {
+			_buildBoundaryContext(drafts: [], boundary: "agent_before_settle"): { canContinue: boolean };
+		};
+		expect(session._buildBoundaryContext([], "agent_before_settle").canContinue).toBe(false);
+	});
+
+	it("a running user shell command delays the request until its wakeup, preserving its old cwd", async () => {
+		const f = await fixture();
+		await f.runtime.session.prompt("hello");
+		const command = f.runtime.session.executeBash("sleep 0.05; pwd");
+		const request = f.runtime.session.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		await tick();
+		expect(f.runtime.cwd).toBe(f.a);
+		expect((await command).output.trim()).toBe(f.a);
+		expect(await request.completion).toBe("applied");
+	});
+
 	it("provider errors still settle into an applied change", async () => {
 		const f = await fixture({ settings: { retry: { enabled: false } } });
 		f.seed.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "offline error" })]);
@@ -280,6 +334,52 @@ describe("deferred cwd requests", () => {
 				.filter((entry) => entry.type === "custom_message" && entry.customType === "pi.cwd"),
 		).toHaveLength(1);
 		expect(f.runtime.session.messages).toEqual([]);
+	});
+
+	it("automatic compaction at settle delays the change until its terminal boundary", async () => {
+		let started!: () => void;
+		let release!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const waiting = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const f = await fixture({
+			settings: { compaction: { enabled: true, keepRecentTokens: 10, reserveTokens: 0 } },
+			extension: (pi) => {
+				pi.on("session_before_compact", async (event) => {
+					started();
+					await waiting;
+					return {
+						compaction: {
+							summary: "summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					};
+				});
+			},
+		});
+		await f.runtime.session.prompt(`old ${"x".repeat(1000)}`);
+		let compaction: Promise<boolean> | undefined;
+		const old = f.runtime.session;
+		const internals = old as unknown as { _runAutoCompaction(reason: "threshold", retry: false): Promise<boolean> };
+		old.subscribe((event) => {
+			if (event.type === "agent_settled" && !compaction)
+				compaction = internals._runAutoCompaction("threshold", false);
+		});
+		const run = old.prompt(`recent ${"y".repeat(200)}`);
+		const request = f.runtime.session.requestCwdChange(f.b);
+		if (request.status !== "pending") throw new Error("rejected");
+		await entered;
+		await tick();
+		expect(f.runtime.cwd).toBe(f.a);
+		expect(f.runtime.session.pendingCwdChange?.state).toBe("pending");
+		release();
+		await run;
+		await compaction;
+		expect(await request.completion).toBe("applied");
 	});
 
 	it.each([false, true])("plain compact keeps a pending change; --now=%s cancels it", async (now) => {

@@ -97,7 +97,12 @@ import {
 	outsideCompactionNoticeScope,
 	withCompactionNoticeScope,
 } from "./compaction-notice-scope.ts";
-import type { CwdChangeHandler, PendingCwdChange, RequestCwdChangeResult } from "./cwd-change.ts";
+import {
+	type CwdChangeHandler,
+	cwdRequestRejection,
+	type PendingCwdChange,
+	type RequestCwdChangeResult,
+} from "./cwd-change.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -336,6 +341,7 @@ export interface CwdCarry {
 	thinkingLevel: ThinkingLevel;
 	activeToolNames: string[];
 	previousDefaultTools: string[];
+	previousDefaultActiveToolNames: string[];
 	stagedContent: StagedContent[];
 	stagedInstructions: PendingInstruction[];
 	nextTurn: CustomMessage[];
@@ -704,6 +710,7 @@ export class AgentSession {
 	private _nestedToolCalls: NestedToolCallRunner | undefined;
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
 	private _hiddenDeclarations: ReadonlySet<string> = new Set();
+	private _hiddenDeclarationOwner?: string;
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -832,7 +839,8 @@ export class AgentSession {
 		}
 		this._buildRuntime({
 			activeToolNames: carry ? [...carry.activeToolNames, ...addedDefaults] : this._initialActiveToolNames,
-			includeAllExtensionTools: true,
+			includeAllExtensionTools: !carry,
+			previousDefaultActiveToolNames: carry?.previousDefaultActiveToolNames,
 		});
 		if (this._usesDefaultTools && !carry) this._restoreToolsFromTranscript(this._defaultToolModifiers);
 	}
@@ -859,12 +867,21 @@ export class AgentSession {
 				reason: `Not changed: a change to ${this._pendingCwdChange.to} is already pending.`,
 			};
 		const error = this.getCwdChangeError(true);
-		if (error) return { status: "rejected", reason: error };
+		if (error)
+			return {
+				status: "rejected",
+				reason: this.sessionManager.getPersistenceError()
+					? `Not changed: the session file cannot be written: ${error}.`
+					: cwdRequestRejection(error),
+			};
 		let to: string;
 		try {
 			to = this._validateCwdChange!(path);
 		} catch (error) {
-			return { status: "rejected", reason: error instanceof Error ? error.message : String(error) };
+			return {
+				status: "rejected",
+				reason: cwdRequestRejection(error instanceof Error ? error.message : String(error)),
+			};
 		}
 		let resolve!: PendingCwdChange["resolve"];
 		const completion = new Promise<"applied" | "cancelled" | "untrusted" | "failed">((r) => {
@@ -901,6 +918,11 @@ export class AgentSession {
 
 	releaseUserCwdChange(slot: PendingCwdChange): void {
 		if (slot.source === "user" && this._pendingCwdChange === slot) this._pendingCwdChange = undefined;
+	}
+
+	/** @internal Cancel before a host starts awaiting shutdown handlers. */
+	cancelCwdChange(): void {
+		this._cancelPendingCwd("the session was closed or replaced");
 	}
 
 	private _cancelPendingCwd(cause: string): void {
@@ -971,13 +993,12 @@ export class AgentSession {
 		if (this.settingsManager.getSettings().codemode?.mode === "only")
 			return 'cd: not supported while codemode.mode is "only" (it would change tool declarations already sent).';
 		if (this._hiddenDeclarations.size > 0) {
-			const owner =
-				[...this._toolDefinitions.values()].find((entry) => entry.definition.prepareLoadout)?.definition.name ??
-				"a tool";
+			const owner = this._hiddenDeclarationOwner ?? "a tool";
 			return `cd: not supported while ${owner} hides tool declarations (it would change tool declarations already sent).`;
 		}
-		if (!this._needsBootstrap() && this.model && !supportsMidConversationSystemMessages(this.model))
-			return `cd: ${this.model.provider}/${this.model.id} cannot receive the system prompt update a directory change needs; switch model first.`;
+		const requestModel = this.routedModel?.model ?? this.model;
+		if (!this._needsBootstrap() && requestModel && !supportsMidConversationSystemMessages(requestModel))
+			return `cd: ${requestModel.provider}/${requestModel.id} cannot receive the system prompt update a directory change needs; switch model first.`;
 		if (
 			!allowBusy &&
 			(!this.isIdle ||
@@ -995,7 +1016,11 @@ export class AgentSession {
 		const barrier = this._beginReadiness();
 		this._admissionClosed = true;
 		this._background.cancel("reload", undefined, true);
-		this._drainPendingInstructions();
+		if (!this._drainPendingInstructions()) {
+			this._admissionClosed = false;
+			barrier.release();
+			throw new Error("cd: pending developer instructions could not be committed.");
+		}
 		return () => {
 			if (!this._disposed) this._admissionClosed = false;
 			barrier.release();
@@ -1007,6 +1032,9 @@ export class AgentSession {
 		const carry: CwdCarry = {
 			model: this.model && { provider: this.model.provider, id: this.model.id },
 			thinkingLevel: this.thinkingLevel,
+			previousDefaultActiveToolNames: [...this._toolRegistry.keys()].filter((name) =>
+				this._isActivatedOnRegistration(name),
+			),
 			activeToolNames: [...new Set([...this.getActiveToolNames(), ...this._pendingToolNames])],
 			previousDefaultTools: this._usesDefaultTools
 				? applyToolModifiers(
@@ -2001,7 +2029,7 @@ export class AgentSession {
 		const pendingMessages = this._getPendingBoundaryMessages();
 		const llmMessages = convertToLlm(projection.messages);
 		// The compaction boundary is not input: it never makes the context continuable.
-		const finalRole = convertToLlm(projection.messages.filter((message) => message.role !== "compactionBoundary"))
+		const finalRole = convertToLlm(projection.messages.filter((message) => !this.agent.isContextMarker?.(message)))
 			.filter((message) => message.role !== "system" && message.role !== "developer")
 			.at(-1)?.role;
 		const contextCanContinue = finalRole !== undefined && finalRole !== "assistant";
@@ -2804,6 +2832,7 @@ export class AgentSession {
 			return entry?.definition.prepareLoadout ? [entry] : [];
 		});
 		const hidden = new Set<string>();
+		let hiddenOwner: string | undefined;
 		let declared = tools;
 		if (hooks.length > 0) {
 			const loadout: ToolLoadout = {
@@ -2821,7 +2850,10 @@ export class AgentSession {
 					for (const [name, description] of Object.entries(changes?.descriptions ?? {})) {
 						descriptions.set(name, description);
 					}
-					for (const name of changes?.hiddenDeclarations ?? []) hidden.add(name);
+					for (const name of changes?.hiddenDeclarations ?? []) {
+						hidden.add(name);
+						hiddenOwner ??= definition.name;
+					}
 				} catch (error) {
 					this._extensionRunner.emitError({
 						extensionPath: sourceInfo.path,
@@ -2837,6 +2869,7 @@ export class AgentSession {
 			});
 		}
 		this._hiddenDeclarations = hidden;
+		this._hiddenDeclarationOwner = hiddenOwner;
 		this.agent.state.tools = declared;
 		return declared;
 	}
@@ -5739,11 +5772,16 @@ export class AgentSession {
 		);
 	}
 
-	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+	private _refreshToolRegistry(options?: {
+		activeToolNames?: string[];
+		includeAllExtensionTools?: boolean;
+		previousDefaultActiveToolNames?: string[];
+	}): void {
 		// Tools that were already activated on registration. A tool whose exposure changes to
 		// `direct` or `model-only` (for example from `hidden`) is activated like a new tool.
 		const previousActivatedOnRegistration = new Set(
-			[...this._toolRegistry.keys()].filter((name) => this._isActivatedOnRegistration(name)),
+			options?.previousDefaultActiveToolNames ??
+				[...this._toolRegistry.keys()].filter((name) => this._isActivatedOnRegistration(name)),
 		);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const allowedTools = this._allowedTools;
@@ -5826,7 +5864,7 @@ export class AgentSession {
 			for (const tool of wrappedExtensionTools) {
 				if (this._isActivatedOnRegistration(tool.name)) nextActiveToolNames.push(tool.name);
 			}
-		} else if (!options?.activeToolNames) {
+		} else if (!options?.activeToolNames || options.previousDefaultActiveToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!previousActivatedOnRegistration.has(toolName) && this._isActivatedOnRegistration(toolName)) {
 					nextActiveToolNames.push(toolName);
@@ -5854,6 +5892,7 @@ export class AgentSession {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
+		previousDefaultActiveToolNames?: string[];
 	}): void {
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
@@ -5934,6 +5973,7 @@ export class AgentSession {
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
+			previousDefaultActiveToolNames: options.previousDefaultActiveToolNames,
 		});
 	}
 

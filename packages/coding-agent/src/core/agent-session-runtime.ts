@@ -4,6 +4,7 @@ import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession, CwdCarry } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
 import {
+	assertCwdTarget,
 	type ChangeCwdOptions,
 	type ChangeCwdResult,
 	type CwdChangeHandler,
@@ -97,7 +98,7 @@ export class AgentSessionRuntime {
 	private sessionDirResolver?: SessionDirResolver;
 	private ambientCwd?: (cwd: string) => void;
 	private resolveTargetTrust?: (cwd: string, context?: ProjectTrustContext) => Promise<boolean>;
-	private changingCwd = false;
+	private changingCwd?: string;
 	private cwdChangeHandler?: CwdChangeHandler;
 
 	constructor(
@@ -170,16 +171,20 @@ export class AgentSessionRuntime {
 
 	private bindCwdChange(): void {
 		this.session.setCwdChangeHandler(this.cwdChangeHandler, (path) => {
+			if (this.changingCwd) throw new Error(`Not changed: a change to ${this.changingCwd} is already pending.`);
 			if (!path.trim()) throw new Error("Not changed: cd needs a directory in args.");
 			const manager = this.session.sessionManager;
-			const plan = manager.planCwdChange(resolveCwdTarget(path, manager.getCwd()), this.sessionDirResolver);
+			const to = resolveCwdTarget(path, manager.getCwd());
+			assertCwdTarget(to);
+			const plan = manager.planCwdChange(to, this.sessionDirResolver);
 			manager.preflightCwdChange(plan);
 			return plan.to;
 		});
 	}
 
 	async changeCwd(target: string, options: ChangeCwdOptions): Promise<ChangeCwdResult> {
-		if (this.changingCwd) return { changed: false, error: "A working-directory change is in progress." };
+		if (this.changingCwd)
+			return { changed: false, error: `A working-directory change to ${this.changingCwd} is in progress.` };
 		const session = this.session;
 		const manager = session.sessionManager;
 		const pending = session.pendingCwdChange;
@@ -189,14 +194,16 @@ export class AgentSessionRuntime {
 		if (error) return { changed: false, error };
 		let plan: CwdChangePlan;
 		try {
-			plan = manager.planCwdChange(resolveCwdTarget(target, manager.getCwd()), this.sessionDirResolver);
+			const to = resolveCwdTarget(target, manager.getCwd());
+			assertCwdTarget(to);
+			plan = manager.planCwdChange(to, this.sessionDirResolver);
 			manager.preflightCwdChange(plan);
 		} catch (error) {
 			return { changed: false, error: error instanceof Error ? error.message : String(error) };
 		}
 		const slot = session.reserveCwdChange(plan.to, options.requestId);
 		if (!slot) return { changed: false, error: "cancelled" };
-		this.changingCwd = true;
+		this.changingCwd = plan.to;
 		let release: (() => void) | undefined;
 		try {
 			const trusted =
@@ -211,6 +218,7 @@ export class AgentSessionRuntime {
 			if (revalidation) return { changed: false, error: revalidation };
 			if (!trusted) return { changed: false, error: "untrusted" };
 			try {
+				assertCwdTarget(plan.to);
 				manager.preflightCwdChange(plan);
 				slot.state = "applying";
 				release = session.beginCwdTransition();
@@ -275,7 +283,7 @@ export class AgentSessionRuntime {
 		} finally {
 			release?.();
 			session.releaseUserCwdChange(slot);
-			this.changingCwd = false;
+			this.changingCwd = undefined;
 		}
 	}
 
@@ -557,6 +565,8 @@ export class AgentSessionRuntime {
 	 * running the handlers again.
 	 */
 	async dispose(options?: { handlersDispatched?: boolean }): Promise<void> {
+		this.session.cancelCwdChange();
+		this.session.closeAdmission();
 		if (!options?.handlersDispatched) {
 			await emitSessionShutdownEvent(this.session.extensionRunner, {
 				type: "session_shutdown",

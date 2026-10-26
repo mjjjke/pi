@@ -98,11 +98,12 @@ describe("cwd final-wire cache contract", () => {
 	it.each(["baseline", "images", "equal-reload", "codemode-only", "codemode-disabled"] as const)(
 		"%s preserves every old request byte on Anthropic and Responses",
 		async (scenario) => {
-			const f = await cwdFixture({ codemode: scenario === "codemode-disabled" });
+			const f = await cwdFixture({ codemode: scenario === "codemode-disabled" || scenario === "codemode-only" });
 			let reloadedFaux: ReturnType<typeof registerFauxProvider> | undefined;
 			try {
 				f.runtime.setResolveTargetTrust(async () => true);
-				if (scenario === "codemode-disabled") f.runtime.session.setActiveToolsByName(["read", "codemode"]);
+				if (scenario === "codemode-disabled" || scenario === "codemode-only")
+					f.runtime.session.setActiveToolsByName(["read", "codemode"]);
 				const contexts: Context[] = [];
 				f.seed.setResponses(
 					Array.from({ length: 8 }, () => (context) => {
@@ -171,6 +172,44 @@ describe("cwd final-wire cache contract", () => {
 			}
 		},
 	);
+
+	it("a capable Responses model after an earlier removal uses one full-list change for an addition", async () => {
+		let destination = false;
+		const f = await cwdFixture({
+			extension: (pi) => {
+				if (destination)
+					pi.registerTool({
+						name: "added",
+						label: "added",
+						description: "added",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [], details: {} }),
+					});
+			},
+		});
+		try {
+			const contexts: Context[] = [];
+			f.seed.setResponses(
+				Array.from({ length: 4 }, () => (context) => {
+					contexts.push(structuredClone(context));
+					return fauxAssistantMessage("ok");
+				}),
+			);
+			await f.runtime.session.prompt("initial");
+			f.runtime.session.setActiveToolsByName(["read"]);
+			await f.runtime.session.prompt("earlier removal");
+			destination = true;
+			await f.runtime.changeCwd(f.b, { source: "user" });
+			await f.runtime.session.prompt("addition after removal");
+			await f.runtime.session.prompt("stable");
+			const bodies = await Promise.all(contexts.slice(1).map((context) => wire(context, "responses")));
+			expect(JSON.parse(bodies[0]!).tools).not.toEqual(JSON.parse(bodies[1]!).tools);
+			prefix(bodies[0]!, bodies[1]!, "responses", false);
+			prefix(bodies[1]!, bodies[2]!, "responses");
+		} finally {
+			await f.cleanup();
+		}
+	});
 
 	it.each(["add", "remove", "redefine"] as const)(
 		"tool %s is appended on Anthropic; Responses accepts full-list changes and stabilizes",

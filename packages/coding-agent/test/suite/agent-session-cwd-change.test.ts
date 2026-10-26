@@ -1,6 +1,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { registerSessionResourceCleanup } from "../../../ai/src/session-resources.ts";
 import { cwdFixture } from "./cwd-change-fixture.ts";
 import { getMessageText } from "./harness.ts";
 
@@ -15,6 +18,22 @@ describe("same-conversation cwd runtime transfer", () => {
 		cleanups.push(f.cleanup);
 		return f;
 	}
+
+	it("formats missing and non-directory target refusals without touching the journal", async () => {
+		const f = await fixture();
+		const leaf = f.runtime.session.sessionManager.getLeafId();
+		expect(await f.runtime.changeCwd(join(f.root, "missing"), { source: "user" })).toEqual({
+			changed: false,
+			error: `cd: does not exist: ${join(f.root, "missing")}`,
+		});
+		const file = join(f.root, "file");
+		writeFileSync(file, "not a directory");
+		expect(await f.runtime.changeCwd(file, { source: "user" })).toEqual({
+			changed: false,
+			error: `cd: not a directory: ${file}`,
+		});
+		expect(f.runtime.session.sessionManager.getLeafId()).toBe(leaf);
+	});
 
 	it("keeps the manager, identity and historical messages; one notice then one system patch", async () => {
 		const f = await fixture({ persist: true });
@@ -71,6 +90,26 @@ describe("same-conversation cwd runtime transfer", () => {
 		expect(f.runtime.session.messages.map(getMessageText).join("\n")).toContain("startup handoff");
 	});
 
+	it("preserves a virtual selection after it routed to a capable physical model", async () => {
+		let physical: NonNullable<ReturnType<Awaited<ReturnType<typeof cwdFixture>>["seed"]["getModel"]>>;
+		const f = await fixture({
+			extension: (pi) => {
+				pi.registerVirtualModel({
+					provider: "faux",
+					id: "virtual",
+					name: "Virtual",
+					thinkingLevels: ["low", "high"],
+					route: () => ({ model: physical, thinkingLevel: "high" }),
+				});
+			},
+		});
+		physical = f.seed.getModel();
+		await f.runtime.session.setModel(f.runtime.session.modelRuntime.getModel("faux", "virtual")!);
+		await f.runtime.session.prompt("before");
+		expect((await f.runtime.changeCwd(f.b, { source: "user" })).changed).toBe(true);
+		expect(f.runtime.session.model?.id).toBe("virtual");
+	});
+
 	it("keeps the live model and effort rather than launch options", async () => {
 		const f = await fixture();
 		await f.runtime.session.setModel(f.seed.getModel("b")!);
@@ -78,6 +117,73 @@ describe("same-conversation cwd runtime transfer", () => {
 		await f.runtime.changeCwd(f.b, { source: "user" });
 		expect(f.runtime.session.model?.id).toBe("b");
 		expect(f.runtime.session.thinkingLevel).toBe("high");
+	});
+
+	it.each([undefined, ["read"]])(
+		"merges newly added defaults, retains dropped live tools, and respects launch tools=%j",
+		async (tools) => {
+			const f = await fixture({ tools });
+			f.runtime.session.settingsManager.applyOverrides({ defaultTools: ["read"] });
+			f.runtime.session.setActiveToolsByName(["read"]);
+			mkdirSync(join(f.b, ".pi"));
+			writeFileSync(join(f.b, ".pi", "settings.json"), JSON.stringify({ defaultTools: ["find"] }));
+			f.runtime.setResolveTargetTrust(async () => true);
+			expect((await f.runtime.changeCwd(f.b, { source: "user" })).changed).toBe(true);
+			expect(f.runtime.session.getActiveToolNames()).toEqual(tools ? ["read"] : ["read", "find"]);
+		},
+	);
+
+	it("keeps a disabled existing extension tool inactive, but activates a newly loaded default-active tool", async () => {
+		let destination = false;
+		const f = await fixture({
+			extension: (pi) => {
+				for (const name of destination ? ["existing", "new"] : ["existing"])
+					pi.registerTool({
+						name,
+						label: name,
+						description: name,
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [], details: {} }),
+					});
+			},
+		});
+		f.runtime.session.setActiveToolsByName(["read"]);
+		destination = true;
+		await f.runtime.changeCwd(f.b, { source: "user" });
+		expect(f.runtime.session.getActiveToolNames()).toContain("new");
+		expect(f.runtime.session.getActiveToolNames()).not.toContain("existing");
+	});
+
+	it("lifecycle fields and shutdown contexts follow commit-before-teardown ordering", async () => {
+		const events: unknown[] = [];
+		const f = await fixture({
+			persist: true,
+			extension: (pi) => {
+				pi.on("session_shutdown", (event, ctx) => {
+					if (event.reason === "cwd")
+						events.push({ event, cwd: ctx.cwd, recordedCwd: ctx.sessionManager.getCwd() });
+				});
+				pi.on("session_start", (event) => {
+					if (event.reason === "cwd") events.push(event);
+				});
+			},
+		});
+		await f.runtime.session.prompt("hello");
+		const previousSessionFile = f.runtime.session.sessionFile;
+		await f.runtime.changeCwd(f.b, { source: "user" });
+		expect(events).toEqual([
+			{
+				event: {
+					type: "session_shutdown",
+					reason: "cwd",
+					targetCwd: f.b,
+					targetSessionFile: f.runtime.session.sessionFile,
+				},
+				cwd: f.a,
+				recordedCwd: f.b,
+			},
+			{ type: "session_start", reason: "cwd", previousCwd: f.a, previousSessionFile },
+		]);
 	});
 
 	it("holds both projection settings even when equal, through destination edits and reload", async () => {
@@ -93,14 +199,37 @@ describe("same-conversation cwd runtime transfer", () => {
 		expect(f.runtime.session.settingsManager.getSettings().codemode?.mode).toBe("on");
 	});
 
-	it("refuses codemode only even when codemode is inactive", async () => {
-		const f = await fixture({ settings: { codemode: { mode: "only" } } });
+	it.each([false, true])("refuses codemode only with active=%s", async (active) => {
+		const f = await fixture({
+			codemode: active,
+			settings: { codemode: { mode: "only" }, ...(active ? { defaultTools: ["read", "codemode"] } : {}) },
+		});
 		const old = f.runtime.session;
 		expect(await f.runtime.changeCwd(f.b, { source: "user" })).toEqual({
 			changed: false,
 			error: 'cd: not supported while codemode.mode is "only" (it would change tool declarations already sent).',
 		});
 		expect(f.runtime.session).toBe(old);
+	});
+
+	it("refuses a third-party hidden declaration and names the actual owning hook", async () => {
+		const f = await fixture({
+			extension: (pi) => {
+				for (const name of ["first", "hider"])
+					pi.registerTool({
+						name,
+						label: name,
+						description: name,
+						parameters: Type.Object({}),
+						prepareLoadout: () => (name === "hider" ? { hiddenDeclarations: ["read"] } : {}),
+						execute: async () => ({ content: [], details: {} }),
+					});
+			},
+		});
+		expect(await f.runtime.changeCwd(f.b, { source: "user" })).toEqual({
+			changed: false,
+			error: "cd: not supported while hider hides tool declarations (it would change tool declarations already sent).",
+		});
 	});
 
 	it("asks trust before relocation or factories; No writes nothing and Yes asks only once", async () => {
@@ -121,6 +250,46 @@ describe("same-conversation cwd runtime transfer", () => {
 		expect((await f.runtime.changeCwd(f.b, { source: "user" })).changed).toBe(true);
 		expect(trust).toHaveBeenCalledTimes(2);
 		expect(f.factories).toEqual([f.a, f.b]);
+	});
+
+	it("keeps provider resources keyed by the unchanged id, but final disposal releases them", async () => {
+		const f = await fixture();
+		const cleanup = vi.fn();
+		const unregister = registerSessionResourceCleanup(cleanup);
+		try {
+			const id = f.runtime.session.sessionId;
+			await f.runtime.changeCwd(f.b, { source: "user" });
+			expect(cleanup).not.toHaveBeenCalled();
+			await f.runtime.dispose();
+			expect(cleanup).toHaveBeenCalledExactlyOnceWith(id);
+		} finally {
+			unregister();
+		}
+	});
+
+	it("refuses before publication when an idle pending instruction cannot precede the notice", async () => {
+		const f = await fixture();
+		const old = f.runtime.session;
+		const append = old.sessionManager.appendMessage.bind(old.sessionManager);
+		const fail = vi.spyOn(old.sessionManager, "appendMessage").mockImplementation((message, options) => {
+			if (message.role === "developer") throw new Error("instruction refused");
+			return append(message, options);
+		});
+		f.seed.setResponses([
+			() => {
+				old.queueDeveloperMessage("must precede the notice");
+				return fauxAssistantMessage("ok");
+			},
+		]);
+		await old.prompt("hello");
+		expect(await f.runtime.changeCwd(f.b, { source: "user" })).toEqual({
+			changed: false,
+			error: "cd: pending developer instructions could not be committed.",
+		});
+		expect(f.runtime.session).toBe(old);
+		fail.mockRestore();
+		f.seed.setResponses([fauxAssistantMessage("usable")]);
+		await old.prompt("still usable");
 	});
 
 	it("commit failure leaves the old runtime usable; ambient handler runs before factories", async () => {

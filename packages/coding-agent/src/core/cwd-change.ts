@@ -1,3 +1,4 @@
+import { accessSync, constants, statSync } from "node:fs";
 import { resolvePath } from "../utils/paths.ts";
 import type { ProjectTrustContext, ReplacedSessionContext } from "./extensions/types.ts";
 
@@ -40,6 +41,37 @@ export function resolveCwdTarget(input: string, cwd: string): string {
 		path = path.slice(1, -1);
 	if (!path) throw new Error("Not changed: cd needs a directory in args.");
 	return resolvePath(path, cwd);
+}
+
+export function assertCwdTarget(path: string): void {
+	try {
+		if (!statSync(path).isDirectory()) throw new Error(`cd: not a directory: ${path}`);
+		accessSync(path, constants.R_OK | constants.X_OK);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") throw new Error(`cd: does not exist: ${path}`);
+		if (code === "ENOTDIR") throw new Error(`cd: not a directory: ${path}`);
+		if (code === "EACCES" || code === "EPERM") throw new Error(`cd: not accessible: ${path}`);
+		throw error;
+	}
+}
+
+export function cwdRequestRejection(error: string): string {
+	if (error.startsWith("Not changed:")) return error;
+	for (const [prefix, suffix] of [
+		["cd: does not exist: ", "does not exist"],
+		["cd: not a directory: ", "is not a directory"],
+		["cd: not accessible: ", "is not accessible"],
+		["cd: already in ", "is already the working directory"],
+	]) {
+		if (error.startsWith(prefix!)) return `Not changed: ${error.slice(prefix!.length)} ${suffix}.`;
+	}
+	if (error.startsWith('cd: not supported while codemode.mode is "only"'))
+		return 'Not changed: cd is not supported while codemode.mode is "only".';
+	const model = /^cd: (.+) cannot receive the system prompt update/.exec(error)?.[1];
+	if (model)
+		return `Not changed: the current model (${model}) cannot receive the system prompt update this change needs.`;
+	return `Not changed: ${error.replace(/^cd: /, "").replace(/\.$/, "")}.`;
 }
 
 export function cwdAppliedNotice(from: string, to: string): string {

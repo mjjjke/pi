@@ -6673,7 +6673,13 @@ export class InteractiveMode {
 			this.showStatus(`Working directory: ${this.formatDisplayPath(cwd)}`);
 			return;
 		}
-		const target = resolveCwdTarget(args, cwd);
+		let target: string;
+		try {
+			target = resolveCwdTarget(args, cwd);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
 		if (target === cwd) {
 			this.showStatus(`Already in ${this.formatDisplayPath(cwd)}`);
 			return;
