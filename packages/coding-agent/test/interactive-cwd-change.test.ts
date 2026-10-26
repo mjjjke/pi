@@ -1,4 +1,4 @@
-import { type Component, Container, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import { renderLayoutFrame } from "@earendil-works/pi-tui/dist/layout.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { cwdAppliedNotice, formatCwdWarning, resolveCwdTarget } from "../src/core/cwd-change.ts";
@@ -45,7 +45,9 @@ function footerRebindHarness(height = 1) {
 		ui: {
 			hideOverlay: vi.fn(),
 			setFocus: vi.fn(),
-			requestRender: () => frames.push(footerContainer.render(80)),
+			requestRender: () => {
+				frames.push(footerContainer.render(80));
+			},
 		},
 		runtimeHost: {
 			session: {
@@ -199,6 +201,65 @@ describe("interactive /cd", () => {
 		invoke("showFooterAfterRebind", mode, Reflect.get(mode, "footerRebind"));
 		expect(geometry()).toEqual(before);
 		expect(footerContainer.render(80)).toEqual(Array(height).fill("NEW FOOTER"));
+	});
+
+	it("keeps footer mouse capture, keyboard and focus hooks on the actual mounted footer, never the placeholder", () => {
+		const { mode, footerContainer } = footerRebindHarness();
+		const footer = {
+			render: () => ["CLICK"],
+			invalidate: vi.fn(),
+			handleMouse: vi.fn((_event: TuiMouseEvent) => ({ capture: true, focus: true, render: false })),
+			handleInput: vi.fn((_data: string) => {}),
+			wantsKeyRelease: true,
+			focused: false,
+		};
+		const event: TuiMouseEvent = {
+			type: "press",
+			button: "left",
+			x: 0,
+			y: 0,
+			screenX: 2,
+			screenY: 23,
+			width: 80,
+			height: 1,
+			shift: false,
+			alt: false,
+			ctrl: false,
+		};
+		invoke("setExtensionFooter", mode, () => footer);
+		const dispatched = footerContainer.handleMouse(event);
+		expect(footer.handleMouse).toHaveBeenCalledWith(event);
+		expect(footer.handleMouse.mock.contexts[0]).toBe(footer);
+		expect(dispatched).toMatchObject({ handled: true, capture: true, focus: true, render: false });
+		expect(dispatched?.target.component).toBe(footer);
+		expect(dispatched?.focusTarget).toBe(footer);
+		expect(dispatched?.focusTarget?.wantsKeyRelease).toBe(true);
+		dispatched?.focusTarget?.handleInput?.("key release");
+		expect(footer.handleInput).toHaveBeenCalledWith("key release");
+		expect(footer.handleInput.mock.contexts[0]).toBe(footer);
+		footerContainer.invalidate();
+		expect(footer.invalidate).toHaveBeenCalledOnce();
+
+		// Real requestRender is deferred: old mouse geometry may survive until the next frame.
+		mode.ui.requestRender = () => {};
+		invoke("resetExtensionUI", mode);
+		expect(footerContainer.handleMouse(event)).toBeUndefined();
+		expect(footerContainer.render(80)).toEqual([""]);
+		expect(footerContainer.handleMouse(event)).toBeUndefined();
+		footerContainer.invalidate();
+		expect(footer.handleMouse).toHaveBeenCalledOnce();
+		expect(footer.invalidate).toHaveBeenCalledOnce();
+
+		const destination = { ...footer, handleMouse: vi.fn(footer.handleMouse.getMockImplementation()) };
+		invoke("setExtensionFooter", mode, () => destination);
+		footerContainer.render(80);
+		expect(footerContainer.handleMouse(event)).toBeUndefined();
+		expect(destination.handleMouse).not.toHaveBeenCalled();
+		invoke("showFooterAfterRebind", mode, Reflect.get(mode, "footerRebind"));
+		footerContainer.render(80);
+		expect(footerContainer.handleMouse(event)?.target.component).toBe(destination);
+		expect(destination.handleMouse).toHaveBeenCalledOnce();
+		expect(footer.handleMouse).toHaveBeenCalledOnce();
 	});
 
 	it("registers the command and resolves exactly one matching quote pair, not shell syntax", () => {

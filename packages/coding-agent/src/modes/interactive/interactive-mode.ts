@@ -2673,15 +2673,20 @@ export class InteractiveMode {
 			this.footerContainer.addChild(new Spacer(this.footerRenderedHeight));
 			return;
 		}
-		const footer = this.customFooter ?? this.footer;
-		this.footerContainer.addChild({
-			render: (width) => {
-				const lines = footer.render(width);
-				this.footerRenderedHeight = lines.length;
-				return lines;
-			},
-			invalidate: () => footer.invalidate(),
-		});
+		// Keep the footer itself as the mouse/focus target so all its optional hooks survive.
+		const mounted = new Container();
+		mounted.addChild(this.customFooter ?? this.footer);
+		const render = mounted.render.bind(mounted);
+		mounted.render = (width) => {
+			const lines = render(width);
+			this.footerRenderedHeight = lines.length;
+			return lines;
+		};
+		const handleMouse = mounted.handleMouse.bind(mounted);
+		mounted.handleMouse = (event) =>
+			// The parent may still have pre-reset mouse geometry until the next frame.
+			this.footerContainer.children.includes(mounted) ? handleMouse(event) : undefined;
+		this.footerContainer.addChild(mounted);
 	}
 
 	private showFooterAfterRebind(rebind: object | undefined): void {
