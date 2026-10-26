@@ -1869,7 +1869,9 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this._setSessionFile(sessionFile, preloaded);
+			// Factories already selected the live file and its cwd/sessionDir policy. Do not redirect
+			// again here: open resolves exactly one hop and may have explicit recovery overrides.
+			this._setSessionFile(sessionFile, preloaded, false);
 		} else if (preloaded?.entries.length) {
 			this._loadEntries(preloaded.entries, newSessionOptions);
 		} else {
@@ -1882,9 +1884,9 @@ export class SessionManager {
 		this._setSessionFile(sessionFile);
 	}
 
-	private _setSessionFile(sessionFile: string, preloaded?: LoadedSessionFile): void {
+	private _setSessionFile(sessionFile: string, preloaded?: LoadedSessionFile, followMove = true): void {
 		const requested = resolvePath(sessionFile);
-		const redirected = supersedingSession(requested, true);
+		const redirected = followMove ? supersedingSession(requested, true) : undefined;
 		this.sessionFile = redirected ?? requested;
 		if (redirected) {
 			preloaded = undefined;
@@ -3083,7 +3085,7 @@ export class SessionManager {
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, requestedPath, true, undefined, preloaded);
+		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloaded);
 	}
 
 	/**

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.ts";
+import { assertSessionCwdExists } from "../../src/core/session-cwd.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
 type Operation = "link" | "rename" | "unlink" | "fsync" | "lstat";
@@ -149,9 +150,41 @@ describe("cwd persistence crash states", () => {
 		const reopened = SessionManager.open(old);
 		expect(reopened.getSessionFile()).toBe(next);
 		expect(reopened.getCwd()).toBe(b);
+		expect(reopened.getSessionDir()).toBe(dirname(next));
 		expect(fs.existsSync(old)).toBe(false);
 		expect(fs.existsSync(`${old}.moved`)).toBe(false);
 	});
+
+	it.each([
+		{ overrideCwd: true, overrideDir: false },
+		{ overrideCwd: false, overrideDir: true },
+		{ overrideCwd: true, overrideDir: true },
+	])(
+		"redirected open preserves explicit overrides: cwd=$overrideCwd sessionDir=$overrideDir",
+		({ overrideCwd, overrideDir }) => {
+			const old = manager.getSessionFile()!;
+			fail("unlink", old);
+			move(b);
+			const next = manager.getSessionFile()!;
+			hooks.run = undefined;
+			if (overrideCwd) fs.rmdirSync(b); // The explicit cwd is the existing missing-project recovery path.
+			const suppliedDir = overrideDir ? join(root, "future-sessions") : undefined;
+			const suppliedCwd = overrideCwd ? a : undefined;
+			const reopened = SessionManager.open(old, suppliedDir, suppliedCwd);
+			expect(reopened.getCwd()).toBe(suppliedCwd ?? b);
+			expect(reopened.getSessionDir()).toBe(suppliedDir ?? dirname(next));
+			expect(reopened.getHeader()?.cwd).toBe(b);
+			expect(reopened.getSessionId()).toBe(manager.getSessionId());
+			expect(reopened.getSessionFile()).toBe(next);
+			expect(reopened.buildSessionContext().messages).toHaveLength(3);
+			expect(() => assertSessionCwdExists(reopened, a)).not.toThrow();
+			expect(fs.existsSync(old)).toBe(false);
+			expect(fs.existsSync(`${old}.moved`)).toBe(false);
+			const direct = SessionManager.open(next, suppliedDir, suppliedCwd);
+			expect(direct.getCwd()).toBe(reopened.getCwd());
+			expect(direct.getSessionDir()).toBe(reopened.getSessionDir());
+		},
+	);
 
 	it("explicit open of an absent predecessor with an orphan marker resumes the live file, not an empty session", () => {
 		const old = manager.getSessionFile()!;
