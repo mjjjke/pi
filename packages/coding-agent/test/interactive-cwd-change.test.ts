@@ -1,7 +1,9 @@
 import { type Component, Container, visibleWidth } from "@earendil-works/pi-tui";
+import { renderLayoutFrame } from "@earendil-works/pi-tui/dist/layout.js";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { cwdAppliedNotice, formatCwdWarning, resolveCwdTarget } from "../src/core/cwd-change.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
+import { createChatViewport } from "../src/modes/interactive/chat-viewport.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -23,10 +25,14 @@ function deferred() {
 	return { promise, resolve };
 }
 
-function footerRebindHarness() {
+function footerRebindHarness(height = 1) {
 	const frames: string[][] = [];
 	const footerContainer = new Container();
-	const oldFooter = { render: () => ["old custom footer"], invalidate() {}, dispose: vi.fn() };
+	const oldFooter = {
+		render: vi.fn(() => Array.from({ length: height }, () => "old custom footer")),
+		invalidate() {},
+		dispose: vi.fn(),
+	};
 	footerContainer.addChild(oldFooter);
 	const mode = {
 		footerContainer,
@@ -74,6 +80,9 @@ function footerRebindHarness() {
 		showError: vi.fn(),
 	};
 	Object.setPrototypeOf(mode, InteractiveMode.prototype);
+	invoke("setExtensionFooter", mode, () => oldFooter);
+	frames.length = 0;
+	oldFooter.dispose.mockClear();
 	return { mode, frames, oldFooter, footerContainer, finishStartup: deferred(), startupEntered: deferred() };
 }
 
@@ -106,9 +115,9 @@ describe("interactive /cd", () => {
 			}
 			await startupEntered.promise;
 			expect(oldFooter.dispose).toHaveBeenCalledOnce();
-			expect(footerContainer.render(80)).toEqual([]);
+			expect(footerContainer.render(80)).toEqual([""]);
 			expect(frames.length).toBeGreaterThan(0);
-			expect(frames.every((frame) => frame.length === 0)).toBe(true);
+			expect(frames.every((frame) => frame.length === 1 && frame[0] === "")).toBe(true);
 			finishStartup.resolve();
 			await switching;
 			expect(footerContainer.render(80)).toEqual([
@@ -139,7 +148,7 @@ describe("interactive /cd", () => {
 		await reloadEntered.promise;
 		finishStartup.resolve();
 		await earlier;
-		expect(footerContainer.render(80)).toEqual([]);
+		expect(footerContainer.render(80)).toEqual([""]);
 		finishReload.resolve();
 		await later;
 		expect(footerContainer.render(80)).toEqual(["reloaded footer"]);
@@ -150,8 +159,46 @@ describe("interactive /cd", () => {
 		mode.runtimeHost.session.reload.mockRejectedValue(new Error("reload failed"));
 		await invoke("handleReloadCommand", mode);
 		expect(mode.showError).toHaveBeenCalledWith("Reload failed: reload failed");
-		expect(frames[0]).toEqual([]);
+		expect(frames[0]).toEqual([""]);
 		expect(footerContainer.render(80)).toEqual(["destination built-in footer"]);
+	});
+
+	it.each([0, 1, 3])("reserves %s outgoing rows in regular and fullscreen through overlapping resets", (height) => {
+		const { mode, footerContainer, oldFooter } = footerRebindHarness(height);
+		const editor = { render: () => ["EDITOR TOP", "INPUT", "EDITOR BOTTOM"], invalidate() {} };
+		const regular = new Container();
+		regular.addChild(editor);
+		regular.addChild(footerContainer);
+		const viewport = createChatViewport({
+			document: new Container(),
+			pendingMessages: new Container(),
+			status: new Container(),
+			editor,
+			footer: footerContainer,
+		});
+		const geometry = () => ({
+			regularRows: regular.render(80).length,
+			editorRow: renderLayoutFrame(viewport.root, 80, 24, () => {}).lines.findIndex((line) =>
+				line.includes("EDITOR TOP"),
+			),
+		});
+		const before = geometry();
+		oldFooter.render.mockClear();
+		invoke("resetExtensionUI", mode);
+		expect(footerContainer.render(40)).toEqual(Array(height).fill(""));
+		expect(geometry()).toEqual(before);
+		const next = { render: vi.fn(() => Array(height).fill("NEW FOOTER")), invalidate() {} };
+		invoke("setExtensionFooter", mode, () => next);
+		expect(geometry()).toEqual(before);
+		expect(next.render).not.toHaveBeenCalled();
+		invoke("resetExtensionUI", mode);
+		invoke("setExtensionFooter", mode, () => next);
+		expect(geometry()).toEqual(before);
+		expect(oldFooter.render).not.toHaveBeenCalled();
+		expect(next.render).not.toHaveBeenCalled();
+		invoke("showFooterAfterRebind", mode, Reflect.get(mode, "footerRebind"));
+		expect(geometry()).toEqual(before);
+		expect(footerContainer.render(80)).toEqual(Array(height).fill("NEW FOOTER"));
 	});
 
 	it("registers the command and resolves exactly one matching quote pair, not shell syntax", () => {

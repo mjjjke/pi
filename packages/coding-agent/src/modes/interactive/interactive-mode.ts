@@ -611,8 +611,9 @@ export class InteractiveMode {
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
-	// Reset disposes runtime-owned components; keep the footer hidden until startup finishes.
+	// Reset disposes runtime-owned components; reserve their last rendered height until startup finishes.
 	private footerRebind: object | undefined;
+	private footerRenderedHeight = 0;
 
 	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
@@ -705,7 +706,7 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerContainer = new Container();
-		this.footerContainer.addChild(this.footer);
+		this.mountFooter();
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -2570,6 +2571,7 @@ export class InteractiveMode {
 
 	private resetExtensionUI(): void {
 		this.footerRebind = {};
+		this.mountFooter();
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -2651,7 +2653,7 @@ export class InteractiveMode {
 			this.customFooter.dispose();
 		}
 
-		this.footerContainer.clear();
+		if (!this.footerRebind) this.footerContainer.clear();
 		if (factory) {
 			// Create and add custom footer, passing the data provider
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
@@ -2659,19 +2661,34 @@ export class InteractiveMode {
 			// Restore built-in footer
 			this.customFooter = undefined;
 		}
-		if (!this.footerRebind) {
-			this.footerContainer.addChild(this.customFooter ?? this.footer);
-		}
+		this.mountFooter();
 
 		this.ui.requestRender();
+	}
+
+	private mountFooter(): void {
+		this.footerContainer.clear();
+		if (this.footerRebind) {
+			// Never render a disposed outgoing footer, even if the terminal is resized.
+			this.footerContainer.addChild(new Spacer(this.footerRenderedHeight));
+			return;
+		}
+		const footer = this.customFooter ?? this.footer;
+		this.footerContainer.addChild({
+			render: (width) => {
+				const lines = footer.render(width);
+				this.footerRenderedHeight = lines.length;
+				return lines;
+			},
+			invalidate: () => footer.invalidate(),
+		});
 	}
 
 	private showFooterAfterRebind(rebind: object | undefined): void {
 		// A deferred startup command may already have begun a newer reload.
 		if (!rebind || this.footerRebind !== rebind) return;
 		this.footerRebind = undefined;
-		this.footerContainer.clear();
-		this.footerContainer.addChild(this.customFooter ?? this.footer);
+		this.mountFooter();
 		this.ui.requestRender();
 	}
 
