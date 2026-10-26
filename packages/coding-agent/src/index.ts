@@ -372,7 +372,17 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
-export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
+export {
+	type AppliedEditsResult,
+	applyEditsToNormalizedContent,
+	detectLineEnding,
+	type Edit,
+	type EditDiffResult,
+	generateDiffString,
+	generateUnifiedPatch,
+	normalizeToLF,
+	restoreLineEndings,
+} from "./core/tools/edit-diff.ts";
 // Tools
 export {
 	type BashOperations,
