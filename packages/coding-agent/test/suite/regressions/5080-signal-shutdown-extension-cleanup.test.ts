@@ -19,7 +19,10 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
+	runtimeHost: {
+		session: { closeAdmission: () => void; cancelCwdChange: () => void };
+		dispose: () => Promise<void>;
+	};
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
@@ -77,6 +80,14 @@ function createContext(order: string[], sessionManager = createSessionManager())
 		isShuttingDown: false,
 		unregisterSignalHandlers: vi.fn(),
 		runtimeHost: {
+			session: {
+				closeAdmission: vi.fn(() => {
+					order.push("closeAdmission");
+				}),
+				cancelCwdChange: vi.fn(() => {
+					order.push("cancelCwdChange");
+				}),
+			},
 			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),
@@ -122,7 +133,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context, { fromSignal: true });
 
-		expect(order).toEqual(["dispose", "drainInput", "stop"]);
+		expect(order).toEqual(["closeAdmission", "cancelCwdChange", "dispose", "drainInput", "stop"]);
 		expect(context.isShuttingDown).toBe(true);
 	});
 
@@ -135,7 +146,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["closeAdmission", "cancelCwdChange", "drainInput", "stop", "dispose"]);
 	});
 
 	test("interactive quit prints a resume hint for persisted sessions", async () => {
@@ -151,7 +162,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 
 		await callShutdown(context);
 
-		expect(order).toEqual(["drainInput", "stop", "dispose"]);
+		expect(order).toEqual(["closeAdmission", "cancelCwdChange", "drainInput", "stop", "dispose"]);
 		expect(stdoutWrite).toHaveBeenCalledWith(
 			`${chalk.dim("To resume this session:")} ${APP_NAME} --session test-session\n`,
 		);
