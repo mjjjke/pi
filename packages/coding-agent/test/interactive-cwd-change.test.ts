@@ -1,4 +1,4 @@
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Container, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { cwdAppliedNotice, formatCwdWarning, resolveCwdTarget } from "../src/core/cwd-change.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
@@ -11,8 +11,149 @@ const prototype = InteractiveMode.prototype as unknown as {
 	handleCdCommand(this: object, args: string): Promise<void>;
 };
 
+function invoke(name: string, mode: object, ...args: unknown[]): unknown {
+	return Reflect.apply(Reflect.get(InteractiveMode.prototype, name), mode, args);
+}
+
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+}
+
+function footerRebindHarness() {
+	const frames: string[][] = [];
+	const footerContainer = new Container();
+	const oldFooter = { render: () => ["old custom footer"], invalidate() {}, dispose: vi.fn() };
+	footerContainer.addChild(oldFooter);
+	const mode = {
+		footerContainer,
+		customFooter: oldFooter as (Component & { dispose?(): void }) | undefined,
+		footer: { render: () => ["destination built-in footer"], invalidate: vi.fn() },
+		footerDataProvider: { clearExtensionStatuses: vi.fn() },
+		defaultEditor: {},
+		editor: { render: () => [], invalidate() {} },
+		editorContainer: new Container(),
+		ui: {
+			hideOverlay: vi.fn(),
+			setFocus: vi.fn(),
+			requestRender: () => frames.push(footerContainer.render(80)),
+		},
+		runtimeHost: {
+			session: {
+				reload: vi.fn(async (_options: { beforeSessionStart: () => void }) => {}),
+				settingsManager: { getHideThinkingBlock: () => false, getOutputPad: () => 1 },
+				resourceLoader: { getThemes: () => ({ themes: [] }) },
+				modelRuntime: { getError: () => undefined },
+			},
+		},
+		programStatus: { reset: vi.fn() },
+		keybindings: { reload: vi.fn() },
+		themeController: { applyFromSettings: vi.fn() },
+		clearExtensionTerminalInputListeners: vi.fn(),
+		setExtensionHeader: vi.fn(),
+		clearExtensionWidgets: vi.fn(),
+		setCustomEditorComponent: vi.fn(),
+		setupAutocompleteProvider: vi.fn(),
+		updateTerminalTitle: vi.fn(),
+		setWorkingIndicator: vi.fn(),
+		setHiddenThinkingLabel: vi.fn(),
+		applyRuntimeSettings: vi.fn(),
+		renderCurrentSessionState: vi.fn(),
+		subscribeToAgent: vi.fn(),
+		bindCurrentSessionExtensions: vi.fn(async () => {}),
+		updateAvailableProviderCount: vi.fn(),
+		updateEditorBorderColor: vi.fn(),
+		rebuildChatFromMessages: vi.fn(),
+		setupExtensionShortcuts: vi.fn(),
+		showLoadedResources: vi.fn(),
+		maybeSaveImplicitProjectTrustAfterReload: vi.fn(),
+		showStatus: vi.fn(),
+		showError: vi.fn(),
+	};
+	Object.setPrototypeOf(mode, InteractiveMode.prototype);
+	return { mode, frames, oldFooter, footerContainer, finishStartup: deferred(), startupEntered: deferred() };
+}
+
 describe("interactive /cd", () => {
 	beforeAll(() => initTheme("dark"));
+	it.each(["cd", "reload"] as const)("%s hides the footer until every startup handler finishes", async (operation) => {
+		for (const destinationFooter of ["custom", "built-in", "cleared"] as const) {
+			const { mode, frames, oldFooter, footerContainer, finishStartup, startupEntered } = footerRebindHarness();
+			const nextFooter = { render: () => ["destination custom footer"], invalidate() {}, dispose: vi.fn() };
+			const startup = async () => {
+				startupEntered.resolve();
+				if (destinationFooter !== "built-in") {
+					invoke("setExtensionFooter", mode, () => nextFooter);
+					if (destinationFooter === "cleared") invoke("setExtensionFooter", mode, undefined);
+				}
+				await finishStartup.promise;
+			};
+			mode.bindCurrentSessionExtensions.mockImplementation(startup);
+			mode.runtimeHost.session.reload.mockImplementation(async ({ beforeSessionStart }) => {
+				beforeSessionStart();
+				await startup();
+			});
+			let switching: unknown;
+			if (operation === "cd") {
+				// The runtime calls this after relocation, before creating/binding the destination.
+				invoke("resetExtensionUI", mode);
+				switching = invoke("rebindCurrentSession", mode, { renderBeforeBind: true });
+			} else {
+				switching = invoke("handleReloadCommand", mode);
+			}
+			await startupEntered.promise;
+			expect(oldFooter.dispose).toHaveBeenCalledOnce();
+			expect(footerContainer.render(80)).toEqual([]);
+			expect(frames.length).toBeGreaterThan(0);
+			expect(frames.every((frame) => frame.length === 0)).toBe(true);
+			finishStartup.resolve();
+			await switching;
+			expect(footerContainer.render(80)).toEqual([
+				destinationFooter === "custom" ? "destination custom footer" : "destination built-in footer",
+			]);
+			if (destinationFooter === "cleared") expect(nextFooter.dispose).toHaveBeenCalledOnce();
+		}
+	});
+
+	it("an older rebind cannot expose the footer while a newer reload is still starting", async () => {
+		const { mode, footerContainer, finishStartup, startupEntered } = footerRebindHarness();
+		mode.bindCurrentSessionExtensions.mockImplementation(async () => {
+			startupEntered.resolve();
+			await finishStartup.promise;
+		});
+		invoke("resetExtensionUI", mode);
+		const earlier = invoke("rebindCurrentSession", mode, { renderBeforeBind: true });
+		await startupEntered.promise;
+		const reloadEntered = deferred();
+		const finishReload = deferred();
+		mode.runtimeHost.session.reload.mockImplementation(async () => {
+			invoke("setExtensionFooter", mode, () => ({ render: () => ["reloaded footer"], invalidate() {} }));
+			reloadEntered.resolve();
+			await finishReload.promise;
+		});
+		// A deferred startup command can reach ctx.reload() before its binder returns.
+		const later = invoke("handleReloadCommand", mode);
+		await reloadEntered.promise;
+		finishStartup.resolve();
+		await earlier;
+		expect(footerContainer.render(80)).toEqual([]);
+		finishReload.resolve();
+		await later;
+		expect(footerContainer.render(80)).toEqual(["reloaded footer"]);
+	});
+
+	it("a failed reload restores the built-in footer instead of leaving it hidden", async () => {
+		const { mode, frames, footerContainer } = footerRebindHarness();
+		mode.runtimeHost.session.reload.mockRejectedValue(new Error("reload failed"));
+		await invoke("handleReloadCommand", mode);
+		expect(mode.showError).toHaveBeenCalledWith("Reload failed: reload failed");
+		expect(frames[0]).toEqual([]);
+		expect(footerContainer.render(80)).toEqual(["destination built-in footer"]);
+	});
+
 	it("registers the command and resolves exactly one matching quote pair, not shell syntax", () => {
 		expect(BUILTIN_SLASH_COMMANDS.some((c) => c.name === "cd")).toBe(true);
 		expect(resolveCwdTarget('  "../two words"  ', "/one/a")).toBe("/one/two words");

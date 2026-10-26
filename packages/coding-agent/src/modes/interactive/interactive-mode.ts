@@ -611,6 +611,8 @@ export class InteractiveMode {
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
+	// Reset disposes runtime-owned components; keep the footer hidden until startup finishes.
+	private footerRebind: object | undefined;
 
 	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
@@ -2191,6 +2193,7 @@ export class InteractiveMode {
 
 	private async rebindCurrentSession(options: { renderBeforeBind?: boolean } = {}): Promise<void> {
 		const session = this.session;
+		const footerRebind = this.footerRebind;
 
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
@@ -2215,6 +2218,7 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
 		this.updateTerminalTitle();
+		this.showFooterAfterRebind(footerRebind);
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
@@ -2565,6 +2569,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		this.footerRebind = {};
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -2650,13 +2655,23 @@ export class InteractiveMode {
 		if (factory) {
 			// Create and add custom footer, passing the data provider
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
-			this.footerContainer.addChild(this.customFooter);
 		} else {
 			// Restore built-in footer
 			this.customFooter = undefined;
-			this.footerContainer.addChild(this.footer);
+		}
+		if (!this.footerRebind) {
+			this.footerContainer.addChild(this.customFooter ?? this.footer);
 		}
 
+		this.ui.requestRender();
+	}
+
+	private showFooterAfterRebind(rebind: object | undefined): void {
+		// A deferred startup command may already have begun a newer reload.
+		if (!rebind || this.footerRebind !== rebind) return;
+		this.footerRebind = undefined;
+		this.footerContainer.clear();
+		this.footerContainer.addChild(this.customFooter ?? this.footer);
 		this.ui.requestRender();
 	}
 
@@ -6781,6 +6796,7 @@ export class InteractiveMode {
 		}
 
 		this.resetExtensionUI();
+		const footerRebind = this.footerRebind;
 
 		const reloadBox = new Container();
 		const borderColor = (s: string) => theme.fg("border", s);
@@ -6857,6 +6873,8 @@ export class InteractiveMode {
 				dismissReloadBox(previousEditor as Component);
 			}
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			this.showFooterAfterRebind(footerRebind);
 		}
 	}
 
