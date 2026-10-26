@@ -398,6 +398,29 @@ Options match `ctx.newSession()`: `parentSession` records the parent file, `setu
 
 `completion` resolves with `{ cancelled }`, or rejects when replacement fails, including unsupported modes. Attach a rejection handler when observing it. Never await `completion` inside the handler that queued it: replacement cannot run until all `agent_end` handlers return.
 
+### ctx.requestCwdChange(path, options?)
+
+Interactive hosts expose this optional method to request a working-directory change in the same
+conversation. It returns `{ status: "pending", requestId, from, to, completion }` or
+`{ status: "rejected", reason }` synchronously. `options.reason` records the initiator's reason. Paths
+are absolute, home-relative or relative to the current session cwd; no shell expansion is performed.
+
+Admission is not execution: after the current run settles, core applies the change on the next tick at
+the first idle point with no queued input, foreground compaction, shell command or readiness barrier.
+Do not await `completion` from a tool or lifecycle handler. It resolves to `"applied"`, `"cancelled"`,
+`"untrusted"` or `"failed"`. Core writes one passive outcome; it never starts a response to that notice.
+Only one request can occupy the slot, including while destination trust is being resolved.
+
+Stopping the conversation (`abort()`), tree navigation, session replacement and disposal cancel a
+pending request. Reload keeps it. Interactive `/compact` starts background compaction and keeps it;
+`/compact --now` stops the conversation and cancels it. A running background compaction is cancelled
+with the reload cause when the cwd change applies. RPC and print do not expose the method.
+
+The outgoing `session_shutdown` has `reason: "cwd"`, `targetCwd` and `targetSessionFile`; the destination
+`session_start` has `reason: "cwd"`, `previousCwd` and `previousSessionFile`. The id stays the same.
+During shutdown, `ctx.cwd` is still the source, while `ctx.sessionManager` already names the destination;
+shutdown appends therefore follow the cwd notice. Runtime-bound contexts become stale as on replacement.
+
 <a id="state-management"></a>
 <a id="persist-state"></a>
 

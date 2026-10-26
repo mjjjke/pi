@@ -59,6 +59,31 @@ See the checked [sessions example](../examples/sdk/11-sessions.ts) for creating,
 
 After a runtime replacement, subscriptions belong to the old `AgentSession` and must be rebound. See the [session runtime example](../examples/sdk/13-session-runtime.ts).
 
+### Same-conversation working-directory changes
+
+`runtime.changeCwd(target, { source: "user" })` moves the same conversation to another directory. It keeps
+its session id and `SessionManager`, relocates managed session files, and recreates cwd-bound services
+through the runtime factory. The factory receives `carry`; custom factories must forward it to
+`createAgentSessionFromServices()` or `createAgentSession()`. It carries staged content, SDK-owned staged
+instructions, next-turn messages, the live model/thinking selection and tool selection. It also holds
+`images.blockImages` and `codemode.mode` for the session, including across reloads, so destination settings
+cannot rewrite already-sent history. Resume/restart ends the hold; `setBlockImages()` releases its key.
+
+The result is `{ changed: true, from, to, warning? }` or `{ changed: false, error }`. Busy sessions,
+unsupported model system updates, refused persistence, codemode `only`, and hidden tool declarations
+refuse the operation. Publication precedes teardown; a subsequent runtime-factory failure throws, but
+the conversation is durably at the destination and can be resumed there.
+
+Hosts can set `setSessionDirResolver(dirFor)`, `setResolveTargetTrust(resolve)` and
+`setAmbientCwdHandler(chdir)`. Trust resolves before publication, without loading destination factories;
+the host must reuse its answer in the runtime factory. Without a trust hook, targets with trust-requiring
+resources are refused. SDK runtimes do not change `process.cwd()` by default. The CLI does so after
+outgoing shutdown and before destination factories run.
+
+`setCwdChangeHandler(apply)` enables the optional extension `ctx.requestCwdChange()` API. Bind it only in a
+mode that can apply the operation and handle post-publication failures. Pi binds it in interactive mode,
+not RPC or print. See [deferred cwd requests](extensions.md#ctxrequestcwdchangepath-options).
+
 ## Prompting
 
 `prompt()` handles extension commands and expands file-based prompt templates before ordinary user messages enter the agent. For an accepted agent run, it resolves after the run finishes, including automatic retries.
