@@ -91,44 +91,47 @@ function footerRebindHarness(height = 1) {
 
 describe("interactive /cd", () => {
 	beforeAll(() => initTheme("dark"));
-	it.each(["cd", "reload"] as const)("%s freezes the outgoing footer until every startup handler finishes", async (operation) => {
-		for (const destinationFooter of ["custom", "built-in", "cleared"] as const) {
-			const { mode, frames, oldFooter, footerContainer, finishStartup, startupEntered } = footerRebindHarness();
-			const nextFooter = { render: () => ["destination custom footer"], invalidate() {}, dispose: vi.fn() };
-			const startup = async () => {
-				startupEntered.resolve();
-				if (destinationFooter !== "built-in") {
-					invoke("setExtensionFooter", mode, () => nextFooter);
-					if (destinationFooter === "cleared") invoke("setExtensionFooter", mode, undefined);
+	it.each(["cd", "reload"] as const)(
+		"%s freezes the outgoing footer until every startup handler finishes",
+		async (operation) => {
+			for (const destinationFooter of ["custom", "built-in", "cleared"] as const) {
+				const { mode, frames, oldFooter, footerContainer, finishStartup, startupEntered } = footerRebindHarness();
+				const nextFooter = { render: () => ["destination custom footer"], invalidate() {}, dispose: vi.fn() };
+				const startup = async () => {
+					startupEntered.resolve();
+					if (destinationFooter !== "built-in") {
+						invoke("setExtensionFooter", mode, () => nextFooter);
+						if (destinationFooter === "cleared") invoke("setExtensionFooter", mode, undefined);
+					}
+					await finishStartup.promise;
+				};
+				mode.bindCurrentSessionExtensions.mockImplementation(startup);
+				mode.runtimeHost.session.reload.mockImplementation(async ({ beforeSessionStart }) => {
+					beforeSessionStart();
+					await startup();
+				});
+				let switching: unknown;
+				if (operation === "cd") {
+					// The runtime calls this after relocation, before creating/binding the destination.
+					invoke("resetExtensionUI", mode);
+					switching = invoke("rebindCurrentSession", mode, { renderBeforeBind: true });
+				} else {
+					switching = invoke("handleReloadCommand", mode);
 				}
-				await finishStartup.promise;
-			};
-			mode.bindCurrentSessionExtensions.mockImplementation(startup);
-			mode.runtimeHost.session.reload.mockImplementation(async ({ beforeSessionStart }) => {
-				beforeSessionStart();
-				await startup();
-			});
-			let switching: unknown;
-			if (operation === "cd") {
-				// The runtime calls this after relocation, before creating/binding the destination.
-				invoke("resetExtensionUI", mode);
-				switching = invoke("rebindCurrentSession", mode, { renderBeforeBind: true });
-			} else {
-				switching = invoke("handleReloadCommand", mode);
+				await startupEntered.promise;
+				expect(oldFooter.dispose).toHaveBeenCalledOnce();
+				expect(footerContainer.render(80)).toEqual(["old custom footer"]);
+				expect(frames.length).toBeGreaterThan(0);
+				expect(frames.every((frame) => frame.length === 1 && frame[0] === "old custom footer")).toBe(true);
+				finishStartup.resolve();
+				await switching;
+				expect(footerContainer.render(80)).toEqual([
+					destinationFooter === "custom" ? "destination custom footer" : "destination built-in footer",
+				]);
+				if (destinationFooter === "cleared") expect(nextFooter.dispose).toHaveBeenCalledOnce();
 			}
-			await startupEntered.promise;
-			expect(oldFooter.dispose).toHaveBeenCalledOnce();
-			expect(footerContainer.render(80)).toEqual(["old custom footer"]);
-			expect(frames.length).toBeGreaterThan(0);
-			expect(frames.every((frame) => frame.length === 1 && frame[0] === "old custom footer")).toBe(true);
-			finishStartup.resolve();
-			await switching;
-			expect(footerContainer.render(80)).toEqual([
-				destinationFooter === "custom" ? "destination custom footer" : "destination built-in footer",
-			]);
-			if (destinationFooter === "cleared") expect(nextFooter.dispose).toHaveBeenCalledOnce();
-		}
-	});
+		},
+	);
 
 	it("an older rebind cannot expose the footer while a newer reload is still starting", async () => {
 		const { mode, footerContainer, finishStartup, startupEntered } = footerRebindHarness();
