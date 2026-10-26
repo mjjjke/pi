@@ -71,6 +71,9 @@ export function cwdRequestRejection(error: string): string {
 	const model = /^cd: (.+) cannot receive the system prompt update/.exec(error)?.[1];
 	if (model)
 		return `Not changed: the current model (${model}) cannot receive the system prompt update this change needs.`;
+	// Admission preflight only unlinks/syncs files to finish an earlier relocation.
+	if (/^cd: (unlink|fsync|reconcile) /.test(error))
+		return `Not changed: the previous change's cleanup failed: ${error.slice(4).replace(/\.$/, "")}.`;
 	return `Not changed: ${error.replace(/^cd: /, "").replace(/\.$/, "")}.`;
 }
 

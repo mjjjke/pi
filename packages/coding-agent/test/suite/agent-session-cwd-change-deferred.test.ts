@@ -126,6 +126,27 @@ describe("deferred cwd requests", () => {
 		},
 	);
 
+	it.each([
+		"unlink /old/session.jsonl: EACCES: permission denied",
+		"unlink /old/session.jsonl.moved: EPERM: operation not permitted",
+		"fsync /old/sessions: EIO: input/output error",
+		"reconcile marker /old/session.jsonl.moved does not name /new/session.jsonl",
+	])("names the previous cleanup failure without losing its actionable detail: %s", async (detail) => {
+		const f = await fixture();
+		const old = f.runtime.session;
+		await old.prompt("bootstrapped");
+		const entries = structuredClone(old.sessionManager.getEntries());
+		vi.spyOn(old.sessionManager, "preflightCwdChange").mockImplementationOnce(() => {
+			throw new Error(`cd: ${detail}`);
+		});
+		expect(old.requestCwdChange(f.b)).toEqual({
+			status: "rejected",
+			reason: `Not changed: the previous change's cleanup failed: ${detail}.`,
+		});
+		expect(old.pendingCwdChange).toBeUndefined();
+		expect(old.sessionManager.getEntries()).toEqual(entries);
+	});
+
 	it("keeps pending across reload and accepts a new request after it applied", async () => {
 		const f = await fixture();
 		await f.runtime.session.prompt("hello");
