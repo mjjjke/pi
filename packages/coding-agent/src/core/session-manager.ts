@@ -2050,7 +2050,7 @@ export class SessionManager {
 		writeSessionFileAtomic(this.sessionFile, this.fileEntries, { mode });
 	}
 
-	/** Warnings from opening the current file (stray-file migration skips or a failed rewrite). */
+	/** Warnings from opening the current file (migration skips, failed rewrites or predecessor cleanup). */
 	getLoadWarnings(): string[] {
 		return [...this.loadWarnings];
 	}
@@ -2185,6 +2185,9 @@ export class SessionManager {
 	 * cleanup/durability failures are warnings, retried on open and before the next relocation.
 	 */
 	relocate(plan: CwdChangePlan, entries: readonly SessionEntry[]): { committed: true; warning?: string } {
+		if (entries.length < 1 || entries.length > 2 || (entries[1] && entries[1].type !== "custom_message")) {
+			throw new Error("cd: invalid cwd change entries (one state and an optional notice required)");
+		}
 		let parent = this.leafId;
 		const byId = new Map(this.byId);
 		for (const entry of entries) {
@@ -2206,10 +2209,26 @@ export class SessionManager {
 			data.v !== 1 ||
 			data.from !== plan.from ||
 			data.to !== plan.to ||
+			(data.source !== "user" && data.source !== "model") ||
 			data.previousSessionFile !==
 				(plan.previousSessionFile !== plan.sessionFile ? plan.previousSessionFile : undefined)
 		) {
 			throw new Error("cd: invalid cwd change state entry");
+		}
+		const notice = entries[1];
+		if (notice?.type === "custom_message") {
+			const details = notice.details as
+				| Partial<{ kind: string; from: string; to: string; transitionId: string }>
+				| undefined;
+			if (
+				!notice.display ||
+				details?.kind !== "applied" ||
+				details.from !== plan.from ||
+				details.to !== plan.to ||
+				details.transitionId !== state.id
+			) {
+				throw new Error("cd: invalid cwd change notice (applied transition receipt required)");
+			}
 		}
 		this.preflightCwdChange(plan);
 		const old = this.sessionFile;

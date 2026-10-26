@@ -554,6 +554,24 @@ describe("layouts, artifacts and history", () => {
 		expect(fs.readFileSync(old)).toEqual(before);
 	});
 
+	it("rejects a second cwd state so an unchecked latest entry cannot bypass predecessor reconciliation", () => {
+		const plan = manager.planCwdChange(b, dirFor);
+		const entries = manager.buildCwdChangeEntries(plan, { source: "user" });
+		const second = { ...entries[0], id: "second-state", parentId: entries[0].id };
+		expect(() => manager.relocate(plan, [...entries, second])).toThrow(/invalid cwd change entries/);
+		expect(manager.getCwd()).toBe(a);
+	});
+
+	it("rejects an applied notice with a wrong transition receipt before publishing", () => {
+		const plan = manager.planCwdChange(b, dirFor);
+		const entries = manager.buildCwdChangeEntries(plan, { source: "model", notice: "applied" });
+		const notice = entries[1];
+		if (notice.type !== "custom_message") throw new Error("expected notice");
+		notice.details = { kind: "applied", from: a, to: b, transitionId: "wrong-state" };
+		expect(() => manager.relocate(plan, entries)).toThrow(/invalid cwd change notice/);
+		expect(manager.getCwd()).toBe(a);
+	});
+
 	it("rejects missing/non-directory/same targets, stale plans and stale detached entries", () => {
 		expect(() => manager.planCwdChange(a, dirFor)).toThrow(/already/);
 		expect(() => manager.planCwdChange(join(root, "absent"), dirFor)).toThrow();
