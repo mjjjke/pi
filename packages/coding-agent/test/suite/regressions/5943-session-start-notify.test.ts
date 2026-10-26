@@ -1,5 +1,5 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Text } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
@@ -48,6 +48,7 @@ type RebindContext = {
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
 	updateTerminalTitle: () => void;
+	showFooterAfterRebind: () => void;
 };
 
 type ReloadCommandContext = {
@@ -58,7 +59,7 @@ type ReloadCommandContext = {
 		reload: (options?: { beforeSessionStart?: () => void | Promise<void> }) => Promise<void>;
 		resourceLoader: { getThemes: () => { themes: [] } };
 		extensionRunner: unknown;
-		modelRegistry: { getError: () => string | undefined };
+		modelRuntime: { getError: () => string | undefined };
 	};
 	settingsManager: {
 		getHttpIdleTimeoutMs: () => number;
@@ -74,15 +75,19 @@ type ReloadCommandContext = {
 	builtInHeader?: unknown;
 	editorContainer: { clear: () => void; addChild: (component: unknown) => void };
 	ui: {
+		terminal: { columns: number };
 		setFocus: (component: unknown) => void;
 		requestRender: (force?: boolean) => void;
 		setShowHardwareCursor: (enabled: boolean) => void;
 		setClearOnShrink: (enabled: boolean) => void;
 	};
-	editor: unknown;
+	editor: Component;
 	defaultEditor: { setPaddingX: (padding: number) => void; setAutocompleteMaxVisible: (maxVisible: number) => void };
 	themeController: { applyFromSettings: () => Promise<void> };
 	resetExtensionUI: () => void;
+	createRuntimeSwitchBox: (message: string, height: number) => Container;
+	showFooterAfterRebind: () => void;
+	applyRuntimeSettings: () => void;
 	rebuildChatFromMessages: () => void;
 	setupAutocompleteProvider: () => void;
 	setupExtensionShortcuts: (runner: unknown) => void;
@@ -100,6 +105,7 @@ type InteractiveModePrototype = {
 	): void;
 	rebindCurrentSession(this: RebindContext, options?: { renderBeforeBind?: boolean }): Promise<void>;
 	handleReloadCommand(this: ReloadCommandContext): Promise<void>;
+	createRuntimeSwitchBox(message: string, height: number): Container;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrototype;
@@ -118,7 +124,7 @@ type ReloadCommandContextOverrides = Omit<
 };
 
 function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {}): ReloadCommandContext {
-	const editor = overrides.editor ?? {};
+	const editor = overrides.editor ?? { render: () => ["", "", ""], invalidate() {} };
 	return {
 		hideThinkingBlock: overrides.hideThinkingBlock ?? false,
 		session: {
@@ -129,7 +135,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 			},
 			resourceLoader: { getThemes: () => ({ themes: [] }) },
 			extensionRunner: {},
-			modelRegistry: { getError: () => undefined },
+			modelRuntime: { getError: () => undefined },
 			...overrides.session,
 		},
 		settingsManager: {
@@ -145,6 +151,7 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		keybindings: { reload: () => {}, ...overrides.keybindings },
 		editorContainer: { clear: () => {}, addChild: () => {}, ...overrides.editorContainer },
 		ui: {
+			terminal: { columns: 80 },
 			setFocus: () => {},
 			requestRender: () => {},
 			setShowHardwareCursor: () => {},
@@ -157,6 +164,9 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		customHeader: overrides.customHeader,
 		builtInHeader: overrides.builtInHeader,
 		resetExtensionUI: overrides.resetExtensionUI ?? (() => {}),
+		createRuntimeSwitchBox: interactiveModePrototype.createRuntimeSwitchBox,
+		showFooterAfterRebind: () => {},
+		applyRuntimeSettings: () => {},
 		rebuildChatFromMessages: overrides.rebuildChatFromMessages ?? (() => {}),
 		setupAutocompleteProvider: overrides.setupAutocompleteProvider ?? (() => {}),
 		setupExtensionShortcuts: overrides.setupExtensionShortcuts ?? (() => {}),
@@ -253,6 +263,7 @@ describe("regression #5943: session_start transient UI", () => {
 		try {
 			const context: RebindContext = {
 				applyRuntimeSettings: () => events.push("apply"),
+				showFooterAfterRebind: () => {},
 				programStatus: { reset: () => {} },
 				renderCurrentSessionState: () => events.push("render"),
 				bindCurrentSessionExtensions: async () => {
@@ -316,6 +327,7 @@ describe("regression #5943: session_start transient UI", () => {
 				updateAvailableProviderCount: async () => {},
 				updateEditorBorderColor: () => {},
 				updateTerminalTitle: () => {},
+				showFooterAfterRebind: () => {},
 			};
 
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
@@ -369,6 +381,7 @@ describe("regression #5943: session_start transient UI", () => {
 				updateAvailableProviderCount: async () => {},
 				updateEditorBorderColor: () => {},
 				updateTerminalTitle: () => {},
+				showFooterAfterRebind: () => {},
 			};
 
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
@@ -442,7 +455,7 @@ describe("regression #5943: session_start transient UI", () => {
 
 	it("keeps the reload blocker focused until async reload completes", async () => {
 		initTheme("dark", false);
-		const editor = {};
+		const editor = { render: () => ["", "", ""], invalidate() {} };
 		let focused: unknown;
 		let chatRestored = false;
 		let markReloadWaiting!: () => void;

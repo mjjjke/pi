@@ -611,9 +611,10 @@ export class InteractiveMode {
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
-	// Reset disposes runtime-owned components; reserve their last rendered height until startup finishes.
+	// Reset disposes runtime-owned components; freeze their last rendered output until startup finishes.
 	private footerRebind: object | undefined;
 	private footerRenderedHeight = 0;
+	private footerRenderedLines: string[] | undefined;
 
 	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
@@ -2669,8 +2670,13 @@ export class InteractiveMode {
 	private mountFooter(): void {
 		this.footerContainer.clear();
 		if (this.footerRebind) {
-			// Never render a disposed outgoing footer, even if the terminal is resized.
-			this.footerContainer.addChild(new Spacer(this.footerRenderedHeight));
+			// A frozen copy keeps the dock visible without calling the disposed outgoing footer.
+			const lines = this.footerRenderedLines;
+			this.footerContainer.addChild(
+				lines
+					? { render: (width) => lines.map((line) => truncateToWidth(line, width, "")), invalidate() {} }
+					: new Spacer(this.footerRenderedHeight),
+			);
 			return;
 		}
 		// Keep the footer itself as the mouse/focus target so all its optional hooks survive.
@@ -2680,6 +2686,7 @@ export class InteractiveMode {
 		mounted.render = (width) => {
 			const lines = render(width);
 			this.footerRenderedHeight = lines.length;
+			this.footerRenderedLines = [...lines];
 			return lines;
 		};
 		const handleMouse = mounted.handleMouse.bind(mounted);
@@ -6762,12 +6769,23 @@ export class InteractiveMode {
 		}
 	}
 
+	private createRuntimeSwitchBox(message: string, height: number): Container {
+		const box = new Container();
+		if (height > 0) box.addChild(new DynamicBorder());
+		if (height > 2) {
+			box.addChild(new TruncatedText(theme.fg("muted", message), 1, 0));
+			if (height > 3) box.addChild(new Spacer(height - 3));
+		}
+		if (height > 1) box.addChild(new DynamicBorder());
+		return box;
+	}
+
 	private async performCwdChange(target: string, options: ChangeCwdOptions): Promise<ChangeCwdResult> {
 		const text = this.editor.getText();
-		const box = new Container();
-		box.addChild(new DynamicBorder());
-		box.addChild(new Text(`Changing working directory to ${this.formatDisplayPath(target)}…`, 1, 1));
-		box.addChild(new DynamicBorder());
+		const box = this.createRuntimeSwitchBox(
+			`Changing working directory to ${this.formatDisplayPath(target)}…`,
+			this.editor.render(this.ui.terminal.columns).length,
+		);
 		this.cwdBox = box;
 		this.editorContainer.clear();
 		this.editorContainer.addChild(box);
@@ -6817,22 +6835,14 @@ export class InteractiveMode {
 			return;
 		}
 
+		const editorHeight = this.editor.render(this.ui.terminal.columns).length;
 		this.resetExtensionUI();
 		const footerRebind = this.footerRebind;
 
-		const reloadBox = new Container();
-		const borderColor = (s: string) => theme.fg("border", s);
-		reloadBox.addChild(new DynamicBorder(borderColor));
-		reloadBox.addChild(new Spacer(1));
-		reloadBox.addChild(
-			new ThemedText(
-				() => theme.fg("muted", "Reloading keybindings, extensions, skills, prompts, themes, and context files..."),
-				1,
-				0,
-			),
+		const reloadBox = this.createRuntimeSwitchBox(
+			"Reloading keybindings, extensions, skills, prompts, themes, and context files...",
+			editorHeight,
 		);
-		reloadBox.addChild(new Spacer(1));
-		reloadBox.addChild(new DynamicBorder(borderColor));
 
 		const previousEditor = this.editor;
 		this.editorContainer.clear();

@@ -43,6 +43,7 @@ function footerRebindHarness(height = 1) {
 		editor: { render: () => [], invalidate() {} },
 		editorContainer: new Container(),
 		ui: {
+			terminal: { columns: 80 },
 			hideOverlay: vi.fn(),
 			setFocus: vi.fn(),
 			requestRender: () => {
@@ -90,7 +91,7 @@ function footerRebindHarness(height = 1) {
 
 describe("interactive /cd", () => {
 	beforeAll(() => initTheme("dark"));
-	it.each(["cd", "reload"] as const)("%s hides the footer until every startup handler finishes", async (operation) => {
+	it.each(["cd", "reload"] as const)("%s freezes the outgoing footer until every startup handler finishes", async (operation) => {
 		for (const destinationFooter of ["custom", "built-in", "cleared"] as const) {
 			const { mode, frames, oldFooter, footerContainer, finishStartup, startupEntered } = footerRebindHarness();
 			const nextFooter = { render: () => ["destination custom footer"], invalidate() {}, dispose: vi.fn() };
@@ -117,9 +118,9 @@ describe("interactive /cd", () => {
 			}
 			await startupEntered.promise;
 			expect(oldFooter.dispose).toHaveBeenCalledOnce();
-			expect(footerContainer.render(80)).toEqual([""]);
+			expect(footerContainer.render(80)).toEqual(["old custom footer"]);
 			expect(frames.length).toBeGreaterThan(0);
-			expect(frames.every((frame) => frame.length === 1 && frame[0] === "")).toBe(true);
+			expect(frames.every((frame) => frame.length === 1 && frame[0] === "old custom footer")).toBe(true);
 			finishStartup.resolve();
 			await switching;
 			expect(footerContainer.render(80)).toEqual([
@@ -150,18 +151,18 @@ describe("interactive /cd", () => {
 		await reloadEntered.promise;
 		finishStartup.resolve();
 		await earlier;
-		expect(footerContainer.render(80)).toEqual([""]);
+		expect(footerContainer.render(80)).toEqual(["old custom footer"]);
 		finishReload.resolve();
 		await later;
 		expect(footerContainer.render(80)).toEqual(["reloaded footer"]);
 	});
 
-	it("a failed reload restores the built-in footer instead of leaving it hidden", async () => {
+	it("a failed reload replaces the frozen snapshot with the built-in footer", async () => {
 		const { mode, frames, footerContainer } = footerRebindHarness();
 		mode.runtimeHost.session.reload.mockRejectedValue(new Error("reload failed"));
 		await invoke("handleReloadCommand", mode);
 		expect(mode.showError).toHaveBeenCalledWith("Reload failed: reload failed");
-		expect(frames[0]).toEqual([""]);
+		expect(frames[0]).toEqual(["old custom footer"]);
 		expect(footerContainer.render(80)).toEqual(["destination built-in footer"]);
 	});
 
@@ -187,7 +188,7 @@ describe("interactive /cd", () => {
 		const before = geometry();
 		oldFooter.render.mockClear();
 		invoke("resetExtensionUI", mode);
-		expect(footerContainer.render(40)).toEqual(Array(height).fill(""));
+		expect(footerContainer.render(40)).toEqual(Array(height).fill("old custom footer"));
 		expect(geometry()).toEqual(before);
 		const next = { render: vi.fn(() => Array(height).fill("NEW FOOTER")), invalidate() {} };
 		invoke("setExtensionFooter", mode, () => next);
@@ -244,7 +245,7 @@ describe("interactive /cd", () => {
 		mode.ui.requestRender = () => {};
 		invoke("resetExtensionUI", mode);
 		expect(footerContainer.handleMouse(event)).toBeUndefined();
-		expect(footerContainer.render(80)).toEqual([""]);
+		expect(footerContainer.render(80)).toEqual(["CLICK"]);
 		expect(footerContainer.handleMouse(event)).toBeUndefined();
 		footerContainer.invalidate();
 		expect(footer.handleMouse).toHaveBeenCalledOnce();
@@ -261,6 +262,94 @@ describe("interactive /cd", () => {
 		expect(destination.handleMouse).toHaveBeenCalledOnce();
 		expect(footer.handleMouse).toHaveBeenCalledOnce();
 	});
+
+	it("freezes a copy of the last footer render, with a blank fallback before any render", () => {
+		const { mode, oldFooter, footerContainer } = footerRebindHarness();
+		const lines = ["frozen line", "second line"];
+		oldFooter.render.mockReturnValue(lines);
+		footerContainer.render(80);
+		invoke("resetExtensionUI", mode);
+		lines[0] = "mutated outgoing buffer";
+		lines.push("extra row");
+		expect(footerContainer.render(80)).toEqual(["frozen line", "second line"]);
+		expect(footerContainer.render(5).map(strip)).toEqual(["froze", "secon"]);
+		Reflect.set(mode, "footerRenderedLines", undefined);
+		Reflect.set(mode, "footerRenderedHeight", 2);
+		invoke("resetExtensionUI", mode);
+		expect(footerContainer.render(80)).toEqual(["", ""]);
+	});
+
+	it.each(["cd", "reload"] as const)(
+		"%s preserves the editor dock height and frozen footer in both viewport modes",
+		async (operation) => {
+			for (const height of [3, 7]) {
+				const { mode, oldFooter, footerContainer, finishStartup, startupEntered } = footerRebindHarness(2);
+				const editor = {
+					render: () => Array(height).fill("EDITOR"),
+					invalidate() {},
+					getText: () => "draft",
+					setText: vi.fn(),
+				};
+				Object.assign(mode, { editor });
+				mode.editorContainer.addChild(editor);
+				const regular = new Container();
+				regular.addChild(mode.editorContainer);
+				regular.addChild(footerContainer);
+				const viewport = createChatViewport({
+					document: new Container(),
+					pendingMessages: new Container(),
+					status: new Container(),
+					editor: mode.editorContainer,
+					footer: footerContainer,
+				});
+				const geometry = () => ({
+					regularRows: regular.render(80).length,
+					fullscreenFooter: renderLayoutFrame(viewport.root, 80, 24, () => {}).lines.slice(-2),
+				});
+				const before = geometry();
+				const startup = async () => {
+					startupEntered.resolve();
+					invoke("setExtensionFooter", mode, () => ({ render: () => ["NEW", "NEW"], invalidate() {} }));
+					await finishStartup.promise;
+				};
+				mode.runtimeHost.session.reload.mockImplementation(startup);
+				Object.assign(mode, { formatDisplayPath: (path: string) => path });
+				Object.assign(mode.runtimeHost, {
+					changeCwd: async () => {
+						invoke("resetExtensionUI", mode);
+						oldFooter.render.mockClear();
+						await startup();
+						invoke("showFooterAfterRebind", mode, Reflect.get(mode, "footerRebind"));
+						return { changed: false, error: "busy" };
+					},
+				});
+				oldFooter.render.mockClear();
+				const switching =
+					operation === "cd"
+						? invoke(
+								"performCwdChange",
+								mode,
+								"/a/very/long/destination/path/that/must/not/wrap/over/multiple/rows",
+								{ source: "user" },
+							)
+						: invoke("handleReloadCommand", mode);
+				await startupEntered.promise;
+				expect(mode.editorContainer.render(80)).toHaveLength(height);
+				expect(mode.editorContainer.render(20)).toHaveLength(height);
+				expect(mode.editorContainer.render(80).map(strip)[1]).toContain(
+					operation === "cd" ? "Changing working directory" : "Reloading",
+				);
+				expect(geometry()).toEqual(before);
+				expect(footerContainer.render(80)).toEqual(["old custom footer", "old custom footer"]);
+				expect(oldFooter.render).not.toHaveBeenCalled();
+				finishStartup.resolve();
+				await switching;
+				expect(mode.editorContainer.render(80)).toHaveLength(height);
+				expect(regular.render(80)).toHaveLength(before.regularRows);
+				expect(footerContainer.render(80)).toEqual(["NEW", "NEW"]);
+			}
+		},
+	);
 
 	it("registers the command and resolves exactly one matching quote pair, not shell syntax", () => {
 		expect(BUILTIN_SLASH_COMMANDS.some((c) => c.name === "cd")).toBe(true);
