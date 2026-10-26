@@ -915,8 +915,9 @@ export async function main(args: string[], options?: MainOptions) {
 	runtime.setSessionDirResolver(dirFor);
 	runtime.setAmbientCwdHandler((target) => process.chdir(target));
 	runtime.setResolveTargetTrust(async (target, context) => {
-		const cached = projectTrustByCwd.get(target);
-		if (cached !== undefined) return cached;
+		// Only a trusted answer is reused: a declined or cancelled dialog asks again on the next cd.
+		// Persisted choices still come from the trust store.
+		if (projectTrustByCwd.get(target) === true) return true;
 		const trusted = await resolveProjectTrusted({
 			cwd: target,
 			trustStore,
@@ -931,7 +932,7 @@ export async function main(args: string[], options?: MainOptions) {
 					hasUI: false,
 				}),
 		});
-		projectTrustByCwd.set(target, trusted);
+		if (trusted) projectTrustByCwd.set(target, true);
 		return trusted;
 	});
 	time("createAgentSessionRuntime");
