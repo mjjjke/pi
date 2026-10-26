@@ -65,9 +65,9 @@ const fail = (operation: Operation, path: string) => {
 		if (op === operation && object === path && !after) throw new Error(`injected ${op} ${object}`);
 	};
 };
-const move = (to: string, notice: string | undefined = "cwd changed") => {
+const move = (to: string, options: { notice?: string } = { notice: "cwd changed" }) => {
 	const plan = manager.planCwdChange(to, dirFor);
-	return manager.relocate(plan, manager.buildCwdChangeEntries(plan, { source: "user", notice }));
+	return manager.relocate(plan, manager.buildCwdChangeEntries(plan, { source: "user", ...options }));
 };
 const marker = (old: string, to: string, id = manager.getSessionId()) => {
 	fs.writeFileSync(`${old}.moved`, JSON.stringify({ v: 1, id, to }));
@@ -471,13 +471,22 @@ describe("layouts, artifacts and history", () => {
 		},
 	);
 
-	it("planning is read-only and resolves a relative destination sessionDir against B", () => {
+	it("planning is read-only and relocation publishes through a relative destination sessionDir against B", async () => {
 		const resolver = (cwd: string) => (cwd === a ? dirFor(a) : "relative-sessions");
 		const plan = manager.planCwdChange(b, resolver);
 		expect(plan.sessionDir).toBe(join(b, "relative-sessions"));
 		expect(plan.mode).toBe("move");
 		expect(fs.existsSync(plan.sessionDir)).toBe(false);
 		expect(fs.existsSync(`${manager.getSessionFile()}.artifacts`)).toBe(false);
+		const old = manager.getSessionFile()!;
+		manager.relocate(plan, manager.buildCwdChangeEntries(plan, { source: "user" }));
+		const next = join(b, "relative-sessions", basename(old));
+		expect(manager.getSessionFile()).toBe(next);
+		expect(manager.getSessionDir()).toBe(plan.sessionDir);
+		expect(fs.existsSync(old)).toBe(false);
+		expect((await SessionManager.list(b, plan.sessionDir)).map((info) => info.path)).toEqual([next]);
+		expect(SessionManager.findById(b, manager.getSessionId(), plan.sessionDir)).toBe(next);
+		expect(SessionManager.continueRecent(b, plan.sessionDir).getHeader()?.cwd).toBe(b);
 	});
 
 	it("absolute launch-relative session-dir stays pinned after ambient chdir", () => {
@@ -517,7 +526,13 @@ describe("layouts, artifacts and history", () => {
 		expect(plan.mode).toBe("in-place");
 		pinned.relocate(plan, pinned.buildCwdChangeEntries(plan, { source: "user" }));
 		expect(pinned.getSessionFile()).toBe(outside);
+		const managedFile = manager.getSessionFile()!;
+		manager = SessionManager.open(managedFile);
 		expect(manager.planCwdChange(b, dirFor).mode).toBe("move");
+		move(b);
+		expect(manager.getSessionFile()).toBe(join(dirFor(b), basename(managedFile)));
+		expect(fs.existsSync(managedFile)).toBe(false);
+		expect(SessionManager.open(manager.getSessionFile()!).getHeader()?.cwd).toBe(b);
 	});
 
 	it.each([{ visits: ["b", "a"] }, { visits: ["b", "c", "a"] }])(
@@ -559,21 +574,48 @@ describe("layouts, artifacts and history", () => {
 		expect(manager.getCwd()).toBe(b);
 	});
 
-	it("unflushed session with Plan artifact moves only in memory; first flush writes at B", () => {
+	it.each(["directory", "symlink"])(
+		"existing foreign artifact %s refuses before commit and is left untouched",
+		(kind) => {
+			const old = manager.getSessionFile()!;
+			const next = fileAt(b);
+			const alias = `${next}.artifacts`;
+			fs.mkdirSync(dirname(next), { recursive: true });
+			const foreign = kind === "directory" ? alias : join(root, "foreign-artifacts");
+			fs.mkdirSync(foreign);
+			fs.writeFileSync(join(foreign, "report.md"), "not this session");
+			if (kind === "symlink") fs.symlinkSync(foreign, alias);
+			const before = fs.readFileSync(old);
+			expect(() => move(b)).toThrow(`${alias} exists and is not this session's artifacts`);
+			expect(fs.readFileSync(old)).toEqual(before);
+			expect(manager.getCwd()).toBe(a);
+			expect(fs.existsSync(next)).toBe(false);
+			expect(fs.existsSync(`${old}.moved`)).toBe(false);
+			expect(fs.readFileSync(join(alias, "report.md"), "utf8")).toBe("not this session");
+		},
+	);
+
+	it("unflushed session with Plan artifact moves only in memory; first flush writes at B without an unstaged notice", () => {
 		manager = SessionManager.create(a, dirFor(a));
 		manager.appendCustomEntry("plan", { artifactPath: "relative" });
 		const old = manager.getSessionFile()!;
 		fs.mkdirSync(`${old}.artifacts`);
 		fs.writeFileSync(join(`${old}.artifacts`, "plan.md"), "unfinished");
 		expect(manager.planCwdChange(b, dirFor).mode).toBe("memory");
-		move(b, undefined);
+		move(b, {});
+		expect(manager.getEntries().filter((entry) => entry.type === "custom_message")).toEqual([]);
 		const next = manager.getSessionFile()!;
 		expect(fs.existsSync(old)).toBe(false);
 		expect(fs.existsSync(next)).toBe(false);
 		expect(fs.realpathSync(`${next}.artifacts`)).toBe(`${old}.artifacts`);
 		manager.appendMessage({ role: "user", content: "first prompt", timestamp: 1 });
 		expect(SessionManager.open(next).getHeader()?.cwd).toBe(b);
-		expect(SessionManager.open(next).getEntries()).toEqual(manager.getEntries());
+		const reopened = SessionManager.open(next);
+		expect(reopened.getEntries()).toEqual(manager.getEntries());
+		expect(reopened.getEntries().filter((entry) => entry.type === "custom_message")).toEqual([]);
+		expect(
+			reopened.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi.cwd"),
+		).toHaveLength(1);
 	});
 
 	it("memory preflight rejects a dangling destination session-file symlink before changing memory", () => {
@@ -601,15 +643,17 @@ describe("layouts, artifacts and history", () => {
 		const old = manager.getSessionFile()!;
 		const original = fs.readFileSync(old, "utf8");
 		const raw = `${original.slice(original.indexOf("\n") + 1)}{broken interior}\n{"torn":`;
+		const prefix = "\n{malformed prefix}\n";
 		fs.writeFileSync(
 			old,
-			`${JSON.stringify({ ...manager.getHeader(), extra: "keep", parentSession: "/parent" })}\n${raw}`,
+			`${prefix}${JSON.stringify({ ...manager.getHeader(), extra: "keep", parentSession: "/parent" })}\n${raw}`,
 		);
 		fs.chmodSync(old, 0o640);
 		const before = manager.getEntries();
 		move(b);
 		const next = manager.getSessionFile()!;
 		expect(fs.readFileSync(next, "utf8")).toContain(`${raw}\n`);
+		expect(fs.readFileSync(next, "utf8").startsWith(prefix)).toBe(true);
 		expect(fs.statSync(next).mode & 0o777).toBe(0o640);
 		const reopened = SessionManager.open(next);
 		expect(reopened.getHeader()).toMatchObject({ cwd: b, extra: "keep", parentSession: "/parent" });

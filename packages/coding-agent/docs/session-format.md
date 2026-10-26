@@ -233,7 +233,10 @@ cleanup; relocation repeats preflight, then prepares artifacts before publicatio
 policy and notice wording are not persistence concerns.
 
 Managed files keep their basename and move to the destination session directory. Explicit files outside
-the managed directory stay pinned; a shared custom directory rewrites in place. Unflushed sessions
+the managed directory stay pinned; a shared custom directory rewrites in place. Current-directory
+discovery filters by header cwd even in a default directory, because default encodings can collide or
+the directory can be shared. Legacy headers without a cwd remain discoverable in the encoded default
+directory only; they are not assigned to an arbitrary cwd in a custom shared store. Unflushed sessions
 change only in memory until the first conversation message. The header is replaced, but all other
 existing bytes, including unparseable records, are kept; a torn tail gets a terminating newline.
 
@@ -242,7 +245,8 @@ publishes a complete, fsynced destination by hard link. **Successful publication
 (rename for in-place rewrites). Post-publication errors return a committed result with a warning,
 never a rollback. Discovery skips an old file only when its marker names an existing file with the
 same session id. An absent or different-id target never hides the original. Explicitly opening the
-old path redirects one hop. Discovery does not write; opening the live file retries its one
+old path redirects one hop. Explicit `open` cwd/session-directory overrides are preserved; omitted
+values derive from the redirected file. Discovery does not write; opening the live file retries its one
 predecessor's cleanup. Before another relocation, cleanup must succeed or relocation is refused.
 Cleanup fsyncs the destination directory before deleting the old copy, then fsyncs the old directory
 and removes its marker. If that first directory sync fails, the old copy and marker remain: losing the
