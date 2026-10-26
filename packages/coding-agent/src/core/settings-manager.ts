@@ -279,6 +279,8 @@ export class SettingsManager {
 	private globalSettings: Settings;
 	private projectSettings: Settings;
 	private settings: Settings;
+	private overrides: Settings = {};
+	private held: Settings = {};
 	private projectTrusted: boolean;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
@@ -308,7 +310,8 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
 		this.settingsPaths = settingsPaths;
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = {};
+		this._recompute();
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -489,7 +492,7 @@ export class SettingsManager {
 		if (!trusted) {
 			this.projectSettings = {};
 			this.projectSettingsLoadError = null;
-			this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+			this._recompute();
 			return;
 		}
 
@@ -499,7 +502,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this._recompute();
 	}
 
 	async reload(): Promise<void> {
@@ -527,12 +530,26 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this._recompute();
 	}
 
-	/** Apply additional overrides on top of current settings */
+	private _recompute(): void {
+		this.settings = deepMergeSettings(
+			deepMergeSettings(deepMergeSettings(this.globalSettings, this.projectSettings), this.overrides),
+			this.held,
+		);
+	}
+
+	/** Preserve history-projecting values in this session, including across reloads. Never saved. */
+	holdSessionValues(values: Pick<Settings, "images" | "codemode">): void {
+		this.held = deepMergeSettings(this.held, values);
+		this._recompute();
+	}
+
+	/** Apply additional overrides on top of file settings, below session-held values. */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.overrides = deepMergeSettings(this.overrides, overrides);
+		this._recompute();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -632,7 +649,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this._recompute();
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -650,7 +667,7 @@ export class SettingsManager {
 	private saveProjectSettings(settings: Settings): void {
 		this.assertProjectTrustedForWrite();
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this._recompute();
 
 		if (this.projectSettingsLoadError) {
 			return;
@@ -1346,6 +1363,7 @@ export class SettingsManager {
 	}
 
 	setBlockImages(blocked: boolean): void {
+		if (this.held.images) delete this.held.images.blockImages;
 		if (!this.globalSettings.images) {
 			this.globalSettings.images = {};
 		}
