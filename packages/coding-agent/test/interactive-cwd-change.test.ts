@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { cwdAppliedNotice, resolveCwdTarget } from "../src/core/cwd-change.ts";
+import { cwdAppliedNotice, formatCwdWarning, resolveCwdTarget } from "../src/core/cwd-change.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -32,6 +32,38 @@ describe("interactive /cd", () => {
 		);
 		expect(showWarning).toHaveBeenCalledWith(text);
 		expect(changeCwd).not.toHaveBeenCalled();
+	});
+
+	it.each(["idle", "shell", "compaction"] as const)(
+		"Escape while a cwd is pending cancels it and preserves %s stop behavior",
+		(state) => {
+			const abort = vi.fn(async () => {});
+			const abortBash = vi.fn();
+			const session = {
+				pendingCwdChange: { state: "pending" },
+				isIdle: state !== "compaction",
+				isCompacting: state === "compaction",
+				isBashRunning: state === "shell",
+				abort,
+				abortBash,
+				abortCompaction: vi.fn(),
+			};
+			const editor = { onEscape: undefined as (() => void) | undefined, onAction: vi.fn() };
+			const context = { session, defaultEditor: editor, ui: {}, restoreQueuedMessagesToEditor: vi.fn() };
+			Reflect.get(InteractiveMode.prototype, "setupKeyHandlers").call(context);
+			editor.onEscape?.();
+			expect(abort).toHaveBeenCalledOnce();
+			if (state === "shell") expect(abortBash).toHaveBeenCalledOnce();
+		},
+	);
+
+	it("distinguishes committed cleanup warnings from power-loss durability warnings", () => {
+		expect(formatCwdWarning("cd: unlink /old: refused", "~/b")).toBe(
+			"cd: could not remove the old session file (cd: unlink /old: refused); it stays hidden from /resume and is removed the next time this session is opened or changes directory.",
+		);
+		expect(formatCwdWarning("cd: fsync /new: refused", "~/b")).toBe(
+			"cd: changed to ~/b, but the change may not survive a power loss (cd: fsync /new: refused); the old copy is kept hidden until it does.",
+		);
 	});
 
 	it("query and same directory are dim status rows, no transition", async () => {

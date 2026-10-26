@@ -74,6 +74,15 @@ export function cwdRequestRejection(error: string): string {
 	return `Not changed: ${error.replace(/^cd: /, "").replace(/\.$/, "")}.`;
 }
 
+/** The persistence layer returns action/cause text; interactive hosts add the recovery guidance. */
+export function formatCwdWarning(cause: string, target: string): string {
+	if (cause.includes("cd: fsync "))
+		return `cd: changed to ${target}, but the change may not survive a power loss (${cause}); the old copy is kept hidden until it does.`;
+	if (cause.startsWith("cd: unlink "))
+		return `cd: could not remove the old session file (${cause}); it stays hidden from /resume and is removed the next time this session is opened or changes directory.`;
+	return cause;
+}
+
 export function cwdAppliedNotice(from: string, to: string): string {
 	return `Working-directory change (not a request). At this point the session's working directory changed from ${from} to ${to}. Paths in earlier messages keep the meaning they had when those messages were written. Background tasks started before this point keep their own working directories.`;
 }

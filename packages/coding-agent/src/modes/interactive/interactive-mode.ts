@@ -86,7 +86,12 @@ import {
 import { formatCacheWarmingStatus, formatCacheWarmingUsage } from "../../core/cache-warmer.ts";
 import { estimateProjectedContextTokens } from "../../core/compaction/index.ts";
 import { findExtensionStackMatches, recordCrash, takeUnnotifiedCrash } from "../../core/crash-log.ts";
-import { type ChangeCwdOptions, type ChangeCwdResult, resolveCwdTarget } from "../../core/cwd-change.ts";
+import {
+	type ChangeCwdOptions,
+	type ChangeCwdResult,
+	formatCwdWarning,
+	resolveCwdTarget,
+} from "../../core/cwd-change.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "../../core/defaults.ts";
 import type {
 	AssistantMessageDisplayPhase,
@@ -3186,16 +3191,18 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			if (this.session.pendingCwdChange && this.session.isIdle) {
+			if (this.session.pendingCwdChange && this.session.isIdle && !this.session.isBashRunning) {
 				void this.session.abort();
 				return;
 			}
 			if (this.session.isCompacting) {
 				this.restoreQueuedMessagesToEditor();
-				this.session.abortCompaction();
+				if (this.session.pendingCwdChange) void this.session.abort();
+				else this.session.abortCompaction();
 			} else if (this.session.isStreaming) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			} else if (this.session.isBashRunning) {
+				if (this.session.pendingCwdChange) void this.session.abort();
 				this.session.abortBash();
 			} else if (this.isBashMode) {
 				this.editor.setText("");
@@ -3851,7 +3858,8 @@ export class InteractiveMode {
 				this.defaultEditor.onEscape = () => {
 					this.lastEscapeTime = 0;
 					this.restoreQueuedMessagesToEditor();
-					this.session.abortCompaction();
+					if (this.session.pendingCwdChange) void this.session.abort();
+					else this.session.abortCompaction();
 				};
 				const colorFn = isEmbeddedStatus(this.editor)
 					? (text: string) =>
@@ -3906,7 +3914,8 @@ export class InteractiveMode {
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
-					this.session.abortRetry();
+					if (this.session.pendingCwdChange) void this.session.abort();
+					else this.session.abortRetry();
 				};
 				this.showStatusIndicator(
 					new RetryStatusIndicator(this.ui, event.attempt, event.maxAttempts, event.delayMs),
@@ -6736,10 +6745,13 @@ export class InteractiveMode {
 					)
 				)
 					this.showStatus(`Working directory: ${this.formatDisplayPath(target)}`);
-				if (result.warning) this.showWarning(result.warning);
+				if (result.warning) this.showWarning(formatCwdWarning(result.warning, this.formatDisplayPath(target)));
 				if (this.runtimeHost.modelFallbackMessage) this.showWarning(this.runtimeHost.modelFallbackMessage);
-				for (const diagnostic of this.runtimeHost.diagnostics)
-					if (diagnostic.type === "info") this.showStatus(diagnostic.message);
+				for (const diagnostic of this.runtimeHost.diagnostics) {
+					if (diagnostic.type !== "info") continue;
+					this.chatContainer.addChild(new Spacer(1));
+					this.chatContainer.addChild(new ThemedText(() => theme.fg("dim", diagnostic.message), 1, 0));
+				}
 			}
 			return result;
 		} catch (error) {

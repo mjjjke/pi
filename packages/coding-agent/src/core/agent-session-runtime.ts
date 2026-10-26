@@ -280,6 +280,9 @@ export class AgentSessionRuntime {
 				if (manager.getCwd() === plan.to) throw error;
 				return { changed: false, error: error instanceof Error ? error.message : String(error) };
 			}
+		} catch (error) {
+			if (manager.getCwd() === plan.to) throw error;
+			return { changed: false, error: error instanceof Error ? error.message : String(error) };
 		} finally {
 			release?.();
 			session.releaseUserCwdChange(slot);

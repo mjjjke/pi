@@ -292,6 +292,17 @@ describe("same-conversation cwd runtime transfer", () => {
 		await old.prompt("still usable");
 	});
 
+	it("a trust resolver exception is a pre-commit failure and leaves the old runtime usable", async () => {
+		const f = await fixture();
+		const old = f.runtime.session;
+		f.runtime.setResolveTargetTrust(async () => {
+			throw new Error("trust failed");
+		});
+		expect(await f.runtime.changeCwd(f.b, { source: "user" })).toEqual({ changed: false, error: "trust failed" });
+		expect(f.runtime.session).toBe(old);
+		await old.prompt("still usable");
+	});
+
 	it("commit failure leaves the old runtime usable; ambient handler runs before factories", async () => {
 		const f = await fixture();
 		const old = f.runtime.session;
