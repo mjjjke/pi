@@ -4527,6 +4527,10 @@ export class InteractiveMode {
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
+		// Admission and the pending/trust slot must close before terminal drain yields.
+		// Keep extension cleanup after terminal stop on ordinary interactive quit.
+		this.runtimeHost.session.closeAdmission();
+		this.runtimeHost.session.cancelCwdChange();
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.

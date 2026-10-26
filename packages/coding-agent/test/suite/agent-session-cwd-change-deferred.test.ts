@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { cwdFixture } from "./cwd-change-fixture.ts";
 import { getMessageText } from "./harness.ts";
 
@@ -155,6 +156,103 @@ describe("deferred cwd requests", () => {
 		await closing;
 		expect(await request.completion).toBe("cancelled");
 	});
+
+	it.each(["pending", "settling-run", "trust"] as const)(
+		"interactive quit cancels %s before awaiting terminal input drain",
+		async (state) => {
+			const order: string[] = [];
+			const f = await fixture({
+				persist: true,
+				extension: (pi) => {
+					pi.on("session_shutdown", () => {
+						order.push("extension cleanup");
+					});
+				},
+			});
+			const old = f.runtime.session;
+			await old.prompt("bootstrapped");
+			let finishRun!: () => void;
+			let run: Promise<void> | undefined;
+			if (state === "settling-run") {
+				let started!: () => void;
+				const entered = new Promise<void>((resolve) => {
+					started = resolve;
+				});
+				const waiting = new Promise<void>((resolve) => {
+					finishRun = resolve;
+				});
+				f.seed.setResponses([
+					async () => {
+						started();
+						await waiting;
+						return fauxAssistantMessage("finished during terminal drain");
+					},
+				]);
+				run = old.prompt("finish while quitting");
+				await entered;
+			}
+			let answer!: (trusted: boolean) => void;
+			if (state === "trust") {
+				f.runtime.setResolveTargetTrust(
+					() =>
+						new Promise<boolean>((resolve) => {
+							answer = resolve;
+						}),
+				);
+			}
+			const request = old.requestCwdChange(f.b);
+			if (request.status !== "pending") throw new Error(request.reason);
+			if (state === "trust") {
+				await tick();
+				expect(old.pendingCwdChange?.state).toBe("trust");
+			}
+			let releaseDrain!: () => void;
+			const drained = new Promise<void>((resolve) => {
+				releaseDrain = resolve;
+			});
+			const context = {
+				runtimeHost: f.runtime,
+				isShuttingDown: false,
+				themeController: { disableAutoSync() {} },
+				ui: {
+					terminal: {
+						drainInput: () => {
+							order.push("drain");
+							return drained;
+						},
+					},
+				},
+				stop: () => order.push("terminal stop"),
+				get sessionManager() {
+					return old.sessionManager;
+				},
+			};
+			vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+			const closing = Reflect.get(InteractiveMode.prototype, "shutdown").call(context);
+			const duringDrain = old.requestCwdChange(f.a);
+			let outcome: string | undefined;
+			void request.completion.then((value) => {
+				outcome = value;
+			});
+			try {
+				if (state === "settling-run") finishRun();
+				if (state === "trust") answer(true);
+				await run;
+				await vi.waitFor(() => expect(outcome).toBeDefined());
+				expect(outcome).toBe("cancelled");
+				expect(f.runtime.cwd).toBe(f.a);
+				expect(duringDrain.status).toBe("rejected");
+				expect(order).toEqual(["drain"]);
+			} finally {
+				releaseDrain();
+				await closing;
+			}
+			expect(order).toEqual(["drain", "terminal stop", "extension cleanup"]);
+			expect(
+				old.sessionManager.getEntries().filter((e) => e.type === "custom_message" && e.customType === "pi.cwd"),
+			).toHaveLength(1);
+		},
+	);
 
 	it("cwd outcome markers never make a boundary continuable", async () => {
 		const f = await fixture();
