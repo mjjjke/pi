@@ -386,6 +386,58 @@ describe("fail-closed predecessor reconciliation", () => {
 });
 
 describe("layouts, artifacts and history", () => {
+	it.each(["encoded-collision", "shared-default-dir"])(
+		"in-place relocation through %s filters default and shared discovery by the current header cwd",
+		async (layout) => {
+			const from = join(root, layout, layout === "encoded-collision" ? "a-b" : "alpha");
+			const to = join(root, layout, ...(layout === "encoded-collision" ? ["a", "b"] : ["beta"]));
+			for (const cwd of [from, to]) fs.mkdirSync(cwd, { recursive: true });
+			manager = SessionManager.create(from);
+			manager.appendMessage({ role: "user", content: "shared store question", timestamp: 1 });
+			const store = manager.getSessionDir();
+			const old = manager.getSessionFile()!;
+			const plan = manager.planCwdChange(to, layout === "shared-default-dir" ? () => store : undefined);
+			expect(plan.mode).toBe("in-place");
+			manager.relocate(plan, manager.buildCwdChangeEntries(plan, { source: "user" }));
+			expect(manager.getSessionFile()).toBe(old);
+			for (const sessionDir of [undefined, store]) {
+				expect(await SessionManager.list(from, sessionDir)).toEqual([]);
+				expect(SessionManager.findById(from, manager.getSessionId(), sessionDir)).toBeUndefined();
+				const continued = SessionManager.continueRecent(from, sessionDir);
+				expect(continued.getSessionId()).not.toBe(manager.getSessionId());
+				expect(continued.getCwd()).toBe(from);
+				expect(continued.getHeader()?.cwd).toBe(from);
+			}
+			for (const sessionDir of layout === "encoded-collision" ? [undefined, store] : [store]) {
+				expect((await SessionManager.list(to, sessionDir)).map((info) => info.path)).toEqual([old]);
+				expect(SessionManager.findById(to, manager.getSessionId(), sessionDir)).toBe(old);
+				const continued = SessionManager.continueRecent(to, sessionDir);
+				expect(continued.getSessionId()).toBe(manager.getSessionId());
+				expect(continued.getCwd()).toBe(to);
+				expect(continued.getHeader()?.cwd).toBe(to);
+			}
+		},
+	);
+
+	it.each([undefined, ""])(
+		"default discovery retains legacy sessions with cwd %j, but custom stores stay scoped",
+		async (cwd) => {
+			manager = SessionManager.create(a);
+			const file = manager.getSessionFile()!;
+			const header = `${JSON.stringify({ ...manager.getHeader(), version: 1, cwd })}\n`;
+			fs.writeFileSync(file, header);
+			expect((await SessionManager.list(a)).map((info) => info.path)).toEqual([file]);
+			expect(SessionManager.findById(a, manager.getSessionId())).toBe(file);
+			expect(SessionManager.continueRecent(a).getSessionId()).toBe(manager.getSessionId());
+			const custom = join(root, "legacy-custom");
+			fs.mkdirSync(custom);
+			fs.writeFileSync(join(custom, basename(file)), header);
+			expect(await SessionManager.list(a, custom)).toEqual([]);
+			expect(SessionManager.findById(a, manager.getSessionId(), custom)).toBeUndefined();
+			expect(SessionManager.continueRecent(a, custom).getSessionId()).not.toBe(manager.getSessionId());
+		},
+	);
+
 	it("planning is read-only and resolves a relative destination sessionDir against B", () => {
 		const resolver = (cwd: string) => (cwd === a ? dirFor(a) : "relative-sessions");
 		const plan = manager.planCwdChange(b, resolver);

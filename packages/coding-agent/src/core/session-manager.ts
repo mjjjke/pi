@@ -1573,12 +1573,14 @@ function getSessionHeaderCwd(header: SessionHeader): string | undefined {
 	return typeof cwd === "string" ? cwd : undefined;
 }
 
-function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string): boolean {
-	return cwd !== undefined && cwd !== "" && resolvePath(cwd) === resolvedCwd;
+function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string, allowLegacyCwd = false): boolean {
+	// Only the encoded default directory can place legacy sessions whose headers lack a cwd.
+	// A populated header is authoritative even there: default encodings can collide or be shared.
+	return cwd === undefined || cwd === "" ? allowLegacyCwd : resolvePath(cwd) === resolvedCwd;
 }
 
 /** Exported for testing */
-export function findMostRecentSession(sessionDir: string, cwd?: string): string | null {
+export function findMostRecentSession(sessionDir: string, cwd?: string, allowLegacyCwd = false): string | null {
 	const resolvedSessionDir = normalizePath(sessionDir);
 	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
 	try {
@@ -1591,7 +1593,8 @@ export function findMostRecentSession(sessionDir: string, cwd?: string): string 
 
 		for (const { path } of files) {
 			const header = readSessionHeaderForDiscovery(path);
-			if (header && (!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd))) return path;
+			if (header && (!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd, allowLegacyCwd)))
+				return path;
 		}
 		return null;
 	} catch {
@@ -3090,8 +3093,8 @@ export class SessionManager {
 	 */
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
-		const mostRecent = findMostRecentSession(dir, filterCwd ? cwd : undefined);
+		const allowLegacyCwd = dir === getDefaultSessionDirPath(cwd);
+		const mostRecent = findMostRecentSession(dir, cwd, allowLegacyCwd);
 		if (mostRecent) {
 			return new SessionManager(cwd, dir, mostRecent, true);
 		}
@@ -3178,7 +3181,7 @@ export class SessionManager {
 	 */
 	static findById(cwd: string, id: string, sessionDir?: string): string | undefined {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+		const allowLegacyCwd = dir === getDefaultSessionDirPath(cwd);
 		const resolvedCwd = resolvePath(cwd);
 
 		try {
@@ -3188,7 +3191,7 @@ export class SessionManager {
 				const path = join(dir, file);
 				const header = readSessionHeaderForDiscovery(path);
 				if (header?.id !== id) continue;
-				if (filterCwd && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) continue;
+				if (!sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd, allowLegacyCwd)) continue;
 				return path;
 			}
 		} catch {
@@ -3210,9 +3213,9 @@ export class SessionManager {
 		signal?: AbortSignal,
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+		const allowLegacyCwd = dir === getDefaultSessionDirPath(cwd);
 		const resolvedCwd = resolvePath(cwd);
-		const includeSession = (session: SessionInfo) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd);
+		const includeSession = (session: SessionInfo) => sessionCwdMatches(session.cwd, resolvedCwd, allowLegacyCwd);
 		const progress: SessionListProgress | undefined = onProgress
 			? (loaded, total, partialSessions) => onProgress(loaded, total, partialSessions?.filter(includeSession))
 			: undefined;
