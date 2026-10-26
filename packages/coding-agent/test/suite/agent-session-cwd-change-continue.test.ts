@@ -143,6 +143,111 @@ describe("applied model cwd continuation", () => {
 		expect(starts).toHaveBeenCalledTimes(1);
 	});
 
+	it.each([
+		["input", "idle"],
+		["auth", "idle"],
+		["input", "running"],
+		["auth", "running"],
+		["input", "settled"],
+		["auth", "settled"],
+	] as const)("a stop cancels startup %s preflight while later input is %s", async (preflight, laterInput) => {
+		let release!: () => void;
+		const waiting = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let entered!: () => void;
+		const preflightEntered = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const f = await fixture({
+			extension: (pi) => {
+				pi.on("input", async (event) => {
+					if (preflight === "input" && event.text === "startup input") {
+						entered();
+						await waiting;
+					}
+					return { action: "continue" };
+				});
+			},
+		});
+		await f.runtime.session.prompt("bootstrap");
+		const contexts: Context[] = [];
+		let responseEntered!: () => void;
+		const responding = new Promise<void>((resolve) => {
+			responseEntered = resolve;
+		});
+		let releaseResponse!: () => void;
+		const responseWait = new Promise<void>((resolve) => {
+			releaseResponse = resolve;
+		});
+		f.seed.setResponses(
+			Array.from({ length: 4 }, () => async (context) => {
+				expect(f.runtime.cwd).toBe(f.b);
+				contexts.push(structuredClone(context));
+				responseEntered();
+				if (laterInput === "running") await responseWait;
+				return fauxAssistantMessage("ok");
+			}),
+		);
+		let input: Promise<void> | undefined;
+		let inputError: unknown;
+		const disposition = vi.fn();
+		let newInput: Promise<void> | undefined;
+		f.runtime.setRebindSession(async (session) => {
+			await session.bindExtensions({ mode: "tui" });
+			if (preflight === "auth") {
+				const runtime = session.modelRuntime;
+				const checkAuth = runtime.checkAuth.bind(runtime);
+				vi.spyOn(runtime, "hasConfiguredAuth").mockReturnValueOnce(false);
+				vi.spyOn(runtime, "checkAuth").mockImplementationOnce(async (provider) => {
+					entered();
+					await waiting;
+					return checkAuth(provider);
+				});
+			}
+			input = session
+				.prompt("startup input", {
+					streamingBehavior: laterInput === "running" ? "followUp" : undefined,
+					preflightResult: disposition,
+				})
+				.catch((error: unknown) => {
+					inputError = error;
+				});
+		});
+		try {
+			const request = f.runtime.session.requestCwdChange(f.b);
+			if (request.status !== "pending") throw new Error("rejected");
+			expect(await request.completion).toBe("applied");
+			await preflightEntered;
+			const destination = f.runtime.session;
+			await destination.abort();
+			if (laterInput !== "idle") {
+				newInput = destination.prompt("new input after stop");
+				if (laterInput === "running") await responding;
+				else await newInput;
+			}
+			release();
+			await input;
+			expect(inputError).toMatchObject({ message: "prompt cancelled: conversation stopped" });
+			expect(disposition).not.toHaveBeenCalled();
+			expect(contexts).toHaveLength(laterInput === "idle" ? 0 : 1);
+			expect(destination.pendingMessageCount).toBe(0);
+			releaseResponse();
+			await newInput;
+			await destination.waitForIdle();
+			if (laterInput === "idle") await destination.prompt("new input after stop");
+			expect(contexts).toHaveLength(1);
+			expect(JSON.stringify(contexts[0])).toContain("new input after stop");
+			expect(JSON.stringify(contexts[0])).not.toContain("startup input");
+			expect(JSON.stringify(destination.messages)).not.toContain("startup input");
+		} finally {
+			release();
+			releaseResponse();
+			await input;
+			await newInput;
+		}
+	});
+
 	it.each(["abort", "dispose", "tree", "replace", "quit"] as const)(
 		"%s during destination startup suppresses the new run",
 		async (action) => {

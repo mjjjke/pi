@@ -666,6 +666,8 @@ export class AgentSession {
 	private _pendingNewSessionRequest: PendingNewSessionRequest | undefined;
 	private _pendingCwdChange?: PendingCwdChange;
 	private _cwdContinuation?: { message: CustomMessage; inputs: number; ready: boolean };
+	/** Stops invalidate participating preflight inputs, even after another starter consumed the wakeup. */
+	private _cwdInputStopGeneration = 0;
 	private _cwdChangeHandler?: CwdChangeHandler;
 	private _validateCwdChange?: (path: string) => string;
 	private _cwdImmediate?: ReturnType<typeof setImmediate>;
@@ -932,6 +934,7 @@ export class AgentSession {
 	}
 
 	private _cancelPendingCwd(cause: string): void {
+		this._cwdInputStopGeneration++;
 		this._cwdContinuation = undefined;
 		const slot = this._pendingCwdChange;
 		if (!slot) return;
@@ -3144,6 +3147,7 @@ export class AgentSession {
 		onStartMessagePersistence?: (outcome: StartMessagePersistence) => void,
 		manualAdmission?: { stopGeneration: number; followUp: boolean; onQueued(): void },
 		startRecorded = false,
+		cwdStopGeneration?: number,
 	): Promise<void> {
 		// Readiness barrier: a run requested during binding or reload starts after it. The loop awaits
 		// only while a barrier exists, so its last check and the reservation below run in the same
@@ -3153,6 +3157,7 @@ export class AgentSession {
 			await this._readiness;
 		}
 		this._throwIfAdmissionChanged(admissionGen);
+		this._throwIfCwdInputCancelled(cwdStopGeneration);
 		// A stop during a newer readiness barrier must not revive the cwd wakeup afterwards.
 		if (startRecorded && (trigger.messageType !== "custom" || this._cwdContinuation?.message !== trigger.message))
 			return;
@@ -3531,7 +3536,13 @@ export class AgentSession {
 		const pending = this._cwdContinuation;
 		if (pending) pending.inputs++;
 		try {
-			await this._prompt(text, options, this._admissionGen);
+			await this._prompt(
+				text,
+				options,
+				this._admissionGen,
+				this._manualBackgroundStopGeneration,
+				pending ? this._cwdInputStopGeneration : undefined,
+			);
 		} finally {
 			if (pending) {
 				pending.inputs--;
@@ -3554,19 +3565,21 @@ export class AgentSession {
 		text: string,
 		options: PromptOptions | undefined,
 		admissionGen: number,
-		manualStopGeneration = this._manualBackgroundStopGeneration,
+		manualStopGeneration: number,
+		cwdStopGeneration?: number,
 	): Promise<void> {
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => {
 				// Rejected, so preflightResult is not called (same as a prompt that throws).
 				if (this._isAdmissionChanged(admissionGen)) return;
-				await this._prompt(text, options, admissionGen, manualStopGeneration);
+				await this._prompt(text, options, admissionGen, manualStopGeneration, cwdStopGeneration);
 			});
 			return;
 		}
-		if (!this._readiness) return this._promptWhenReady(text, options, admissionGen, undefined, manualStopGeneration);
+		if (!this._readiness)
+			return this._promptWhenReady(text, options, admissionGen, undefined, manualStopGeneration, cwdStopGeneration);
 		// Readiness barrier: commands, input hooks and expansion see the ready resources.
-		const run = this._promptAfterReadiness(text, options, admissionGen, manualStopGeneration);
+		const run = this._promptAfterReadiness(text, options, admissionGen, manualStopGeneration, cwdStopGeneration);
 		const tracked = run.then(
 			() => {},
 			() => {},
@@ -3581,6 +3594,7 @@ export class AgentSession {
 		options: PromptOptions | undefined,
 		admissionGen: number,
 		manualStopGeneration: number,
+		cwdStopGeneration?: number,
 	): Promise<void> {
 		const deferredStart = this._trackDeferredStart();
 		try {
@@ -3591,7 +3605,14 @@ export class AgentSession {
 			}
 			// Admission may have closed while waiting: no command or input hook runs then.
 			this._throwIfAdmissionChanged(admissionGen);
-			await this._promptWhenReady(text, options, admissionGen, deferredStart, manualStopGeneration);
+			await this._promptWhenReady(
+				text,
+				options,
+				admissionGen,
+				deferredStart,
+				manualStopGeneration,
+				cwdStopGeneration,
+			);
 		} finally {
 			deferredStart.release();
 		}
@@ -3656,9 +3677,11 @@ export class AgentSession {
 		admissionGen: number,
 		deferredStart: DeferredStart | undefined,
 		manualStopGeneration: number,
+		cwdStopGeneration?: number,
 	): Promise<void> {
 		// Admission is checked on every path (also without a barrier) before commands or input hooks.
 		this._throwIfAdmissionChanged(admissionGen);
+		this._throwIfCwdInputCancelled(cwdStopGeneration);
 		const releaseDeferred = () => deferredStart?.release();
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
@@ -3693,6 +3716,8 @@ export class AgentSession {
 			preflightResult?.("handled");
 			return;
 		}
+		// A stop of the held cwd continuation also owns input still in async preflight.
+		this._throwIfCwdInputCancelled(cwdStopGeneration);
 		const { text: currentText, images: currentImages } = processedInput;
 
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
@@ -3753,7 +3778,14 @@ export class AgentSession {
 				followUp: options?.streamingBehavior === "followUp",
 				onQueued: () => preflightResult?.("queued"),
 			},
+			false,
+			cwdStopGeneration,
 		);
+	}
+
+	private _throwIfCwdInputCancelled(stopGeneration: number | undefined): void {
+		if (stopGeneration !== undefined && stopGeneration !== this._cwdInputStopGeneration)
+			throw new Error("prompt cancelled: conversation stopped");
 	}
 
 	private _isAdmissionChanged(admissionGen: number): boolean {
