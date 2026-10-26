@@ -3,7 +3,7 @@ import { basename, join, parse, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession, CwdCarry } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
-import { type ChangeCwdOptions, type ChangeCwdResult, cwdAppliedNotice } from "./cwd-change.ts";
+import { type ChangeCwdOptions, type ChangeCwdResult, type CwdChangeHandler, cwdAppliedNotice } from "./cwd-change.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
@@ -92,6 +92,7 @@ export class AgentSessionRuntime {
 	private ambientCwd?: (cwd: string) => void;
 	private resolveTargetTrust?: (cwd: string, context?: ProjectTrustContext) => Promise<boolean>;
 	private changingCwd = false;
+	private cwdChangeHandler?: CwdChangeHandler;
 
 	constructor(
 		_session: AgentSession,
@@ -155,10 +156,29 @@ export class AgentSessionRuntime {
 		this.resolveTargetTrust = handler;
 	}
 
+	/** Bind only in modes that can apply and render a deferred transition. */
+	setCwdChangeHandler(handler?: CwdChangeHandler): void {
+		this.cwdChangeHandler = handler;
+		this.bindCwdChange();
+	}
+
+	private bindCwdChange(): void {
+		this.session.setCwdChangeHandler(this.cwdChangeHandler, (path) => {
+			if (!path.trim()) throw new Error("Not changed: cd needs a directory in args.");
+			const manager = this.session.sessionManager;
+			const plan = manager.planCwdChange(path, this.sessionDirResolver);
+			manager.preflightCwdChange(plan);
+			return plan.to;
+		});
+	}
+
 	async changeCwd(target: string, options: ChangeCwdOptions): Promise<ChangeCwdResult> {
 		if (this.changingCwd) return { changed: false, error: "A working-directory change is in progress." };
 		const session = this.session;
 		const manager = session.sessionManager;
+		const pending = session.pendingCwdChange;
+		if (pending && pending.requestId !== options.requestId)
+			return { changed: false, error: `A working-directory change to ${pending.to} is in progress.` };
 		const error = session.getCwdChangeError();
 		if (error) return { changed: false, error };
 		let plan: CwdChangePlan;
@@ -168,18 +188,25 @@ export class AgentSessionRuntime {
 		} catch (error) {
 			return { changed: false, error: error instanceof Error ? error.message : String(error) };
 		}
+		const slot = session.reserveCwdChange(plan.to, options.requestId);
+		if (!slot) return { changed: false, error: "cancelled" };
 		this.changingCwd = true;
 		let release: (() => void) | undefined;
 		try {
-			const trusted = this.resolveTargetTrust
-				? await this.resolveTargetTrust(plan.to, options.projectTrustContextFactory?.(plan.to))
-				: !hasTrustRequiringProjectResources(plan.to);
-			if (this.session !== session) return { changed: false, error: "cancelled" };
+			const trusted =
+				slot.trusted ??
+				(this.resolveTargetTrust
+					? await this.resolveTargetTrust(plan.to, options.projectTrustContextFactory?.(plan.to))
+					: !hasTrustRequiringProjectResources(plan.to));
+			slot.trusted = trusted;
+			if (this.session !== session || session.pendingCwdChange !== slot)
+				return { changed: false, error: "cancelled" };
 			const revalidation = session.getCwdChangeError();
 			if (revalidation) return { changed: false, error: revalidation };
 			if (!trusted) return { changed: false, error: "untrusted" };
 			try {
 				manager.preflightCwdChange(plan);
+				slot.state = "applying";
 				release = session.beginCwdTransition();
 				const hasSnapshot = session.messages.some((message) => message.role === "system");
 				const notice = cwdAppliedNotice(plan.from, plan.to);
@@ -241,6 +268,7 @@ export class AgentSessionRuntime {
 			}
 		} finally {
 			release?.();
+			session.releaseUserCwdChange(slot);
 			this.changingCwd = false;
 		}
 	}
@@ -297,6 +325,7 @@ export class AgentSessionRuntime {
 		this._services = result.services;
 		this._diagnostics = result.diagnostics;
 		this._modelFallbackMessage = result.modelFallbackMessage;
+		this.bindCwdChange();
 	}
 
 	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {

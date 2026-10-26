@@ -97,6 +97,7 @@ import {
 	outsideCompactionNoticeScope,
 	withCompactionNoticeScope,
 } from "./compaction-notice-scope.ts";
+import type { CwdChangeHandler, PendingCwdChange, RequestCwdChangeResult } from "./cwd-change.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -657,6 +658,10 @@ export class AgentSession {
 	private _isEmittingAgentEndExtensionEvent = false;
 	private _isDrainingNewSessionRequest = false;
 	private _pendingNewSessionRequest: PendingNewSessionRequest | undefined;
+	private _pendingCwdChange?: PendingCwdChange;
+	private _cwdChangeHandler?: CwdChangeHandler;
+	private _validateCwdChange?: (path: string) => string;
+	private _cwdImmediate?: ReturnType<typeof setImmediate>;
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
@@ -830,6 +835,134 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._usesDefaultTools && !carry) this._restoreToolsFromTranscript(this._defaultToolModifiers);
+	}
+
+	get pendingCwdChange(): Readonly<PendingCwdChange> | undefined {
+		return this._pendingCwdChange;
+	}
+
+	/** Host binding, deliberately separate from extension-owned reload state. */
+	setCwdChangeHandler(handler: CwdChangeHandler | undefined, validate?: (path: string) => string): void {
+		this._cwdChangeHandler = handler;
+		this._validateCwdChange = validate;
+		this._extensionRunner.setRequestCwdChange(
+			handler ? (path, options) => this.requestCwdChange(path, options) : undefined,
+		);
+	}
+
+	requestCwdChange(path: string, options?: { reason?: string }): RequestCwdChangeResult {
+		if (!this._cwdChangeHandler)
+			return { status: "rejected", reason: "Not changed: cd is not supported in this mode." };
+		if (this._pendingCwdChange)
+			return {
+				status: "rejected",
+				reason: `Not changed: a change to ${this._pendingCwdChange.to} is already pending.`,
+			};
+		const error = this.getCwdChangeError(true);
+		if (error) return { status: "rejected", reason: error };
+		let to: string;
+		try {
+			to = this._validateCwdChange!(path);
+		} catch (error) {
+			return { status: "rejected", reason: error instanceof Error ? error.message : String(error) };
+		}
+		let resolve!: PendingCwdChange["resolve"];
+		const completion = new Promise<"applied" | "cancelled" | "untrusted" | "failed">((r) => {
+			resolve = r;
+		});
+		const slot: PendingCwdChange = {
+			requestId: randomUUID(),
+			from: this.sessionManager.getCwd(),
+			to,
+			reason: options?.reason,
+			source: "model",
+			state: "pending",
+			resolve,
+		};
+		this._pendingCwdChange = slot;
+		this._schedulePendingCwd();
+		return { status: "pending", requestId: slot.requestId, from: slot.from, to, completion };
+	}
+
+	/** User changes occupy the same slot during trust, but do not write cancellation passives. */
+	reserveCwdChange(to: string, requestId?: string): PendingCwdChange | undefined {
+		if (requestId) return this._pendingCwdChange?.requestId === requestId ? this._pendingCwdChange : undefined;
+		if (this._pendingCwdChange) return undefined;
+		this._pendingCwdChange = {
+			requestId: randomUUID(),
+			from: this.sessionManager.getCwd(),
+			to,
+			source: "user",
+			state: "trust",
+			resolve: () => {},
+		};
+		return this._pendingCwdChange;
+	}
+
+	releaseUserCwdChange(slot: PendingCwdChange): void {
+		if (slot.source === "user" && this._pendingCwdChange === slot) this._pendingCwdChange = undefined;
+	}
+
+	private _cancelPendingCwd(cause: string): void {
+		const slot = this._pendingCwdChange;
+		if (!slot || slot.state === "applying") return;
+		this._pendingCwdChange = undefined;
+		if (slot.source === "model") this._cwdOutcome(slot, "cancelled", cause);
+	}
+
+	private _cwdOutcome(slot: PendingCwdChange, kind: "cancelled" | "failed", cause: string, untrusted = false): void {
+		const content =
+			kind === "cancelled"
+				? `Working-directory change cancelled (not a request). The change to ${slot.to} requested earlier was cancelled before it took effect: ${cause}. At this point the working directory is ${slot.from}.`
+				: `Working-directory change failed (not a request). The change to ${slot.to} requested earlier did not take effect: ${cause}. At this point the working directory is ${slot.from}.`;
+		void this.sendCustomMessage(
+			{
+				customType: "pi.cwd",
+				content,
+				display: true,
+				details: { kind, from: slot.from, to: slot.to, cause, requestId: slot.requestId },
+			},
+			{ triggerTurn: false },
+		).catch((error) => this._reportBootstrapError(error));
+		slot.resolve(untrusted ? "untrusted" : kind);
+	}
+
+	private _schedulePendingCwd(): void {
+		if (this._cwdImmediate || !this._pendingCwdChange || this._disposed) return;
+		this._cwdImmediate = setImmediate(() => {
+			this._cwdImmediate = undefined;
+			void this._maybeApplyPendingCwd();
+		});
+	}
+
+	private async _maybeApplyPendingCwd(): Promise<void> {
+		const slot = this._pendingCwdChange;
+		if (!slot || slot.state !== "pending" || !this._cwdChangeHandler || this.getCwdChangeError() === "busy") return;
+		slot.state = "trust";
+		try {
+			const result = await this._cwdChangeHandler(slot.to, {
+				source: "model",
+				reason: slot.reason,
+				requestId: slot.requestId,
+			});
+			if (this._pendingCwdChange !== slot) return;
+			if (!result.changed && result.error === "busy") {
+				slot.state = "pending";
+				if (!this.getCwdChangeError()) this._schedulePendingCwd();
+				return;
+			}
+			this._pendingCwdChange = undefined;
+			if (result.changed) slot.resolve("applied");
+			else if (result.error === "untrusted") this._cwdOutcome(slot, "cancelled", `${slot.to} is not trusted`, true);
+			else this._cwdOutcome(slot, "failed", result.error);
+		} catch (error) {
+			if (this._pendingCwdChange !== slot) return;
+			this._pendingCwdChange = undefined;
+			// A post-commit factory failure cannot be described as a failed change.
+			if (this.sessionManager.getCwd() === slot.to) slot.resolve("applied");
+			else this._cwdOutcome(slot, "failed", error instanceof Error ? error.message : String(error));
+			this._reportBootstrapError(error);
+		}
 	}
 
 	/** Preflight policy for a cwd transfer. Persistence and target checks belong to the manager. */
@@ -1954,6 +2087,7 @@ export class AgentSession {
 	}
 
 	private _resolveIdleWaitIfIdle(): void {
+		this._schedulePendingCwd();
 		if (!this.isIdle || !this._resolveIdleWait) {
 			return;
 		}
@@ -1998,10 +2132,12 @@ export class AgentSession {
 				for (const action of deferred) await action();
 			} finally {
 				this._resolveIdleWaitIfIdle();
+				this._schedulePendingCwd();
 			}
 			return;
 		}
 		this._resolveIdleWaitIfIdle();
+		this._schedulePendingCwd();
 	}
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
@@ -2206,6 +2342,7 @@ export class AgentSession {
 
 	/** @internal Settle the outgoing runtime without waiting on its own deferred replacement. */
 	async prepareForSessionReplacement(): Promise<void> {
+		this._cancelPendingCwd("the session was closed or replaced");
 		this._background.abortNotifications();
 		if (!this._isDrainingNewSessionRequest) {
 			await this.abort();
@@ -2435,6 +2572,9 @@ export class AgentSession {
 	 */
 	dispose(options?: { keepSessionResources?: boolean }): void {
 		if (this._disposed || this._disposing) return;
+		this._cancelPendingCwd("the session was closed or replaced");
+		if (this._cwdImmediate) clearImmediate(this._cwdImmediate);
+		this._cwdImmediate = undefined;
 		this._disposing = true;
 		this._background.abortNotifications();
 		this._admissionGen++;
@@ -4194,6 +4334,7 @@ export class AgentSession {
 	}
 
 	async abort(): Promise<void> {
+		this._cancelPendingCwd("the conversation was stopped");
 		this._requestRunStop();
 		this.abortRetry();
 		this.abortCompaction();
@@ -4763,6 +4904,7 @@ export class AgentSession {
 	private _clearManualCompactionState(): void {
 		this._compactionAbortController = undefined;
 		this._resolveIdleWaitIfIdle();
+		this._schedulePendingCwd();
 	}
 
 	/**
@@ -5335,6 +5477,7 @@ export class AgentSession {
 					this._readinessStarters = undefined;
 				}
 				resolve();
+				this._schedulePendingCwd();
 			},
 			deferredStarts: async () => {
 				while (starters.size > 0) await Promise.all([...starters]);
@@ -5764,6 +5907,9 @@ export class AgentSession {
 			this._extensionRunnerRef.current = this._extensionRunner;
 		}
 		this._bindExtensionCore(this._extensionRunner);
+		this._extensionRunner.setRequestCwdChange(
+			this._cwdChangeHandler ? (path, options) => this.requestCwdChange(path, options) : undefined,
+		);
 		this._extensionRunner.setBeforeShutdown(async (event) => {
 			this._requestRunStop();
 			this.abortCompaction();
@@ -6045,6 +6191,7 @@ export class AgentSession {
 			return result;
 		} finally {
 			this._bashAbortControllers.delete(abortController);
+			this._schedulePendingCwd();
 		}
 	}
 
@@ -6163,6 +6310,7 @@ export class AgentSession {
 		// source leaf; their synchronous receipts become part of the old branch.
 		this._isStoppingCustom = true;
 		try {
+			this._cancelPendingCwd("the session tree was navigated");
 			this._background.cancel("tree", undefined, true);
 			this._background.deliverBeforeInvalidation();
 		} finally {

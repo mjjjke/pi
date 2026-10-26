@@ -64,6 +64,7 @@ import type { BashResult } from "../bash-executor.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { CompactionJobPhase, CompactionJobStartResult } from "../compaction-job.ts";
+import type { RequestCwdChange } from "../cwd-change.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
@@ -410,6 +411,8 @@ export interface ExtensionContext {
 	 * Currently supported only from agent_end event handlers.
 	 */
 	requestNewSession(options?: RequestNewSessionOptions): Promise<RequestNewSessionResult>;
+	/** Admit one cwd change, applied at the next idle point. Interactive hosts only. */
+	requestCwdChange?: RequestCwdChange;
 	/**
 	 * Offer running built-in bash calls (or only `options.toolCallId`) to `bash_timeout` handlers
 	 * with `reason: "steer"`, e.g. so a steering message is not blocked by a long command. A call

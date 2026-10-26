@@ -15,6 +15,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { CacheWarmingAction } from "../cache-warmer.ts";
 import { outsideCompactionNoticeScope } from "../compaction-notice-scope.ts";
+import type { RequestCwdChange } from "../cwd-change.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { BashExecutionMessage, CustomMessage } from "../messages.ts";
@@ -408,6 +409,7 @@ export class ExtensionRunner {
 	private requestNewSessionHandler: RequestNewSessionHandler = async () => {
 		throw new Error("ctx.requestNewSession() is not available in this mode.");
 	};
+	private requestCwdChange?: RequestCwdChange;
 	private executeToolFn: ExtensionContextActions["executeTool"];
 	private getCallableToolsFn: () => readonly AgentTool[] = () => [];
 	/** Registered MCP servers already reported as unhandled. */
@@ -593,6 +595,10 @@ export class ExtensionRunner {
 			if (providerActions?.unregisterVirtualModel) providerActions.unregisterVirtualModel(provider, id);
 			else this.modelRegistry.unregisterVirtualModel(provider, id);
 		};
+	}
+
+	setRequestCwdChange(handler?: RequestCwdChange): void {
+		this.requestCwdChange = handler;
 	}
 
 	bindCommandContext(actions?: ExtensionCommandContextActions): void {
@@ -1171,6 +1177,15 @@ export class ExtensionRunner {
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
+			},
+			get requestCwdChange() {
+				runner.assertActive();
+				return runner.requestCwdChange
+					? (path: string, options?: { reason?: string }) => {
+							runner.assertActive();
+							return runner.requestCwdChange!(path, options);
+						}
+					: undefined;
 			},
 			requestNewSession: (options) => {
 				runner.assertActive();
