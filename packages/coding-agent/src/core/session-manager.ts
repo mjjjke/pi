@@ -1261,7 +1261,10 @@ export function writeSessionFileAtomic(
 			if (options.onPublished && tempStat) {
 				try {
 					const published = statSync(target);
-					if (published.dev === tempStat.dev && published.ino === tempStat.ino) options.onPublished();
+					if (published.dev === tempStat.dev && published.ino === tempStat.ino) {
+						if (options.mode === "replace") tempExists = false;
+						options.onPublished();
+					}
 				} catch {
 					// No evidence of publication: retain the pre-commit failure.
 				}
@@ -1404,12 +1407,23 @@ function readMoveMarker(file: string): SessionMoveMarker | undefined {
 	return undefined;
 }
 
-function supersedingSession(file: string): string | undefined {
+/** Unlike existsSync, only ENOENT means absent: access/I/O errors must refuse destructive cleanup. */
+function lstatCwdFile(file: string): Stats | undefined {
+	try {
+		return lstatSync(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw new Error(`cd: lstat ${file}: ${errorMessage(error)}`, { cause: error });
+	}
+}
+
+function supersedingSession(file: string, allowMissingSource = false): string | undefined {
 	const marker = readMoveMarker(file);
 	if (!marker || marker.to === file) return undefined;
 	const source = readSessionHeaderForDiscovery(file);
 	const target = readSessionHeaderForDiscovery(marker.to);
-	return source?.id === marker.id && target?.id === marker.id ? marker.to : undefined;
+	const sourceMatches = source?.id === marker.id || (allowMissingSource && !lstatCwdFile(file));
+	return sourceMatches && target?.id === marker.id ? marker.to : undefined;
 }
 
 /** All discovery paths stay read-only; without a marker in this listing there is no extra I/O. */
@@ -1476,17 +1490,22 @@ function reconcilePredecessor(live: string, id: string, entries: readonly FileEn
 	const previous = latestCwdState(entries)?.previousSessionFile;
 	if (!previous || previous === live) return;
 	const markerPath = `${previous}.moved`;
-	if (!existsSync(markerPath)) return;
+	if (!lstatCwdFile(markerPath)) {
+		if (lstatCwdFile(previous) && readSessionHeaderForDiscovery(previous)?.id === id) {
+			throw new Error(`cd: reconcile ${previous} requires marker ${markerPath}; left unchanged`);
+		}
+		return;
+	}
 	const marker = readMoveMarker(previous);
 	if (marker?.to !== live || marker.id !== id) {
 		throw new Error(`cd: reconcile marker ${markerPath} does not name ${live}`);
 	}
-	if (existsSync(previous) && readSessionHeaderForDiscovery(previous)?.id !== id) {
+	if (lstatCwdFile(previous) && readSessionHeaderForDiscovery(previous)?.id !== id) {
 		throw new Error(`cd: reconcile ${previous} has a different session id; left unchanged`);
 	}
 	// If this sync fails, O and M MUST remain: a power loss could still drop N's directory entry.
 	syncSessionDirectory(dirname(live));
-	if (existsSync(previous)) unlinkCwdFile(previous);
+	if (lstatCwdFile(previous)) unlinkCwdFile(previous);
 	syncSessionDirectory(dirname(previous));
 	unlinkCwdFile(markerPath);
 }
@@ -1862,7 +1881,7 @@ export class SessionManager {
 
 	private _setSessionFile(sessionFile: string, preloaded?: LoadedSessionFile): void {
 		const requested = resolvePath(sessionFile);
-		const redirected = supersedingSession(requested);
+		const redirected = supersedingSession(requested, true);
 		this.sessionFile = redirected ?? requested;
 		if (redirected) {
 			preloaded = undefined;
@@ -2063,10 +2082,11 @@ export class SessionManager {
 		const mode = !this.persist || !this.flushed ? "memory" : sessionFile === old ? "in-place" : "move";
 		if (old && this.flushed) {
 			accessSync(old, constants.W_OK);
-			if (supersedingSession(old))
+			const marker = readMoveMarker(old);
+			if (marker && lstatCwdFile(marker.to))
 				throw new Error(`cd: marker ${old}.moved is inconsistent with the current session`);
 		}
-		if (sessionFile && sessionFile !== old && existsSync(sessionFile)) {
+		if (sessionFile && sessionFile !== old && lstatCwdFile(sessionFile)) {
 			// The previous relocation may have left its old copy. Only its validated marker permits
 			// preflight to remove it; an arbitrary same-id file is never evidence for deletion.
 			const predecessor = latestCwdState(this.fileEntries)?.previousSessionFile;
@@ -2074,7 +2094,7 @@ export class SessionManager {
 				throw new Error(`cd: a session file already exists at ${sessionFile}`);
 			}
 		}
-		if (sessionFile && !this.flushed && existsSync(sessionFile)) {
+		if (sessionFile && !this.flushed && lstatCwdFile(sessionFile)) {
 			throw new Error(`cd: a session file already exists at ${sessionFile}`);
 		}
 		if (old && sessionFile) assertArtifactAlias(old, sessionFile);
@@ -2112,9 +2132,8 @@ export class SessionManager {
 		}
 		if (this.sessionFile && this.flushed) reconcilePredecessor(this.sessionFile, this.sessionId, this.fileEntries);
 		const next = plan.sessionFile;
-		if (next && next !== this.sessionFile && !existsSync(next) && existsSync(`${next}.moved`))
-			unlinkCwdFile(`${next}.moved`);
-		if (next && next !== this.sessionFile && existsSync(next))
+		if (next && !lstatCwdFile(next) && lstatCwdFile(`${next}.moved`)) unlinkCwdFile(`${next}.moved`);
+		if (next && next !== this.sessionFile && lstatCwdFile(next))
 			throw new Error(`cd: a session file already exists at ${next}`);
 	}
 
@@ -3024,7 +3043,7 @@ export class SessionManager {
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
 		const requestedPath = resolvePath(path);
-		const resolvedPath = supersedingSession(requestedPath) ?? requestedPath;
+		const resolvedPath = supersedingSession(requestedPath, true) ?? requestedPath;
 		let header: SessionHeader | null = null;
 		let preloaded: LoadedSessionFile | undefined;
 		if (cwdOverride === undefined && existsSync(resolvedPath)) {
@@ -3042,7 +3061,7 @@ export class SessionManager {
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloaded);
+		return new SessionManager(cwd, dir, requestedPath, true, undefined, preloaded);
 	}
 
 	/**

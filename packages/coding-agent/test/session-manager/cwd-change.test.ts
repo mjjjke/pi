@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
-type Operation = "link" | "rename" | "unlink" | "fsync";
+type Operation = "link" | "rename" | "unlink" | "fsync" | "lstat";
 const hooks = vi.hoisted(() => ({
 	run: undefined as undefined | ((operation: Operation, path: string, after: boolean) => void),
 }));
@@ -15,6 +15,10 @@ vi.mock("fs", async (importOriginal) => {
 	const paths = new Map<number, string>();
 	return {
 		...actual,
+		lstatSync: (path: string) => {
+			hooks.run?.("lstat", path, false);
+			return actual.lstatSync(path);
+		},
 		openSync: (path: string, flags: string, mode?: number) => {
 			const fd = actual.openSync(path, flags, mode);
 			paths.set(fd, path);
@@ -149,6 +153,32 @@ describe("cwd persistence crash states", () => {
 		expect(fs.existsSync(`${old}.moved`)).toBe(false);
 	});
 
+	it("explicit open of an absent predecessor with an orphan marker resumes the live file, not an empty session", () => {
+		const old = manager.getSessionFile()!;
+		fail("unlink", `${old}.moved`);
+		move(b);
+		expect(fs.existsSync(old)).toBe(false);
+		hooks.run = undefined;
+		const reopened = SessionManager.open(old);
+		expect(reopened.getSessionId()).toBe(manager.getSessionId());
+		expect(reopened.getSessionFile()).toBe(manager.getSessionFile());
+		expect(reopened.buildSessionContext().messages).toHaveLength(3);
+		expect(fs.existsSync(old)).toBe(false);
+	});
+
+	it("explicit open follows only one marker even if a second valid marker is present", () => {
+		const old = manager.getSessionFile()!;
+		const next = fileAt(b);
+		const third = fileAt(c);
+		for (const file of [next, third]) {
+			fs.mkdirSync(dirname(file), { recursive: true });
+			fs.writeFileSync(file, `${JSON.stringify({ ...manager.getHeader(), cwd: file === next ? b : c })}\n`);
+		}
+		marker(old, next);
+		marker(next, third);
+		expect(SessionManager.open(old).getSessionFile()).toBe(next);
+	});
+
 	it("global listAll hides the old copy without cleaning it", async () => {
 		manager = SessionManager.create(a);
 		manager.appendMessage({ role: "user", content: "original question", timestamp: 2 });
@@ -196,10 +226,12 @@ describe("cwd persistence crash states", () => {
 			hooks.run = (op, path, after) => {
 				if (op === operation && path === plan.sessionFile && after) throw new Error(`after ${op} ${path}`);
 			};
-			expect(manager.relocate(plan, manager.buildCwdChangeEntries(plan, { source: "user" }))).toMatchObject({
+			const result = manager.relocate(plan, manager.buildCwdChangeEntries(plan, { source: "user" }));
+			expect(result).toMatchObject({
 				committed: true,
 				warning: expect.stringContaining(`after ${operation}`),
 			});
+			expect(result.warning).not.toContain("ENOENT");
 			expect(manager.getCwd()).toBe(b);
 			expect(SessionManager.open(manager.getSessionFile()!).getHeader()?.cwd).toBe(b);
 			if (operation === "link")
@@ -274,6 +306,38 @@ describe("fail-closed predecessor reconciliation", () => {
 		expect(fs.existsSync(old)).toBe(true);
 	});
 
+	it("an inaccessible predecessor marker refuses the next cd instead of treating it as absent", () => {
+		const old = manager.getSessionFile()!;
+		fail("unlink", old);
+		move(b);
+		const live = manager.getSessionFile()!;
+		fail("lstat", `${old}.moved`);
+		expect(() => move(c)).toThrow(`${old}.moved`);
+		expect(manager.getSessionFile()).toBe(live);
+		expect(fs.existsSync(old)).toBe(true);
+		expect(fs.existsSync(`${old}.moved`)).toBe(true);
+	});
+
+	it("an inaccessible predecessor file refuses cleanup without removing its marker", () => {
+		const old = manager.getSessionFile()!;
+		fail("unlink", old);
+		move(b);
+		fail("lstat", old);
+		expect(() => move(c)).toThrow(old);
+		expect(manager.getCwd()).toBe(b);
+		expect(fs.existsSync(`${old}.moved`)).toBe(true);
+	});
+
+	it("missing predecessor marker with a same-id old copy refuses rather than creating a second old copy", () => {
+		const old = manager.getSessionFile()!;
+		fail("unlink", old);
+		move(b);
+		hooks.run = undefined;
+		fs.unlinkSync(`${old}.moved`);
+		expect(() => move(c)).toThrow(/reconcile.*marker/);
+		expect(manager.getCwd()).toBe(b);
+	});
+
 	it("stale destination marker is removed before publication", async () => {
 		const next = fileAt(b);
 		fs.mkdirSync(dirname(next), { recursive: true });
@@ -297,6 +361,17 @@ describe("fail-closed predecessor reconciliation", () => {
 			await discovery(a, old);
 		},
 	);
+
+	it("outgoing marker naming an existing different-id file is inconsistent, never overwritten", () => {
+		const old = manager.getSessionFile()!;
+		const next = fileAt(b);
+		fs.mkdirSync(dirname(next), { recursive: true });
+		fs.writeFileSync(next, `${JSON.stringify({ ...manager.getHeader(), id: "different" })}\n`);
+		marker(old, next);
+		expect(() => move(c)).toThrow(/marker.*inconsisten/);
+		expect(manager.getCwd()).toBe(a);
+		expect(fs.existsSync(`${old}.moved`)).toBe(true);
+	});
 
 	it("refuses an outgoing valid marker and unrelated destination collision", () => {
 		const old = manager.getSessionFile()!;
@@ -414,6 +489,15 @@ describe("layouts, artifacts and history", () => {
 		manager.appendMessage({ role: "user", content: "first prompt", timestamp: 1 });
 		expect(SessionManager.open(next).getHeader()?.cwd).toBe(b);
 		expect(SessionManager.open(next).getEntries()).toEqual(manager.getEntries());
+	});
+
+	it("memory preflight rejects a dangling destination session-file symlink before changing memory", () => {
+		manager = SessionManager.create(a, dirFor(a));
+		const next = fileAt(b);
+		fs.mkdirSync(dirname(next), { recursive: true });
+		fs.symlinkSync(join(root, "absent-session"), next);
+		expect(() => move(b)).toThrow(`session file already exists at ${next}`);
+		expect(manager.getCwd()).toBe(a);
 	});
 
 	it("no-session mode writes nothing, keeps no path and retains entries and identity", () => {
