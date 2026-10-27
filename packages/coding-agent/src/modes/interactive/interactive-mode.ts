@@ -2792,9 +2792,27 @@ export class InteractiveMode {
 			mode: "tui",
 			hasUI: true,
 			ui: {
-				select: ui.select,
-				confirm: ui.confirm,
-				input: ui.input,
+				select: (title, options, opts) =>
+					this.session.extensionRunner.runUIPrompt(
+						"select",
+						title,
+						() => ui.select(title, options, opts),
+						"project_trust",
+					),
+				confirm: (title, message, opts) =>
+					this.session.extensionRunner.runUIPrompt(
+						"confirm",
+						title,
+						() => ui.confirm(title, message, opts),
+						"project_trust",
+					),
+				input: (title, placeholder, opts) =>
+					this.session.extensionRunner.runUIPrompt(
+						"input",
+						title,
+						() => ui.input(title, placeholder, opts),
+						"project_trust",
+					),
 				notify: ui.notify,
 			},
 		};
@@ -6584,7 +6602,28 @@ export class InteractiveMode {
 		});
 	}
 
-	private async showAuthPrompt(dialog: LoginDialogComponent, prompt: AuthPrompt, providerId: string): Promise<string> {
+	private async showAuthPrompt(
+		dialog: LoginDialogComponent,
+		prompt: AuthPrompt,
+		providerId: string,
+		promptsDone: AbortSignal,
+	): Promise<string> {
+		if (prompt.signal?.aborted || promptsDone.aborted) throw new Error("Login cancelled");
+		return this.session.extensionRunner.runUIPrompt(
+			prompt.type === "select" ? "select" : "input",
+			prompt.message,
+			() => this.awaitAuthPrompt(dialog, prompt, providerId, promptsDone),
+			"auth",
+		);
+	}
+
+	private async awaitAuthPrompt(
+		dialog: LoginDialogComponent,
+		prompt: AuthPrompt,
+		providerId: string,
+		promptsDone: AbortSignal,
+	): Promise<string> {
+		const signal = AbortSignal.any([promptsDone, ...(prompt.signal ? [prompt.signal] : [])]);
 		let response: Promise<string>;
 		if (prompt.type === "select") {
 			response = this.showAuthSelect(dialog, prompt, providerId);
@@ -6593,9 +6632,7 @@ export class InteractiveMode {
 		} else {
 			response = dialog.showPrompt(prompt.message, prompt.placeholder);
 		}
-		if (!prompt.signal) return response;
-		if (prompt.signal.aborted) throw new Error("Login cancelled");
-		const signal = prompt.signal;
+		if (signal.aborted) throw new Error("Login cancelled");
 		let onAbort: (() => void) | undefined;
 		const aborted = new Promise<string>((_resolve, reject) => {
 			onAbort = () => reject(new Error("Login cancelled"));
@@ -6628,18 +6665,20 @@ export class InteractiveMode {
 		method: "api_key" | "oauth",
 	): Promise<void> {
 		this.programStatus.setBlocked("login", { kind: "auth", message: `Log in to ${providerName}` });
+		const promptsDone = new AbortController();
 		try {
 			await this.session.modelRuntime.login(
 				providerId,
 				method,
 				{
 					signal: dialog.signal,
-					prompt: (prompt) => this.showAuthPrompt(dialog, prompt, providerId),
+					prompt: (prompt) => this.showAuthPrompt(dialog, prompt, providerId, promptsDone.signal),
 					notify: (event) => this.notifyAuthDialog(dialog, event),
 				},
 				{ getDeviceId: () => this.settingsManager.getOrCreateDeviceId() },
 			);
 		} finally {
+			promptsDone.abort();
 			this.programStatus.setBlocked("login", undefined);
 		}
 	}

@@ -1212,10 +1212,12 @@ export interface TerminalFocusEvent {
 }
 
 export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
+export type UIPromptSource = "project_trust" | "auth";
 
 /** Fired when Pi starts waiting on a blocking user-facing extension UI prompt. */
 export interface UIPromptStartEvent {
 	type: "ui_prompt_start";
+	source?: UIPromptSource;
 	reason: "ui_prompt";
 	kind: UIPromptKind;
 	title?: string;
@@ -1224,6 +1226,7 @@ export interface UIPromptStartEvent {
 /** Fired when Pi is no longer waiting on a blocking user-facing extension UI prompt. */
 export interface UIPromptEndEvent {
 	type: "ui_prompt_end";
+	source?: UIPromptSource;
 	reason: "ui_prompt";
 	kind: UIPromptKind;
 	title?: string;
