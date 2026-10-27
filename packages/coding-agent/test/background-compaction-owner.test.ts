@@ -304,6 +304,24 @@ describe("unexposed background compaction owner", () => {
 		expect(f.accountUsage).toHaveBeenCalledExactlyOnceWith(usage);
 	});
 
+	it.each(["sync", "async"])("carries %s summarizer errors through terminal views and events", async (kind) => {
+		const f = setup();
+		const error = Object.assign(new Error("overloaded"), { status: 529 });
+		f.start(undefined, () => {
+			if (kind === "sync") throw error;
+			return Promise.reject(error);
+		});
+		const job = f.owner.current;
+		await job?.done;
+		await f.owner.flushEvents();
+		expect(job).toMatchObject({ phase: "failed", cause: "summarization-failed", errorMessage: "529 overloaded" });
+		expect(f.events.at(-1)).toMatchObject({
+			phase: "failed",
+			cause: "summarization-failed",
+			errorMessage: "529 overloaded",
+		});
+	});
+
 	it("keeps admission held through the applied event", async () => {
 		const f = setup();
 		f.start();

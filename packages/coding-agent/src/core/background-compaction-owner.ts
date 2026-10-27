@@ -19,6 +19,8 @@ export interface BackgroundCompactionEvent {
 	source: string;
 	phase: "started" | "ready" | "waiting" | "released" | "applied" | "discarded" | "failed";
 	cause?: string;
+	/** Summarizer failure text, including provider status when available. */
+	errorMessage?: string;
 	usage?: Usage;
 }
 
@@ -294,6 +296,7 @@ export class BackgroundCompactionOwner {
 			source: view.source,
 			phase,
 			...(view.cause ? { cause: view.cause } : {}),
+			...(view.errorMessage ? { errorMessage: view.errorMessage } : {}),
 			...(usage.length ? { usage: usage.reduce(combineUsage) } : {}),
 		};
 		const lifecycle = this.eventLifecycle.signal;

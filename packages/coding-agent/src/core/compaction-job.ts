@@ -126,6 +126,8 @@ export interface CompactionJobView {
 	readonly phase: CompactionJobPhase;
 	readonly terminal: boolean;
 	readonly cause?: string;
+	/** Summarizer failure text, including provider status when available. */
+	readonly errorMessage?: string;
 	readonly entryId?: string;
 	readonly signal: AbortSignal;
 	/** Resolves on ready or terminal, never rejects (even for signal-ignoring hooks). */
@@ -142,6 +144,7 @@ interface Job {
 	phase: CompactionJobPhase;
 	terminal: boolean;
 	cause?: string;
+	errorMessage?: string;
 	entryId?: string;
 	controller: AbortController;
 	done: Promise<void>;
@@ -238,6 +241,9 @@ export class BackgroundCompactionJobs {
 			get cause() {
 				return job.cause;
 			},
+			get errorMessage() {
+				return job.errorMessage;
+			},
 			get entryId() {
 				return job.entryId;
 			},
@@ -280,11 +286,11 @@ export class BackgroundCompactionJobs {
 					if (job.phase !== "claimed") job.phase = "ready";
 					job.settle();
 				})
-				.catch(() => {
-					if (!job.terminal) this.terminate(job, "failed", "summarization-failed");
+				.catch((error: unknown) => {
+					if (!job.terminal) this.failSummary(job, error);
 				});
-		} catch {
-			this.terminate(job, "failed", "summarization-failed");
+		} catch (error) {
+			this.failSummary(job, error);
 		}
 		return { status: "started", jobId: job.id, phase: job.phase };
 	}
@@ -395,6 +401,19 @@ export class BackgroundCompactionJobs {
 			if (!entry || JSON.stringify(entry) !== bytes) return "prefix-edit";
 		}
 		return undefined;
+	}
+
+	private failSummary(job: Job, error: unknown): void {
+		if (job.terminal) return;
+		const details = error !== null && typeof error === "object" ? error : undefined;
+		const message =
+			details && "message" in details && typeof details.message === "string" ? details.message : String(error);
+		const status = details && "status" in details ? details.status : undefined;
+		job.errorMessage =
+			(typeof status === "number" || typeof status === "string") && !message.includes(String(status))
+				? `${status} ${message}`
+				: message;
+		this.terminate(job, "failed", "summarization-failed");
 	}
 
 	private terminate(job: Job, phase: "applied" | "failed" | "discarded", cause?: string): void {
