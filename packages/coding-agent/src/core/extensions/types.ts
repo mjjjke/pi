@@ -503,6 +503,21 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	cancelQueuedDeveloperMessage(pendingId: string): boolean;
 }
 
+/** Final journal outcome of an accepted custom message. */
+export type SendMessageReceipt = { status: "committed"; entryId: string } | { status: "dropped" };
+
+export interface SendMessageOptions {
+	triggerTurn?: boolean;
+	deliverAs?: "steer" | "followUp" | "nextTurn";
+	orderKey?: string;
+	/**
+	 * Exactly once after append or final drop, including after reload/cwd transfer. May fire
+	 * synchronously before sendMessage returns. Not supported with nextTurn. Never awaited:
+	 * stop/shutdown handlers must finish without waiting for this after-the-fact notification.
+	 */
+	onReceipt?: (receipt: SendMessageReceipt) => void;
+}
+
 /** Options for `queueDeveloperMessage()`. */
 export interface QueueDeveloperMessageOptions {
 	/**
@@ -534,7 +549,7 @@ export interface ReplacedSessionContext extends ExtensionCommandContext {
 
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
+		options?: SendMessageOptions,
 	): Promise<void>;
 
 	sendUserMessage(
@@ -2135,7 +2150,7 @@ export interface ExtensionAPI {
 	 */
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
+		options?: SendMessageOptions,
 	): void;
 
 	/**
@@ -2552,7 +2567,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
+	options?: SendMessageOptions,
 ) => void;
 
 export type SendUserMessageHandler = (

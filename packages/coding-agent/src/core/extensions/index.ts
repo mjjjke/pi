@@ -170,6 +170,8 @@ export type {
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
 	SendMessageHandler,
+	SendMessageOptions,
+	SendMessageReceipt,
 	SendUserMessageHandler,
 	SessionBackgroundCompactionEvent,
 	SessionBeforeCompactEvent,

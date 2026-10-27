@@ -127,6 +127,8 @@ import {
 	type RequestBashHandoverOptions,
 	type RequestNewSessionOptions,
 	type RequestNewSessionResult,
+	type SendMessageOptions,
+	type SendMessageReceipt,
 	type SessionBeforeCompactResult,
 	type SessionBeforeTreeResult,
 	type SessionBoundaryDraft,
@@ -478,12 +480,14 @@ interface OwnedCustomMessage {
 	/** A passive travels in its predecessor's admission batch, never in an Agent queue. */
 	riderOf?: OwnedCustomMessage;
 	delivery?: "steer" | "followUp";
+	onReceipt?: (receipt: SendMessageReceipt) => void;
 }
 
 interface StagedContent {
 	message: CustomMessage | BashExecutionMessage;
 	/** message_start/message_end were already emitted at send. */
 	announced: boolean;
+	onReceipt?: (receipt: SendMessageReceipt) => void;
 }
 
 function isBlankInstruction(content: string | TextContent[]): boolean {
@@ -1512,7 +1516,32 @@ export class AgentSession {
 	/** Drop everything staged (dispose, replacement, tree navigation): no onCommit. */
 	private _discardStaged(): void {
 		this._stagedInstructions = [];
+		const discarded = this._stagedContent;
 		this._stagedContent = [];
+		const callbacks = discarded.map((item) => this._takeCustomReceipt(item, { status: "dropped" }));
+		for (const callback of callbacks) callback?.();
+	}
+
+	/** Consume before dispatch: a callback can send again, dispose or navigate the session. */
+	private _takeCustomReceipt(
+		item: Pick<OwnedCustomMessage, "onReceipt">,
+		receipt: SendMessageReceipt,
+	): (() => void) | undefined {
+		const callback = item.onReceipt;
+		item.onReceipt = undefined;
+		if (!callback) return undefined;
+		return () => {
+			try {
+				callback(receipt);
+			} catch (error) {
+				this._extensionRunner.emitError({
+					extensionPath: "<runtime>",
+					event: "send_message_receipt",
+					error: error instanceof Error ? error.message : String(error),
+					stack: error instanceof Error ? error.stack : undefined,
+				});
+			}
+		};
 	}
 
 	/**
@@ -1599,8 +1628,10 @@ export class AgentSession {
 			}
 			while (this._stagedContent.length > 0) {
 				const item = this._stagedContent[0]!;
-				this._appendContentMessage(item.message);
+				const entryId = this._appendContentMessage(item.message);
 				this._stagedContent.shift();
+				const callback = this._takeCustomReceipt(item, { status: "committed", entryId });
+				if (callback) callbacks.push(callback);
 				if (!item.announced && item.message.role === "custom") {
 					events.push(
 						{ type: "message_start", message: item.message },
@@ -1616,8 +1647,10 @@ export class AgentSession {
 				for (const item of this._customStore.values()) {
 					if (item.state !== "buffered" || item.riderOf) continue;
 					const message = item.handle;
-					this._appendContentMessage(message);
+					const entryId = this._appendContentMessage(message);
 					this._customStore.delete(message);
+					const callback = this._takeCustomReceipt(item, { status: "committed", entryId });
+					if (callback) callbacks.push(callback);
 					events.push({ type: "message_start", message }, { type: "message_end", message });
 				}
 			}
@@ -1783,16 +1816,16 @@ export class AgentSession {
 		if (entry) this._emit({ type: "entry_appended", entry });
 	}
 
-	private _appendContentMessage(message: CustomMessage | BashExecutionMessage): void {
+	private _appendContentMessage(message: CustomMessage | BashExecutionMessage): string {
 		if (message.role === "custom") {
-			this.sessionManager.appendCustomMessageEntry(
+			return this.sessionManager.appendCustomMessageEntry(
 				message.customType,
 				message.content,
 				message.display,
 				message.details,
 			);
 		} else {
-			this.sessionManager.appendMessage(message);
+			return this.sessionManager.appendMessage(message);
 		}
 	}
 
@@ -2296,36 +2329,45 @@ export class AgentSession {
 				// Regular LLM message - persist as SessionMessageEntry
 				entryId = this.sessionManager.appendMessage(event.message);
 			}
+			let customReceipt: (() => void) | undefined;
 			if (entryId) {
 				this._entryIdsByMessage.set(event.message, entryId);
 				// The loop captures this token for the whole batch before lifecycle awaits. A hook
 				// replacing the message cannot transfer or destroy its pending ownership.
 				for (const [handle, item] of this._customStore) {
-					if (item === event.admissionToken) this._customStore.delete(handle);
+					if (item === event.admissionToken) {
+						this._customStore.delete(handle);
+						customReceipt = this._takeCustomReceipt(item, { status: "committed", entryId });
+					}
 				}
 			}
-			if (ownedMessageEnd && entryId) this._emit(event);
-			if (entryId && this._runStart?.message === event.message) this._runStart.persisted = true;
-			if (entryId && (event.message.role === "user" || event.message.role === "custom")) this._inputArrived = true;
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+			try {
+				if (ownedMessageEnd && entryId) this._emit(event);
+				if (entryId && this._runStart?.message === event.message) this._runStart.persisted = true;
+				if (entryId && (event.message.role === "user" || event.message.role === "custom"))
+					this._inputArrived = true;
+				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
-			if (event.message.role === "assistant") {
-				const assistantMsg = event.message as AssistantMessage;
-				this._lastAssistantMessage = assistantMsg;
-				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
-					this._overflowRecoveryAttempted = false;
-				}
+				if (event.message.role === "assistant") {
+					const assistantMsg = event.message as AssistantMessage;
+					this._lastAssistantMessage = assistantMsg;
+					if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
+						this._overflowRecoveryAttempted = false;
+					}
 
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-					this._emit({
-						type: "auto_retry_end",
-						success: true,
-						attempt: this._retryAttempt,
-					});
-					this._retryAttempt = 0;
+					// Reset retry counter immediately on successful assistant response
+					// This prevents accumulation across multiple LLM calls within a turn
+					if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
+						this._emit({
+							type: "auto_retry_end",
+							success: true,
+							attempt: this._retryAttempt,
+						});
+						this._retryAttempt = 0;
+					}
 				}
+			} finally {
+				customReceipt?.();
 			}
 		}
 
@@ -2679,6 +2721,16 @@ export class AgentSession {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		// A stop writer can also refuse without throwing. Never drop an admission that can still append.
+		const callbacks: Array<() => void> = [];
+		for (const [handle, item] of this._customStore) {
+			if (item.state === "admitted") continue;
+			this._customStore.delete(handle);
+			this.agent.removeQueued(handle);
+			const callback = this._takeCustomReceipt(item, { status: "dropped" });
+			if (callback) callbacks.push(callback);
+		}
+		for (const callback of callbacks) callback();
 		this._discardStaged();
 		for (const pending of this._pendingInstructions.splice(0)) {
 			try {
@@ -4064,8 +4116,11 @@ export class AgentSession {
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; orderKey?: string },
+		options?: SendMessageOptions,
 	): Promise<void> {
+		if (options?.deliverAs === "nextTurn" && options.onReceipt)
+			throw new Error('onReceipt is not supported with deliverAs "nextTurn"');
+		if (this._disposed) throw new Error("sendCustomMessage() cannot be called after the session is disposed.");
 		const appMessage = {
 			role: "custom" as const,
 			customType: message.customType,
@@ -4099,6 +4154,7 @@ export class AgentSession {
 			lane,
 			state: activeInput ? "queued" : options?.triggerTurn ? "held" : "buffered",
 			delivery: options?.deliverAs === "followUp" ? "followUp" : "steer",
+			onReceipt: options?.onReceipt,
 		};
 		if (lane === "passive") {
 			item.riderOf = [...this._customStore.values()].findLast(
@@ -4171,12 +4227,21 @@ export class AgentSession {
 	/** Each low-level loop has unwound; recover failed receipts before any continuation drains younger handles. */
 	private _recoverCustomAdmissions(): void {
 		let recovered = false;
+		const callbacks: Array<() => void> = [];
 		for (const item of this._customStore.values()) {
 			if (item.state !== "admitted") continue;
+			if (this._disposed) {
+				this._customStore.delete(item.handle);
+				this.agent.removeQueued(item.handle);
+				const callback = this._takeCustomReceipt(item, { status: "dropped" });
+				if (callback) callbacks.push(callback);
+				continue;
+			}
 			item.state = "buffered";
 			item.riderOf = undefined;
 			recovered = true;
 		}
+		for (const callback of callbacks) callback();
 		if (recovered) this._flushPendingAtRunEnd();
 	}
 
@@ -4199,7 +4264,8 @@ export class AgentSession {
 	}
 
 	private _stageOwnedCustom(item: OwnedCustomMessage, announced: boolean): void {
-		this._stagedContent.push({ message: structuredClone(item.handle), announced });
+		this._stagedContent.push({ message: structuredClone(item.handle), announced, onReceipt: item.onReceipt });
+		item.onReceipt = undefined;
 		this._customStore.delete(item.handle);
 		this.agent.removeQueued(item.handle);
 	}
@@ -4207,13 +4273,19 @@ export class AgentSession {
 	/** Synchronous receipt before announcement, including reentrant sends from listeners. */
 	private _writeOwnedCustom(item: OwnedCustomMessage): void {
 		if (!this._customStore.has(item.handle)) return;
+		let callback: (() => void) | undefined;
 		if (this._isStagingBranch()) this._stageOwnedCustom(item, true);
 		else {
-			this._writeCustomMessage(item.handle);
+			const entryId = this._writeCustomMessage(item.handle);
 			this._customStore.delete(item.handle);
 			this.agent.removeQueued(item.handle);
+			callback = this._takeCustomReceipt(item, { status: "committed", entryId });
 		}
-		this._announceCustomMessage(item.handle);
+		try {
+			this._announceCustomMessage(item.handle);
+		} finally {
+			callback?.();
+		}
 	}
 
 	/** No request follows a stop. Do not overtake a batch still owned by the loop. */
@@ -4230,8 +4302,8 @@ export class AgentSession {
 		}
 	}
 
-	private _writeCustomMessage(appMessage: CustomMessage): void {
-		this.sessionManager.appendCustomMessageEntry(
+	private _writeCustomMessage(appMessage: CustomMessage): string {
+		return this.sessionManager.appendCustomMessageEntry(
 			appMessage.customType,
 			appMessage.content,
 			appMessage.display,
@@ -5753,6 +5825,8 @@ export class AgentSession {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
+					if (options?.deliverAs === "nextTurn" && options.onReceipt)
+						throw new Error('onReceipt is not supported with deliverAs "nextTurn"');
 					this.sendCustomMessage(message, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
