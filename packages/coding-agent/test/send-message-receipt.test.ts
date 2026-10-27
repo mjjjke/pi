@@ -229,6 +229,53 @@ describe("sendMessage commit receipts", () => {
 		expect(onReceipt).toHaveBeenCalledExactlyOnceWith({ status: "dropped" });
 	});
 
+	it.each(["commit", "staged drop", "final drop"] as const)(
+		"async receipt rejection is reported without waiting or repeating: %s",
+		async (scenario) => {
+			const h = await setup(scenario !== "staged drop");
+			const report = vi.fn();
+			h.session.extensionRunner.onError(report);
+			let reject!: (error: Error) => void;
+			const pending = new Promise<void>((_resolve, rejectPromise) => {
+				reject = rejectPromise;
+			});
+			const failure = new Error("async receipt failed");
+			const onReceipt = vi.fn(async () => {
+				await pending;
+			});
+			if (scenario === "final drop") {
+				vi.spyOn(h.sessionManager, "appendCustomMessageEntry").mockImplementation(() => {
+					throw new Error("refused");
+				});
+				await expect(
+					h.session.sendCustomMessage(custom("async"), { triggerTurn: false, onReceipt }),
+				).rejects.toThrow("refused");
+			} else {
+				await h.session.sendCustomMessage(custom("async"), { triggerTurn: false, onReceipt });
+			}
+			h.session.dispose();
+			h.session.dispose();
+			expect(onReceipt).toHaveBeenCalledExactlyOnceWith(
+				scenario === "commit"
+					? { status: "committed", entryId: h.sessionManager.getLeafId() }
+					: { status: "dropped" },
+			);
+			expect(h.sessionManager.getEntries().filter((entry) => entry.type === "custom_message")).toHaveLength(
+				scenario === "commit" ? 1 : 0,
+			);
+			report.mockClear();
+			reject(failure);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(report).toHaveBeenCalledExactlyOnceWith({
+				extensionPath: "<runtime>",
+				event: "send_message_receipt",
+				error: failure.message,
+				stack: failure.stack,
+			});
+			expect(onReceipt).toHaveBeenCalledOnce();
+		},
+	);
+
 	it("reentrant idle receipt sends once, without repeating the first receipt", async () => {
 		const h = await setup();
 		const trace: string[] = [];

@@ -1531,16 +1531,19 @@ export class AgentSession {
 		item.onReceipt = undefined;
 		if (!callback) return undefined;
 		return () => {
-			try {
-				callback(receipt);
-			} catch (error) {
-				this._extensionRunner.emitError({
-					extensionPath: "<runtime>",
-					event: "send_message_receipt",
-					error: error instanceof Error ? error.message : String(error),
-					stack: error instanceof Error ? error.stack : undefined,
-				});
-			}
+			// Observe failures without making append or teardown wait for the notification.
+			void (async () => {
+				try {
+					await callback(receipt);
+				} catch (error) {
+					this._extensionRunner.emitError({
+						extensionPath: "<runtime>",
+						event: "send_message_receipt",
+						error: error instanceof Error ? error.message : String(error),
+						stack: error instanceof Error ? error.stack : undefined,
+					});
+				}
+			})();
 		};
 	}
 
