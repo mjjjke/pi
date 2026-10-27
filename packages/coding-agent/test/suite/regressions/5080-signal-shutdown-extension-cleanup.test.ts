@@ -20,17 +20,22 @@ type ShutdownThis = {
 	isShuttingDown: boolean;
 	unregisterSignalHandlers: () => void;
 	runtimeHost: {
-		session: { closeAdmission: () => void; cancelCwdChange: () => void };
+		session: {
+			closeAdmission: () => void;
+			cancelCwdChange: () => void;
+			extensionRunner: { hasHandlers: (event: string) => boolean };
+		};
 		dispose: () => Promise<void>;
 	};
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	themeController: { disableAutoSync: () => void };
 	stop: () => void;
 	sessionManager: SessionManager;
+	session: ShutdownThis["runtimeHost"]["session"];
 };
 
 type InteractiveModePrototypeWithShutdown = {
-	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void>;
+	shutdown(this: ShutdownThis, options: { fromSignal: true } | { source: "user" | "extension" }): Promise<void>;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
@@ -78,9 +83,13 @@ function restoreStdoutIsTTY(): void {
 function createContext(order: string[], sessionManager = createSessionManager()): ShutdownThis {
 	return {
 		isShuttingDown: false,
+		get session() {
+			return this.runtimeHost.session;
+		},
 		unregisterSignalHandlers: vi.fn(),
 		runtimeHost: {
 			session: {
+				extensionRunner: { hasHandlers: () => false },
 				closeAdmission: vi.fn(() => {
 					order.push("closeAdmission");
 				}),
@@ -107,7 +116,10 @@ function createContext(order: string[], sessionManager = createSessionManager())
 	};
 }
 
-async function callShutdown(context: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void> {
+async function callShutdown(
+	context: ShutdownThis,
+	options: { fromSignal: true } | { source: "user" | "extension" } = { source: "user" },
+): Promise<void> {
 	try {
 		await (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(context, options);
 	} catch (error) {

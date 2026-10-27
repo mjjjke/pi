@@ -1,11 +1,16 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AuthPrompt } from "@earendil-works/pi-ai";
 import { Container, TuiMainScreen } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { ProjectTrustContext, UIPromptEndEvent, UIPromptStartEvent } from "../src/core/extensions/types.ts";
+import { resolveProjectTrusted } from "../src/core/project-trust.ts";
+import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { cwdFixture } from "./suite/cwd-change-fixture.ts";
 import { createHarness, createTestUiContext, type Harness } from "./suite/harness.ts";
 
 function invoke(name: string, mode: object, ...args: unknown[]): unknown {
@@ -52,6 +57,56 @@ async function assertExtensionPair(harness: Harness, events: Array<UIPromptStart
 }
 
 describe("core prompt lifecycle", () => {
+	it("/cd resolves destination trust and ends its prompt before source shutdown", async () => {
+		const events: string[] = [];
+		const titles: Array<string | undefined> = [];
+		const f = await cwdFixture({
+			extension: (pi) => {
+				pi.on("ui_prompt_start", (event) => {
+					events.push(`${event.type}:${event.source}:${event.kind}`);
+					titles.push(event.title);
+				});
+				pi.on("ui_prompt_end", (event) => {
+					events.push(`${event.type}:${event.source}:${event.kind}`);
+				});
+				pi.on("session_shutdown", (event) => {
+					events.push(`${event.type}:${event.reason}`);
+				});
+			},
+		});
+		try {
+			mkdirSync(join(f.b, ".pi"));
+			writeFileSync(join(f.b, ".pi", "settings.json"), "{}");
+			const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+				runtimeHost: f.runtime,
+				ui: new TuiMainScreen(new VirtualTerminal()),
+				editor: { getText: () => "", setText() {}, render: () => ["", "", ""] },
+				editorContainer: new Container(),
+				chatContainer: new Container(),
+				showExtensionSelector: async (_title: string, options: string[]) => options[0],
+			});
+			f.runtime.setResolveTargetTrust((cwd, context) =>
+				resolveProjectTrusted({
+					cwd,
+					trustStore: new ProjectTrustStore(f.agentDir),
+					defaultProjectTrust: "ask",
+					projectTrustContext: context!,
+				}),
+			);
+			await invoke("handleCdCommand", mode, f.b);
+			expect(f.runtime.session.sessionManager.getCwd()).toBe(f.b);
+			expect(titles).toHaveLength(1);
+			expect(titles[0]).toMatch(/^Trust project folder\?/);
+			expect(events).toEqual([
+				"ui_prompt_start:project_trust:select",
+				"ui_prompt_end:project_trust:select",
+				"session_shutdown:cwd",
+			]);
+		} finally {
+			await f.cleanup();
+		}
+	});
+
 	it("trust select is sourced and shares depth with nested extension prompts", async () => {
 		const { harness, mode, events } = await setup();
 		Reflect.set(mode, "showExtensionSelector", async () => {

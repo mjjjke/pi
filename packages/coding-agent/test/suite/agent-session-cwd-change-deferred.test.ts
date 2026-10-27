@@ -289,6 +289,9 @@ describe("deferred cwd requests", () => {
 			});
 			const context = {
 				runtimeHost: f.runtime,
+				get session() {
+					return old;
+				},
 				isShuttingDown: false,
 				themeController: { disableAutoSync() {} },
 				ui: {
@@ -305,7 +308,7 @@ describe("deferred cwd requests", () => {
 				},
 			};
 			vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-			const closing = Reflect.get(InteractiveMode.prototype, "shutdown").call(context);
+			const closing = Reflect.get(InteractiveMode.prototype, "shutdown").call(context, { source: "user" });
 			const duringDrain = old.requestCwdChange(f.a);
 			let outcome: string | undefined;
 			void request.completion.then((value) => {

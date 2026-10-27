@@ -26,6 +26,7 @@ export const workspaceSourcePaths = {
 } as const;
 
 export default defineConfig({
+	cacheDir: process.env.PI_TEST_CACHE_DIR,
 	resolve: {
 		alias: [
 			{ find: /^@earendil-works\/chord$/, replacement: workspaceSourcePaths.chordIndex },

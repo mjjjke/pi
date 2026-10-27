@@ -1,9 +1,10 @@
+import { Container } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it } from "vitest";
-import { TuiAltScreen } from "../../tui/src/tui-alt-screen.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { ExtensionAPI, ExtensionUIContext } from "../src/core/extensions/types.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { createInteractiveTuiReference } from "../src/modes/interactive/tui-renderer.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
@@ -37,8 +38,17 @@ describe("interactive terminal focus", () => {
 		const terminal = new VirtualTerminal();
 		const mode = Object.assign(Object.create(InteractiveMode.prototype), {
 			runtimeHost: { session: harness.session },
-			ui: new TuiMainScreen(terminal),
+			renderer: new TuiMainScreen(terminal),
+			options: {},
+			fullscreenLayoutRoot: new Container(),
+			themeController: { rebindTui() {} },
+			extensionTerminalInputSubscriptions: new Set(),
 		});
+		Reflect.set(
+			mode,
+			"ui",
+			createInteractiveTuiReference(() => mode.renderer),
+		);
 		const ui = invoke("createExtensionUIContext", mode) as ExtensionUIContext;
 		await harness.session.bindExtensions({ uiContext: ui, mode: "tui" });
 		invoke("bindTerminalFocusListener", mode);
@@ -53,11 +63,7 @@ describe("interactive terminal focus", () => {
 			await Promise.resolve();
 			expect(calls[0]).toEqual([true]);
 			expect(calls[1]).toEqual([false]);
-			const old = mode.ui;
-			old.stop();
-			mode.ui = new TuiAltScreen(terminal);
-			invoke("bindTerminalFocusListener", mode);
-			mode.ui.start();
+			expect(invoke("switchTuiMode", mode, "fullscreen")).toBe(true);
 			expect(ui.terminalFocus()).toBeUndefined();
 			terminal.sendInput("\x1b[I");
 			await Promise.resolve();
