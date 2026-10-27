@@ -20,11 +20,11 @@ function replaceTabs(text: string): string {
 
 /**
  * Compute word-level diff and render with inverse on changed parts.
- * Uses diffWords which groups whitespace with adjacent words for cleaner highlighting.
+ * Uses diffWordsWithSpace so each side retains its own whitespace.
  * Strips leading whitespace from inverse to avoid highlighting indentation.
  */
 function renderIntraLineDiff(oldContent: string, newContent: string): { removedLine: string; addedLine: string } {
-	const wordDiff = Diff.diffWords(oldContent, newContent);
+	const wordDiff = Diff.diffWordsWithSpace(oldContent, newContent);
 
 	let removedLine = "";
 	let addedLine = "";
