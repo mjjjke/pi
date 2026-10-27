@@ -330,9 +330,18 @@ In this fork the `setup` callback of `ctx.newSession()` and `ctx.requestNewSessi
 
 ### Custom message ownership
 
-`pi.sendMessage(message, {orderKey?, triggerTurn?, deliverAs?})` keeps each accepted custom message owned until its append or transfer into first-run staging; Agent queue entries are handles, not a second copy. With one order key, steers, passive updates and triggers keep causal arrival order in both requests and the journal. A passive behind an unreceipted steer/trigger rides in that item's admission batch without causing an extra turn; follow-ups and dispatch-scoped compaction notices retain their own eligibility. Omit `orderKey` to group by custom type. `nextTurn` remains separate context for the next user prompt.
+`pi.sendMessage(message, {orderKey?, triggerTurn?, deliverAs?, onReceipt?})` keeps each accepted custom message owned until its append or transfer into first-run staging; Agent queue entries are handles, not a second copy. With one order key, steers, passive updates and triggers keep causal arrival order in both requests and the journal. A passive behind an unreceipted steer/trigger rides in that item's admission batch without causing an extra turn; follow-ups and dispatch-scoped compaction notices retain their own eligibility. Omit `orderKey` to group by custom type. `nextTurn` remains separate context for the next user prompt.
 
 A stopped run writes owned custom input passively, including queued triggers, without another request. A final run-end flush that accepts a new trigger wakes it after settlement, never from an aborted settlement. `AgentSession.clearQueue()` transfers only queued user input to the editor, never custom handles or already-admitted input. `pendingMessageCount` and `ctx.hasPendingMessages()` currently count the user queue mirrors, not the entire custom store; neither is a custom receipt API.
+
+`onReceipt(receipt)` reports exactly one final outcome for each accepted custom message:
+
+- `{ status: "committed", entryId }`: its session entry has been appended, including idle passive sends, run input, stop writes and first-run bootstrap. This acknowledges the journal, not a successful model response or filesystem durability. Extension `message_end` runs before the append and is not a receipt.
+- `{ status: "dropped" }`: core relinquished it without appending, for example staged content discarded by navigation or replacement, or an unwritten item left at disposal. An admitted message stays with the unwinding loop until its append or final drop; it is never dropped and then appended.
+
+Failed appends retain ownership and do not call the callback until a later success or final drop. The callback may run synchronously before `sendMessage` returns. It survives sender invalidation (`/reload`, `/cd`), so it must touch only retained producer state, not stale extension APIs. Callback errors are reported without breaking the append. `deliverAs: "nextTurn"` with `onReceipt` throws synchronously; that lane does not use the owned custom-message store. The SDK's `AgentSession.sendCustomMessage` and replacement context accept the same options.
+
+**Receipts are after-the-fact notifications, never a teardown barrier.** Core does not await callbacks. A consumer must finish stop and `session_shutdown` cleanup without waiting for one: disposal, which can produce the final commit/drop, happens only after those handlers return. At bootstrap callbacks run after the whole append batch, so reentrant sends cannot interleave with it.
 
 Passive sends from code run or awaited by `session_compact` / `session_context_change` handlers during their open dispatch are request-boundary notices. Unrelated ingress during an awaited handler, public observers, error listeners and late callbacks are not notices merely because compaction is happening.
 
@@ -569,6 +578,25 @@ RPC can forward supported dialogs and notifications through the [RPC Extension U
 Guard terminal-only behavior with `ctx.mode === "tui"` and use `ctx.hasUI` for interactions supported by interactive and RPC clients.
 
 Keep tool and event behavior independent from rendering so non-interactive modes remain functional.
+
+#### Terminal focus and blocking prompts
+
+`ctx.ui.terminalFocus()` returns `true` or `false` from terminal focus reports, or `undefined` until the first report (also in RPC/print/JSON). Both renderers enable focus reporting, even with fullscreen mouse capture disabled. `pi.on("terminal_focus", (event, ctx) => ...)` receives `{ focused: boolean }` only when the reported value changes. Reload and cwd changes preserve the TUI state and route the next change to the new runtime; a renderer swap or suspend resets it to unknown. Focus reports never reach the focused editor/component.
+
+`ui_prompt_start` and `ui_prompt_end` bracket the outermost blocking dialog across core and extension UI. Payload: `reason: "ui_prompt"`, `kind: "select" | "confirm" | "input" | "editor" | "custom"`, optional unchanged `title`, and optional `source: "project_trust" | "auth"`. Extension prompts omit `source`; nested prompts emit no extra pair. Auth ends on an answer, Esc, provider abort (browser callback wins), or the login attempt ending. Core destination trust during `/cd` is reported before cwd teardown. Initial launch trust runs before extensions exist and is not reported; selectors such as `/model` and `/settings` are not blocking-prompt events.
+
+#### session_before_quit
+
+Interactive mode emits `session_before_quit` before closing admission or stopping the TUI:
+
+```typescript
+pi.on("session_before_quit", async (event, ctx) => {
+  const answer = await ctx.ui.select("Exit with pending work?", ["Stay", "Exit"], { signal: event.signal });
+  if (!event.signal.aborted && answer !== "Exit") return { cancel: true };
+});
+```
+
+`event.source` is `"user"` for `/quit`, Ctrl+D, double Ctrl+C and selector exit; `"extension"` for `ctx.shutdown()`. The first `{ cancel: true }` stops dispatch and leaves admission and UI live. Handler errors are reported and do not cancel. There is no timeout: a signal or repeated **user** quit request aborts `event.signal` and quits without waiting for the hook. Extension requests while it is open coalesce into it (including a settled observer's re-entry). A shortcut's `ctx.shutdown()` still waits for the next settlement. Signals, a dead terminal, RPC and print modes do not emit this hook. The run may keep streaming while confirmation is open; use the signal to dismiss any dialog.
 
 ### Assistant display transforms
 
