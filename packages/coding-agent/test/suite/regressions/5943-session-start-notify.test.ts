@@ -385,7 +385,8 @@ describe("regression #5943: session_start transient UI", () => {
 			};
 
 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
-			await harness.session.agent.waitForIdle();
+			// #5943: binding reserves the session run, but bootstrap can still precede the inner agent's prompt.
+			await harness.session.waitForDeferredPrompts();
 
 			expect(events.slice(0, 3)).toEqual(["render", "subscribe", "bind"]);
 			expect(events).toContain("message_start:user:user from start");
