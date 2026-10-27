@@ -484,6 +484,8 @@ export interface TUI extends Component {
 	requestRender(force?: boolean): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
+	getTerminalFocus(): boolean | undefined;
+	onTerminalFocusChange(listener: (focused: boolean) => void): () => void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
 	queryTerminalColors(options: {
@@ -508,6 +510,8 @@ export abstract class TuiBase extends Container implements TUI {
 	public terminal: Terminal;
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<TuiInputListener>();
+	private terminalFocus: boolean | undefined;
+	private terminalFocusListeners = new Set<(focused: boolean) => void>();
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
@@ -931,6 +935,7 @@ export abstract class TuiBase extends Container implements TUI {
 			(data) => this.handleTerminalInput(data),
 			() => this.requestRender(),
 		);
+		this.terminal.write("\x1b[?1004h");
 		this.afterTerminalStart();
 		this.terminal.hideCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
@@ -949,6 +954,17 @@ export abstract class TuiBase extends Container implements TUI {
 
 	removeInputListener(listener: TuiInputListener): void {
 		this.inputListeners.delete(listener);
+	}
+
+	getTerminalFocus(): boolean | undefined {
+		return this.terminalFocus;
+	}
+
+	onTerminalFocusChange(listener: (focused: boolean) => void): () => void {
+		this.terminalFocusListeners.add(listener);
+		return () => {
+			this.terminalFocusListeners.delete(listener);
+		};
 	}
 
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void {
@@ -984,6 +1000,8 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
+		this.terminal.write("\x1b[?1004l");
+		this.terminalFocus = undefined;
 		this.beforeTerminalStop(options);
 		this.terminal.showCursor();
 		this.terminal.stop();
@@ -1060,6 +1078,21 @@ export abstract class TuiBase extends Container implements TUI {
 			return;
 		}
 
+		const focusReport = data === "\x1b[I" || data === "\x1b[O";
+		if (focusReport) {
+			const focused = data === "\x1b[I";
+			if (this.terminalFocus !== focused) {
+				this.terminalFocus = focused;
+				for (const listener of this.terminalFocusListeners) {
+					try {
+						listener(focused);
+					} catch {
+						/* A listener cannot break terminal input. */
+					}
+				}
+			}
+		}
+
 		if (this.inputListeners.size > 0) {
 			let current = data;
 			for (const listener of this.inputListeners) {
@@ -1076,6 +1109,8 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 			data = current;
 		}
+
+		if (focusReport) return;
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.consumeCellSizeResponse(data)) {

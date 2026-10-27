@@ -79,6 +79,7 @@ export function createTestUiContext(overrides: Partial<ExtensionUIContext> = {})
 		input: async () => undefined,
 		notify: () => {},
 		onTerminalInput: () => () => {},
+		terminalFocus: () => undefined,
 		setStatus: () => {},
 		setWorkingMessage: () => {},
 		setWorkingVisible: () => {},

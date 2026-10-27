@@ -581,6 +581,7 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
+	private terminalFocusUnsubscribe?: () => void;
 
 	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
 	private readonly programStatus = new ProgramStatusReporter(
@@ -980,6 +981,7 @@ export class InteractiveMode {
 		nextUi.start();
 		this.themeController.rebindTui();
 		this.rebindExtensionTerminalInputListeners();
+		this.bindTerminalFocusListener();
 		if (
 			restoreProgress &&
 			this.settingsManager.getShowTerminalProgress() &&
@@ -1045,6 +1047,7 @@ export class InteractiveMode {
 		this.ui.setFocus(this.editor);
 
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
+		this.bindTerminalFocusListener();
 		this.ui.start();
 		this.isInitialized = true;
 		this.programStatus.report();
@@ -2759,6 +2762,14 @@ export class InteractiveMode {
 		};
 	}
 
+	private bindTerminalFocusListener(): void {
+		this.terminalFocusUnsubscribe?.();
+		this.terminalFocusUnsubscribe = this.ui.onTerminalFocusChange((focused) => {
+			const runner = this.session.extensionRunner;
+			if (runner.hasHandlers("terminal_focus")) void runner.emit({ type: "terminal_focus", focused });
+		});
+	}
+
 	private rebindExtensionTerminalInputListeners(): void {
 		for (const subscription of this.extensionTerminalInputSubscriptions) {
 			subscription.unsubscribe();
@@ -2796,6 +2807,7 @@ export class InteractiveMode {
 			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
 			notify: (message, type) => this.showExtensionNotify(message, type),
 			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
+			terminalFocus: () => this.ui.getTerminalFocus(),
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
@@ -7499,6 +7511,8 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
+		this.terminalFocusUnsubscribe?.();
+		this.terminalFocusUnsubscribe = undefined;
 		this.disposeActiveSelector();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);

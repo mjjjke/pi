@@ -197,6 +197,7 @@ export type {
 	StandingInstructionDeliveredEvent,
 	StandingInstructionInfo,
 	StandingInstructionOptions,
+	TerminalFocusEvent,
 	TerminalInputHandler,
 	ThinkingLevelSelectEvent,
 	ToolAnnotations,

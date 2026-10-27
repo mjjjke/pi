@@ -169,6 +169,9 @@ export interface ExtensionUIContext {
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
 
+	/** Terminal focus reports: undefined until reported, or without a terminal (RPC/print). */
+	terminalFocus(): boolean | undefined;
+
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
 
@@ -1202,6 +1205,12 @@ export interface AgentSettledEvent {
 	aborted: boolean;
 }
 
+/** Fired on a terminal focus change; unknown focus is never emitted. */
+export interface TerminalFocusEvent {
+	type: "terminal_focus";
+	focused: boolean;
+}
+
 export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
 
 /** Fired when Pi starts waiting on a blocking user-facing extension UI prompt. */
@@ -1739,6 +1748,7 @@ export type ExtensionEvent =
 	| AgentEndEvent
 	| AgentBeforeSettleEvent
 	| AgentSettledEvent
+	| TerminalFocusEvent
 	| UIPromptStartEvent
 	| UIPromptEndEvent
 	| TurnStartEvent
@@ -2002,6 +2012,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<AgentBeforeSettleEvent, AgentBeforeSettleEventResult>,
 	): () => void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): () => void;
+	on(event: "terminal_focus", handler: ExtensionHandler<TerminalFocusEvent>): () => void;
 	on(event: "ui_prompt_start", handler: ExtensionHandler<UIPromptStartEvent>): () => void;
 	on(event: "ui_prompt_end", handler: ExtensionHandler<UIPromptEndEvent>): () => void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): () => void;
