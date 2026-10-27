@@ -93,6 +93,7 @@ import type {
 	ResourcesDiscoverResult,
 	SessionBeforeCompactResult,
 	SessionBeforeForkResult,
+	SessionBeforeQuitResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionBoundaryDraft,
@@ -219,24 +220,34 @@ type RunnerEmitEvent = Exclude<
 
 type SessionBeforeEvent = Extract<
 	RunnerEmitEvent,
-	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
+	{
+		type:
+			| "session_before_quit"
+			| "session_before_switch"
+			| "session_before_fork"
+			| "session_before_compact"
+			| "session_before_tree";
+	}
 >;
 
 type SessionBeforeEventResult =
+	| SessionBeforeQuitResult
 	| SessionBeforeSwitchResult
 	| SessionBeforeForkResult
 	| SessionBeforeCompactResult
 	| SessionBeforeTreeResult;
 
-type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
-	? SessionBeforeSwitchResult | undefined
-	: TEvent extends { type: "session_before_fork" }
-		? SessionBeforeForkResult | undefined
-		: TEvent extends { type: "session_before_compact" }
-			? SessionBeforeCompactResult | undefined
-			: TEvent extends { type: "session_before_tree" }
-				? SessionBeforeTreeResult | undefined
-				: undefined;
+type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_quit" }
+	? SessionBeforeQuitResult | undefined
+	: TEvent extends { type: "session_before_switch" }
+		? SessionBeforeSwitchResult | undefined
+		: TEvent extends { type: "session_before_fork" }
+			? SessionBeforeForkResult | undefined
+			: TEvent extends { type: "session_before_compact" }
+				? SessionBeforeCompactResult | undefined
+				: TEvent extends { type: "session_before_tree" }
+					? SessionBeforeTreeResult | undefined
+					: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
@@ -1348,6 +1359,7 @@ export class ExtensionRunner {
 
 	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
 		return (
+			event.type === "session_before_quit" ||
 			event.type === "session_before_switch" ||
 			event.type === "session_before_fork" ||
 			event.type === "session_before_compact" ||

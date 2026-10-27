@@ -176,6 +176,8 @@ export type {
 	SessionBeforeCompactResult,
 	SessionBeforeForkEvent,
 	SessionBeforeForkResult,
+	SessionBeforeQuitEvent,
+	SessionBeforeQuitResult,
 	SessionBeforeSwitchEvent,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeEvent,

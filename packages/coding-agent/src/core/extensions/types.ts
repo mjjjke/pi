@@ -901,6 +901,18 @@ export interface SessionInfoChangedEvent {
 	name: string | undefined;
 }
 
+/** Interactive quit confirmation, while admission and terminal UI are still live. */
+export interface SessionBeforeQuitEvent {
+	type: "session_before_quit";
+	source: "user" | "extension";
+	/** Signals and repeated user quit requests abort the hook and exit without waiting. */
+	signal: AbortSignal;
+}
+
+export interface SessionBeforeQuitResult {
+	cancel?: boolean;
+}
+
 /** Fired before switching to another session (can be cancelled) */
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
@@ -1028,6 +1040,7 @@ export interface SessionTreeEvent {
 export type SessionEvent =
 	| SessionStartEvent
 	| SessionInfoChangedEvent
+	| SessionBeforeQuitEvent
 	| SessionBeforeSwitchEvent
 	| SessionBeforeForkEvent
 	| SessionBeforeCompactEvent
@@ -1984,6 +1997,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<StandingInstructionDeliveredEvent>,
 	): () => void;
 	on(event: "session_compact_failed", handler: ExtensionHandler<SessionCompactFailedEvent>): () => void;
+	on(
+		event: "session_before_quit",
+		handler: ExtensionHandler<SessionBeforeQuitEvent, SessionBeforeQuitResult>,
+	): () => void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): () => void;
 	on(event: "mcp_servers_change", handler: ExtensionHandler<McpServersChangeEvent>): () => void;
 	on(

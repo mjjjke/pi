@@ -106,6 +106,7 @@ import type {
 	ExtensionWidgetOptions,
 	MarkdownTransformer,
 	ProjectTrustContext,
+	SessionBeforeQuitResult,
 	UserBashEventResult,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
@@ -581,6 +582,7 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
+	private beforeQuit?: { abort: AbortController };
 	private terminalFocusUnsubscribe?: () => void;
 
 	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
@@ -2139,7 +2141,7 @@ export class InteractiveMode {
 			shutdownHandler: () => {
 				this.shutdownRequested = true;
 				if (this.session.isIdle) {
-					void this.shutdown();
+					void this.shutdown({ source: "extension" });
 				}
 			},
 			onError: (error) => this.reportExtensionError(error),
@@ -3550,7 +3552,7 @@ export class InteractiveMode {
 			}
 			if (text === "/quit") {
 				this.editor.setText("");
-				await this.shutdown();
+				await this.shutdown({ source: "user" });
 				return;
 			}
 
@@ -4579,7 +4581,7 @@ export class InteractiveMode {
 	private handleCtrlC(): void {
 		const now = Date.now();
 		if (now - this.lastSigintTime < 500) {
-			void this.shutdown();
+			void this.shutdown({ source: "user" });
 		} else {
 			this.clearEditor();
 			this.lastSigintTime = now;
@@ -4588,7 +4590,7 @@ export class InteractiveMode {
 
 	private handleCtrlD(): void {
 		// Only called when editor is empty (enforced by CustomEditor)
-		void this.shutdown();
+		void this.shutdown({ source: "user" });
 	}
 
 	/**
@@ -4598,8 +4600,34 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
-	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
+	private async shutdown(options: { fromSignal: true } | { source: "user" | "extension" }): Promise<void> {
 		if (this.isShuttingDown) return;
+		if ("fromSignal" in options) {
+			this.beforeQuit?.abort.abort();
+		} else if (this.beforeQuit) {
+			if (options.source === "extension") return;
+			this.beforeQuit.abort.abort();
+		} else {
+			// Consume synchronously: the public settled observer can reenter after ctx.shutdown().
+			this.shutdownRequested = false;
+			const runner = this.session.extensionRunner;
+			if (runner.hasHandlers("session_before_quit")) {
+				const pending = { abort: new AbortController() };
+				this.beforeQuit = pending;
+				let result: SessionBeforeQuitResult | undefined;
+				try {
+					result = await runner.emit(
+						{ type: "session_before_quit", source: options.source, signal: pending.abort.signal },
+						pending.abort.signal,
+					);
+				} finally {
+					if (this.beforeQuit === pending) this.beforeQuit = undefined;
+					this.shutdownRequested = false;
+				}
+				if (this.isShuttingDown) return;
+				if (result?.cancel && !pending.abort.signal.aborted) return;
+			}
+		}
 		this.isShuttingDown = true;
 		// Admission and the pending/trust slot must close before terminal drain yields.
 		// Keep extension cleanup after terminal stop on ordinary interactive quit.
@@ -4609,7 +4637,7 @@ export class InteractiveMode {
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
 
-		if (options?.fromSignal) {
+		if ("fromSignal" in options) {
 			// Signal-triggered shutdown (SIGTERM/SIGHUP). Emit extension cleanup
 			// (session_shutdown) BEFORE touching the terminal. Extension teardown
 			// such as removing sockets does not write to the tty, so it must not be
@@ -4621,7 +4649,7 @@ export class InteractiveMode {
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
-			process.exit(0);
+			return process.exit(0);
 		}
 
 		// Interactive quit (Ctrl+D, Ctrl+C, /quit, extension shutdown()). Stop the
@@ -4696,7 +4724,7 @@ export class InteractiveMode {
 	 */
 	private async checkShutdownRequested(): Promise<void> {
 		if (!this.shutdownRequested) return;
-		await this.shutdown();
+		await this.shutdown({ source: "extension" });
 	}
 
 	private registerSignalHandlers(): void {
@@ -6055,7 +6083,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				() => {
-					void this.shutdown();
+					void this.shutdown({ source: "user" });
 				},
 				() => this.ui.requestRender(),
 				{
