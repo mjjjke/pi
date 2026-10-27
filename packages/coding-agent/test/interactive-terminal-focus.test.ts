@@ -1,11 +1,14 @@
 import { Container } from "@earendil-works/pi-tui";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { ExtensionAPI, ExtensionUIContext } from "../src/core/extensions/types.ts";
+import * as outputGuard from "../src/core/output-guard.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { createInteractiveTuiReference } from "../src/modes/interactive/tui-renderer.ts";
+import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+import { createRuntimeHarness } from "./suite/runtime-harness.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 function invoke(name: string, mode: object, ...args: unknown[]): unknown {
@@ -13,6 +16,7 @@ function invoke(name: string, mode: object, ...args: unknown[]): unknown {
 }
 const harnesses: Harness[] = [];
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const harness of harnesses.splice(0)) harness.cleanup();
 });
 
@@ -70,6 +74,23 @@ describe("interactive terminal focus", () => {
 			expect(calls[1]).toEqual([false, true]);
 		} finally {
 			mode.ui.stop();
+		}
+	});
+
+	it("RPC UI contexts report unknown without taking over process IO", async () => {
+		const f = await createRuntimeHarness();
+		try {
+			vi.spyOn(outputGuard, "takeOverStdout").mockImplementation(() => {});
+			vi.spyOn(process.stderr, "on").mockReturnValue(process.stderr);
+			// Inspect the real RPC UI binding, then stop before the JSON reader/signals are attached.
+			const binding = vi
+				.spyOn(f.runtime.session, "bindExtensions")
+				.mockRejectedValue(new Error("binding intercepted"));
+			await expect(runRpcMode(f.runtime)).rejects.toThrow("binding intercepted");
+			expect(binding.mock.calls[0][0].uiContext?.terminalFocus()).toBeUndefined();
+		} finally {
+			vi.restoreAllMocks();
+			await f.cleanup();
 		}
 	});
 
