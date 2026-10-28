@@ -1,3 +1,4 @@
+import { recordMouseLayout } from "../mouse-layout.ts";
 import {
 	type Component,
 	dispatchMouseEvent,
@@ -19,7 +20,9 @@ export class MouseRegion implements Component {
 	}
 
 	render(width: number): string[] {
-		return this.child.render(width);
+		const lines = this.child.render(width);
+		recordMouseLayout(this, [{ component: this.child, originX: 0, originY: 0, width, height: lines.length }]);
+		return lines;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {

@@ -57,15 +57,22 @@ Test paths below are relative to the indicated package's `test/` directory. Reti
 ### Mouse hover lifecycle
 
 Fullscreen mouse events include `leave`, sent once to the last handled `move`
-target when a later move targets another component (or no component), on keyboard
-input (including viewport-owned shortcuts), on terminal focus loss, and before
-mouse reporting stops. Coordinates use the previous target's
-bounds and the latest pointer position; focus/capture results are ignored and only
-an explicit `render: true` repaints. Nested controls and overlays retain their exact
-dispatch target. Multiplexer button-motion policy is unchanged (no passive hover).
-Regression coverage: `packages/tui/test/mouse-leave.test.ts` and
-`packages/tui/test/tui-alt-screen.test.ts`. Retire when upstream offers equivalent
-component hover teardown notifications. Used by pi-ask-user-question.
+target when the pointer's rendered target or its placement changes: passive moves,
+press/drag/release (including capture), wheel input, re-layout, clipping, overlay
+visibility/stacking and terminal resize. Keyboard input (including viewport-owned
+shortcuts), terminal focus loss and mouse-reporting shutdown also end hover.
+Coordinates use the previous target's bounds and the latest pointer position;
+focus/capture results are ignored and only an explicit `render: true` repaints.
+Cached child rectangles in Container, Box and MouseRegion allow geometry-only
+validation after rendering, without synthetic moves or extra renders for non-hover
+handlers. A leave requesting repaint during layout is reflected in the same frame.
+Nested controls and overlays retain their exact dispatch target; gesture capture
+and click synthesis are unchanged. Multiplexer button-motion policy is unchanged
+(no passive hover). Regression coverage: `packages/tui/test/mouse-leave.test.ts`
+(drag/release, layout/overlay/resize/clipping, explicit repaint, no-hover render
+counts) and `packages/tui/test/tui-alt-screen.test.ts`. Retire when upstream offers
+equivalent component hover teardown notifications. Used by pi-ask-user-question,
+which also discards invalid internal hover regions when its own hit map changes.
 
 ### Triggered custom-run limitations
 

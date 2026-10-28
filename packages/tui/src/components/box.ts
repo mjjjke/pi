@@ -1,4 +1,11 @@
-import { type Component, dispatchMouseEvent, type TuiMouseDispatchResult, type TuiMouseEvent } from "../tui.ts";
+import { recordMouseLayout } from "../mouse-layout.ts";
+import {
+	type Component,
+	dispatchMouseEvent,
+	type TuiMouseDispatchResult,
+	type TuiMouseDispatchTarget,
+	type TuiMouseEvent,
+} from "../tui.ts";
 import { flattenLines, visibleWidth } from "../utils.ts";
 
 type RenderCache = {
@@ -105,6 +112,7 @@ export class Box implements Component {
 
 	render(width: number): string[] {
 		if (this.children.length === 0) {
+			recordMouseLayout(this, []);
 			return [];
 		}
 
@@ -116,14 +124,24 @@ export class Box implements Component {
 		// Padding here would create new strings that must be compared character by character.
 		const childLines: string[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
+		const mouseTargets: TuiMouseDispatchTarget[] = [];
 		for (const child of this.children) {
+			const originY = this.paddingY + childLines.length;
 			const lines = child.render(contentWidth);
+			mouseTargets.push({
+				component: child,
+				originX: this.paddingX,
+				originY,
+				width: contentWidth,
+				height: lines.length,
+			});
 			mouseChildren.push({ component: child, height: lines.length });
 			for (const line of lines) {
 				childLines.push(line);
 			}
 		}
 		this.mouseLayout = { width: contentWidth, children: mouseChildren };
+		recordMouseLayout(this, mouseTargets);
 
 		if (childLines.length === 0) {
 			return [];

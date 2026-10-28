@@ -18,6 +18,7 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { getRenderedMouseTarget, recordMouseLayout } from "./mouse-layout.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	deleteAllKittyImages,
@@ -231,7 +232,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private pressedUrl?: string;
 	private selectionDragged = false;
 	private mouseCapture?: TuiMouseDispatchTarget;
-	private mouseHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent };
+	private mouseHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent; hit?: TuiMouseDispatchTarget };
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
 	private mousePressMoved = false;
@@ -261,7 +262,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	) {
 		super(terminal, showHardwareCursor, logDirectory);
 		this.implicitDocument = {
-			render: (width) => super.render(width),
+			render: (width) => {
+				const lines = super.render(width);
+				recordMouseLayout(this.implicitDocument, [
+					{ component: this, originX: 0, originY: 0, width, height: lines.length },
+				]);
+				return lines;
+			},
 			handleMouse: (event) => super.handleMouse(event),
 			invalidate: () => {
 				for (const child of this.children) child.invalidate();
@@ -712,6 +719,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const wheelDelta =
 				wheelEvent.direction * ((wheelEvent.button & 8) !== 0 ? lines * ALT_WHEEL_SCROLL_MULTIPLIER : lines);
 			const event = this.createMouseEvent("wheel", wheelEvent.button, wheelEvent.x, wheelEvent.y, { wheelDelta });
+			if (this.reconcileMouseHover(event)) this.requestRender();
 			const overlay = this.dispatchMouseToOverlay(event);
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
 			if (result) {
@@ -912,6 +920,55 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.dispatchMouseToTarget({ ...event, type: "leave" }, previous.target)?.render === true;
 	}
 
+	private getMouseHitTarget(
+		event: TuiMouseEvent,
+		layout = this.currentLayout,
+		owner = this.mouseHover?.target.component,
+	): TuiMouseDispatchTarget | undefined {
+		if (
+			event.screenX < 0 ||
+			event.screenX >= this.terminal.columns ||
+			event.screenY < 0 ||
+			event.screenY >= this.terminal.rows
+		)
+			return undefined;
+		const overlay = this.getMouseOverlayTarget(event);
+		if (overlay) return getRenderedMouseTarget(overlay, event.screenX, event.screenY, owner);
+		const boxes = layout ? getLayoutBoxesAt(layout, event.screenX, event.screenY) : [];
+		const box = boxes.find((candidate) => candidate.component === owner) ?? boxes[0];
+		if (!box) return undefined;
+		return getRenderedMouseTarget(
+			{
+				component: box.component,
+				originX: box.rect.x,
+				originY: box.rect.y,
+				width: box.rect.width,
+				height: box.rect.height,
+			},
+			event.screenX,
+			event.screenY,
+			owner,
+		);
+	}
+
+	/** Validate geometry only: never synthesize moves or disturb gesture capture. */
+	private reconcileMouseHover(event = this.mouseHover?.event, layout = this.currentLayout): boolean {
+		const previous = this.mouseHover;
+		if (!previous || !event) return false;
+		const hit = this.getMouseHitTarget(event, layout);
+		const oldHit = previous.hit;
+		if (
+			hit?.component !== oldHit?.component ||
+			hit?.originX !== oldHit?.originX ||
+			hit?.originY !== oldHit?.originY ||
+			hit?.width !== oldHit?.width ||
+			hit?.height !== oldHit?.height
+		)
+			return this.clearMouseHover(event);
+		previous.event = event;
+		return false;
+	}
+
 	private handleMouseEvent(raw: SgrMouseEvent): void {
 		const isMotion = (raw.button & 32) !== 0;
 		const type: TuiMouseEvent["type"] = raw.release
@@ -979,6 +1036,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(raw)) return;
 			this.handleSelectionMouseEvent(raw);
 		} finally {
+			if (this.reconcileMouseHover(event)) this.requestRender();
 			if (type === "move") {
 				// Captured targets may receive out-of-bounds moves; those end hover too.
 				if (
@@ -991,7 +1049,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					moveTarget = undefined;
 				if (this.mouseHover?.target.component !== moveTarget?.component && this.clearMouseHover(event))
 					this.requestRender();
-				this.mouseHover = moveTarget ? { target: moveTarget, event } : undefined;
+				this.mouseHover = moveTarget
+					? {
+							target: moveTarget,
+							event,
+							hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
+						}
+					: undefined;
 			}
 		}
 	}
@@ -1725,6 +1789,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
+		if (this.reconcileMouseHover(undefined, nextLayout)) {
+			// Leave cleared ownership before requesting this repaint, so it cannot loop.
+			this.doRender();
+			return;
+		}
 		if (screen.length > height) screen = screen.slice(screen.length - height);
 		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);

@@ -4,6 +4,7 @@
 
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
+import { recordMouseLayout } from "./mouse-layout.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	parseOscColorResponse,
@@ -406,14 +407,18 @@ export class Container implements Component {
 	render(width: number): string[] {
 		const lines: string[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
+		const mouseTargets: TuiMouseDispatchTarget[] = [];
 		for (const child of this.children) {
+			const originY = lines.length;
 			const childLines = child.render(width);
 			mouseChildren.push({ component: child, height: childLines.length });
+			mouseTargets.push({ component: child, originX: 0, originY, width, height: childLines.length });
 			for (const line of childLines) {
 				lines.push(line);
 			}
 		}
 		this.mouseLayout = { width, children: mouseChildren };
+		recordMouseLayout(this, mouseTargets);
 		return lines;
 	}
 }
@@ -874,8 +879,8 @@ export abstract class TuiBase extends Container implements TUI {
 		return component;
 	}
 
-	/** Dispatch to the visually topmost overlay under the pointer. */
-	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {
+	/** Read the visually topmost rendered overlay rectangle without dispatching input. */
+	protected getMouseOverlayTarget(event: TuiMouseEvent): TuiMouseDispatchTarget | undefined {
 		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
 			const layout = this.renderedOverlayLayouts[index]!;
 			if (
@@ -886,21 +891,25 @@ export abstract class TuiBase extends Container implements TUI {
 			) {
 				continue;
 			}
-			const result = dispatchMouseEvent(layout.entry.component, {
-				...event,
-				x: event.screenX - layout.col,
-				y: event.screenY - layout.row,
+			return {
+				component: layout.entry.component,
+				originX: layout.col,
+				originY: layout.row,
 				width: layout.width,
 				height: layout.height,
-			});
-			return result
-				? {
-						hit: true,
-						result: result.focus ? { ...result, focusTarget: layout.entry.component } : result,
-					}
-				: { hit: true };
+			};
 		}
-		return { hit: false };
+		return undefined;
+	}
+
+	/** Dispatch to the visually topmost overlay under the pointer. */
+	protected dispatchMouseToOverlay(event: TuiMouseEvent): { hit: boolean; result?: TuiMouseDispatchResult } {
+		const target = this.getMouseOverlayTarget(event);
+		if (!target) return { hit: false };
+		const result = dispatchMouseEvent(target.component, retargetMouseEvent(event, target));
+		return result
+			? { hit: true, result: result.focus ? { ...result, focusTarget: target.component } : result }
+			: { hit: true };
 	}
 
 	/** Check if an overlay entry is currently visible */
