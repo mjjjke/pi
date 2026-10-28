@@ -305,8 +305,8 @@ export interface AgentSessionConfig {
 	initialActiveToolNames?: string[];
 	/**
 	 * Whether the initial tools come from the `defaultTools` setting. When true, a resumed session
-	 * replaces them with the loadout its transcript records, with `defaultToolModifiers` applied, and
-	 * reload activates tools newly added to the setting. Tools removed from it stay active.
+	 * restores its recorded loadout plus eligible default-active extension tools, then applies
+	 * `defaultToolModifiers`. Reload activates tools newly added to the setting; removed ones stay active.
 	 */
 	usesDefaultTools?: boolean;
 	/**
@@ -849,7 +849,8 @@ export class AgentSession {
 			includeAllExtensionTools: !carry,
 			previousDefaultActiveToolNames: carry?.previousDefaultActiveToolNames,
 		});
-		if (this._usesDefaultTools && !carry) this._restoreToolsFromTranscript(this._defaultToolModifiers);
+		if (this._usesDefaultTools && !carry)
+			this._restoreToolsFromTranscript(this._defaultToolModifiers, { includeAllExtensionTools: true });
 	}
 
 	get pendingCwdChange(): Readonly<PendingCwdChange> | undefined {
@@ -3168,16 +3169,27 @@ export class AgentSession {
 
 	/**
 	 * Restore the active tool loadout declared by the session transcript, if it declares one.
-	 * Tools reachable only from other tools are never declared, but they do not depend on the active
-	 * set, so the transcript's declarations are the whole loadout.
-	 * @param modifiers `+name`/`-name` entries applied to the restored loadout.
+	 * On process resume, also activate eligible extension tools as reload does, even if the transcript
+	 * never declared them. Tree navigation restores only the recorded loadout.
+	 * @param modifiers `+name`/`-name` entries applied after adding eligible extension tools.
 	 */
-	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
+	private _restoreToolsFromTranscript(
+		modifiers: readonly string[] = [],
+		options?: { includeAllExtensionTools?: boolean },
+	): void {
 		this._pendingToolNames.clear();
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
+		const extensionToolNames = options?.includeAllExtensionTools
+			? [...this._toolDefinitions.values()]
+					.filter(
+						({ definition, sourceInfo }) =>
+							sourceInfo.source !== "builtin" && this._isActivatedOnRegistration(definition.name),
+					)
+					.map(({ definition }) => definition.name)
+			: [];
 		const names = applyToolModifiers(
-			(current.toolsAdded ?? []).map((tool) => tool.name),
+			[...(current.toolsAdded ?? []).map((tool) => tool.name), ...extensionToolNames],
 			modifiers,
 		);
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));

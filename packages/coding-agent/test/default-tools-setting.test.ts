@@ -321,13 +321,17 @@ describe("defaultTools setting", () => {
 			return sessionManager;
 		}
 
-		async function resume(sessionManager: SessionManager, options: ToolOptions = {}) {
+		async function resume(
+			sessionManager: SessionManager,
+			options: ToolOptions = {},
+			extensionFactories: InlineExtension[] = [extensionTools],
+		) {
 			const settingsManager = SettingsManager.inMemory();
 			const resourceLoader = new DefaultResourceLoader({
 				cwd: tempDir,
 				agentDir,
 				settingsManager,
-				extensionFactories: [extensionTools],
+				extensionFactories,
 			});
 			await resourceLoader.reload();
 			return (
@@ -343,10 +347,11 @@ describe("defaultTools setting", () => {
 			).session;
 		}
 
-		it("restores the loadout the transcript records", async () => {
+		// Fork divergence from #10887: resume reactivates eligible extension tools like reload.
+		it("restores recorded tools and reactivates default-active extension tools", async () => {
 			// active_tool was deactivated during the session, inactive_tool activated.
 			const session = await resume(createRecordedSession(["read", "grep", "inactive_tool"]));
-			expect(session.getActiveToolNames().sort()).toEqual(["grep", "inactive_tool", "read"]);
+			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "grep", "inactive_tool", "read"]);
 			session.dispose();
 		});
 
@@ -354,7 +359,7 @@ describe("defaultTools setting", () => {
 			const session = await resume(createRecordedSession(["read", "grep", "inactive_tool"]), {
 				excludeTools: ["inactive_tool"],
 			});
-			expect(session.getActiveToolNames().sort()).toEqual(["grep", "read"]);
+			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "grep", "read"]);
 			session.dispose();
 		});
 
@@ -374,7 +379,64 @@ describe("defaultTools setting", () => {
 			const session = await resume(createRecordedSession(["read", "grep", "inactive_tool"]), {
 				tools: ["-grep", "+write"],
 			});
-			expect(session.getActiveToolNames().sort()).toEqual(["inactive_tool", "read", "write"]);
+			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "inactive_tool", "read", "write"]);
+			session.dispose();
+		});
+
+		// #10887: tools installed after the recorded session must not silently stay inactive.
+		it("activates an extension tool absent from the transcript without activating built-in defaults", async () => {
+			const session = await resume(createRecordedSession(["grep"]));
+			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "grep"]);
+			const resumed = session.getActiveToolNames().sort();
+			await session.reload();
+			expect(session.getActiveToolNames().sort()).toEqual(resumed);
+			session.dispose();
+		});
+
+		// #10887: share reload's exposure eligibility, not merely defaultActive.
+		it.each(["direct", "model-only", "codemode", "deferred", "hidden"] as const)(
+			"matches reload eligibility for %s extension tools",
+			async (exposure) => {
+				const session = await resume(createRecordedSession(["read"]), {}, [
+					(pi) => {
+						pi.registerTool({
+							name: "new_tool",
+							label: "New Tool",
+							description: "New extension tool",
+							parameters: Type.Object({}),
+							exposure,
+							execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+						});
+					},
+				]);
+				const expected = exposure === "direct" || exposure === "model-only" ? ["new_tool", "read"] : ["read"];
+				expect(session.getActiveToolNames().sort()).toEqual(expected);
+				await session.reload();
+				expect(session.getActiveToolNames().sort()).toEqual(expected);
+				session.dispose();
+			},
+		);
+
+		// #10887
+		it("applies modifiers after adding eligible extension tools", async () => {
+			const session = await resume(createRecordedSession(["read"]), {
+				tools: ["-active_tool", "+inactive_tool"],
+			});
+			expect(session.getActiveToolNames().sort()).toEqual(["inactive_tool", "read"]);
+			session.dispose();
+		});
+
+		// #10887
+		it("keeps defaultActive:false tools inactive when absent from the transcript", async () => {
+			const session = await resume(createRecordedSession(["read"]));
+			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "read"]);
+			session.dispose();
+		});
+
+		// #10887
+		it("ignores recorded tools that are no longer registered", async () => {
+			const session = await resume(createRecordedSession(["read", "unregistered_tool"]));
+			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "read"]);
 			session.dispose();
 		});
 
