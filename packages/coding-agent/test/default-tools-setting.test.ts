@@ -417,6 +417,19 @@ describe("defaultTools setting", () => {
 			},
 		);
 
+		// #10887: built-in extensions are extension candidates, not base built-in tools.
+		it("activates eligible built-in extension tools exactly as reload does", async () => {
+			const session = await resume(createRecordedSession(["read"]), {}, [
+				{ name: "resume-tools", builtin: true, factory: extensionTools },
+			]);
+			const resumed = session.getActiveToolNames().sort();
+			expect(resumed).toEqual(["active_tool", "read"]);
+			session.setActiveToolsByName(["read"]);
+			await session.reload();
+			expect(session.getActiveToolNames().sort()).toEqual(resumed);
+			session.dispose();
+		});
+
 		// #10887
 		it("applies modifiers after adding eligible extension tools", async () => {
 			const session = await resume(createRecordedSession(["read"]), {

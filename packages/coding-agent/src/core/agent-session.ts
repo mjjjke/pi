@@ -713,6 +713,8 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	/** Reload's eligible extension/SDK candidates, including tools from built-in extensions. */
+	private _defaultActiveExtensionToolNames: string[] = [];
 	/** Created on the first `ctx.executeTool()` call. */
 	private _nestedToolCalls: NestedToolCallRunner | undefined;
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
@@ -850,7 +852,10 @@ export class AgentSession {
 			previousDefaultActiveToolNames: carry?.previousDefaultActiveToolNames,
 		});
 		if (this._usesDefaultTools && !carry)
-			this._restoreToolsFromTranscript(this._defaultToolModifiers, { includeAllExtensionTools: true });
+			this._restoreToolsFromTranscript(this._defaultToolModifiers, {
+				includeAllExtensionTools:
+					this._sessionStartEvent.reason === "startup" || this._sessionStartEvent.reason === "resume",
+			});
 	}
 
 	get pendingCwdChange(): Readonly<PendingCwdChange> | undefined {
@@ -3169,8 +3174,8 @@ export class AgentSession {
 
 	/**
 	 * Restore the active tool loadout declared by the session transcript, if it declares one.
-	 * On process resume, also activate eligible extension tools as reload does, even if the transcript
-	 * never declared them. Tree navigation restores only the recorded loadout.
+	 * When opening a saved session, also activate eligible extension tools as reload does, even if the
+	 * transcript never declared them. Forks and tree navigation restore only the recorded loadout.
 	 * @param modifiers `+name`/`-name` entries applied after adding eligible extension tools.
 	 */
 	private _restoreToolsFromTranscript(
@@ -3180,14 +3185,7 @@ export class AgentSession {
 		this._pendingToolNames.clear();
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
-		const extensionToolNames = options?.includeAllExtensionTools
-			? [...this._toolDefinitions.values()]
-					.filter(
-						({ definition, sourceInfo }) =>
-							sourceInfo.source !== "builtin" && this._isActivatedOnRegistration(definition.name),
-					)
-					.map(({ definition }) => definition.name)
-			: [];
+		const extensionToolNames = options?.includeAllExtensionTools ? this._defaultActiveExtensionToolNames : [];
 		const names = applyToolModifiers(
 			[...(current.toolsAdded ?? []).map((tool) => tool.name), ...extensionToolNames],
 			modifiers,
@@ -6037,6 +6035,9 @@ export class AgentSession {
 			toolRegistry.set(tool.name, tool);
 		}
 		this._toolRegistry = toolRegistry;
+		this._defaultActiveExtensionToolNames = wrappedExtensionTools
+			.filter((tool) => this._isActivatedOnRegistration(tool.name))
+			.map((tool) => tool.name);
 
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
@@ -6051,9 +6052,7 @@ export class AgentSession {
 				}
 			}
 		} else if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) {
-				if (this._isActivatedOnRegistration(tool.name)) nextActiveToolNames.push(tool.name);
-			}
+			nextActiveToolNames.push(...this._defaultActiveExtensionToolNames);
 		} else if (!options?.activeToolNames || options.previousDefaultActiveToolNames) {
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!previousActivatedOnRegistration.has(toolName) && this._isActivatedOnRegistration(toolName)) {
