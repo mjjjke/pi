@@ -18,7 +18,8 @@ import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth
 /**
  * Component interface - all components must implement this
  */
-export type TuiMouseEventType = "press" | "release" | "move" | "drag" | "click" | "wheel";
+/** `leave` ends the last handled move target's hover; it never changes focus or capture. */
+export type TuiMouseEventType = "press" | "release" | "move" | "leave" | "drag" | "click" | "wheel";
 export type TuiMouseButton = "left" | "middle" | "right" | "none";
 
 /** Normalized cell-based mouse event. Coordinates are zero-based. */
@@ -51,7 +52,7 @@ export interface TuiMouseEventResult {
 	/** Give keyboard focus to this component. Implies handled. */
 	focus?: boolean;
 	/**
-	 * Explicitly request or suppress a render. Move and release default to false;
+	 * Explicitly request or suppress a render. Move, leave and release default to false;
 	 * press, click, drag, and wheel default to true.
 	 */
 	render?: boolean;

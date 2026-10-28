@@ -231,6 +231,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private pressedUrl?: string;
 	private selectionDragged = false;
 	private mouseCapture?: TuiMouseDispatchTarget;
+	private mouseHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent };
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
 	private mousePressMoved = false;
@@ -386,6 +387,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.clearMouseHover();
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
@@ -679,6 +681,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
+			if (this.clearMouseHover()) this.requestRender();
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
@@ -898,6 +901,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionDragged = false;
 	}
 
+	/** Leave is a notification: ignore focus/capture and honor only an explicit repaint. */
+	private clearMouseHover(event = this.mouseHover?.event): boolean {
+		const previous = this.mouseHover;
+		this.mouseHover = undefined;
+		if (!previous || !event) return false;
+		return this.dispatchMouseToTarget({ ...event, type: "leave" }, previous.target)?.render === true;
+	}
+
 	private handleMouseEvent(raw: SgrMouseEvent): void {
 		const isMotion = (raw.button & 32) !== 0;
 		const type: TuiMouseEvent["type"] = raw.release
@@ -908,57 +919,78 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					: "drag"
 				: "press";
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
-
-		if (this.mouseCapture || this.mousePressTarget) {
-			const target = this.mouseCapture ?? this.mousePressTarget!;
-			if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
-				this.mousePressMoved = true;
-				this.lastComponentClick = undefined;
-			}
-			let render = false;
-			const targetResult = this.dispatchMouseToTarget(event, target);
-			if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
-			if (raw.release) {
-				if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
-					const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
-						clickCount: this.getComponentClickCount(target, raw.x, raw.y),
-					});
-					const clickResult = this.dispatchMouseToTarget(clickEvent, target);
-					if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
+		let moveTarget: TuiMouseDispatchTarget | undefined;
+		try {
+			if (this.mouseCapture || this.mousePressTarget) {
+				const target = this.mouseCapture ?? this.mousePressTarget!;
+				if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
+					this.mousePressMoved = true;
+					this.lastComponentClick = undefined;
 				}
-				this.clearComponentMouseGesture();
+				let render = false;
+				const targetResult = this.dispatchMouseToTarget(event, target);
+				if (targetResult) {
+					moveTarget = targetResult.target;
+					render = this.applyMouseDispatchResult(event, targetResult);
+				}
+				if (raw.release) {
+					if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
+						const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
+							clickCount: this.getComponentClickCount(target, raw.x, raw.y),
+						});
+						const clickResult = this.dispatchMouseToTarget(clickEvent, target);
+						if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
+					}
+					this.clearComponentMouseGesture();
+				}
+				if (render) this.requestRender();
+				return;
 			}
-			if (render) this.requestRender();
-			return;
-		}
 
-		if (this.handleSearchMouseEvent(raw)) return;
+			if (this.handleSearchMouseEvent(raw)) return;
 
-		const overlay = this.dispatchMouseToOverlay(event);
-		if (!overlay.hit) {
-			if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
-			const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
-			if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
-			if (scrollbarHandled) return;
-		} else {
-			this.stopScrollbarHover();
-		}
-
-		const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
-		if (result) {
-			const render = this.applyMouseDispatchResult(event, result);
-			if (type === "press") {
-				this.clearTextSelection();
-				this.mousePressTarget = result.target;
-				this.mousePressPoint = { x: raw.x, y: raw.y };
-				this.mousePressMoved = false;
+			const overlay = this.dispatchMouseToOverlay(event);
+			if (!overlay.hit) {
+				if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
+				const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
+				if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
+				if (scrollbarHandled) return;
+			} else {
+				this.stopScrollbarHover();
 			}
-			if (render) this.requestRender();
-			return;
-		}
 
-		if (this.handleRightClickPaste(raw)) return;
-		this.handleSelectionMouseEvent(raw);
+			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
+			if (result) {
+				moveTarget = result.target;
+				const render = this.applyMouseDispatchResult(event, result);
+				if (type === "press") {
+					this.clearTextSelection();
+					this.mousePressTarget = result.target;
+					this.mousePressPoint = { x: raw.x, y: raw.y };
+					this.mousePressMoved = false;
+				}
+				if (render) this.requestRender();
+				return;
+			}
+
+			if (this.handleRightClickPaste(raw)) return;
+			this.handleSelectionMouseEvent(raw);
+		} finally {
+			if (type === "move") {
+				// Captured targets may receive out-of-bounds moves; those end hover too.
+				if (
+					moveTarget &&
+					(event.screenX < moveTarget.originX ||
+						event.screenX >= moveTarget.originX + moveTarget.width ||
+						event.screenY < moveTarget.originY ||
+						event.screenY >= moveTarget.originY + moveTarget.height)
+				)
+					moveTarget = undefined;
+				if (this.mouseHover?.target.component !== moveTarget?.component && this.clearMouseHover(event))
+					this.requestRender();
+				this.mouseHover = moveTarget ? { target: moveTarget, event } : undefined;
+			}
+		}
 	}
 
 	private parseWheelEvent(data: string): WheelEvent | undefined {

@@ -54,6 +54,18 @@ Test paths below are relative to the indicated package's `test/` directory. Reti
 | Terminal focus, core prompt events, before-quit hook and custom-message receipts | `ctx.ui.terminalFocus()` and `terminal_focus` expose terminal reports in both renderers, independently of mouse capture. Core destination-trust and auth dialogs share the outermost `ui_prompt_start`/`ui_prompt_end` lifecycle with extension dialogs (`source: "project_trust"` / `"auth"`; absent for extensions). Interactive `session_before_quit` can cancel before admission closes or the terminal stops; signals and repeated user requests bypass an outstanding hook, extension requests coalesce. `sendMessage(..., { onReceipt })` acknowledges exactly one append (`committed`, entry id) or final drop, including bootstrap, reload/cwd carry and disposal; failed appends stay owned until retry or final sweep. Active admissions finish at loop unwind, never drop then append. Receipts are after-the-fact, never awaited by core or a consumer's stop/teardown path. Used by `pi-notify` and `pi-subagents`. | tui: `terminal-focus.test.ts`, `tui-alt-screen.test.ts`; coding-agent: `interactive-terminal-focus.test.ts`, `ui-prompt-core-dialogs.test.ts`, `interactive-before-quit.test.ts`, `send-message-receipt.test.ts`, `interactive-cwd-change.test.ts`, `interactive-mode-suspend.test.ts` | Upstream offers equivalent focus state, core dialog lifecycle events, cancellable interactive pre-quit and custom-message commit receipts. |
 | Extension selector mouse input | `ctx.ui.select()` (including Plan-mode approval menus) supports fullscreen option clicks, press highlighting without hover selection, and wheel navigation for lists longer than a 10-option centered viewport. Short-list wheel events still reach the chat; clicks outside option rows are unhandled. Wrapped labels/descriptions and clamped keyboard navigation remain intact; regular mode remains keyboard-only. Uses row `MouseRegion`s rather than replacing wrapped `Text` with single-line `SelectList`. Shared callers (extension confirmation and core login/auth/MCP dialogs, including Radius login) inherit this behavior; other selector component implementations are unchanged. | coding-agent: `extension-selector.test.ts` (row hit testing, wrapping, scrolling/fallthrough, keyboard behavior, virtual fullscreen press/release after recentering, drag cancellation and regular-mode dispatch) | Upstream offers equivalent mouse selection and wheel fallthrough for extension selectors. |
 
+### Mouse hover lifecycle
+
+Fullscreen mouse events include `leave`, sent once to the last handled `move`
+target when a later move targets another component (or no component), on terminal
+focus loss, and before mouse reporting stops. Coordinates use the previous target's
+bounds and the latest pointer position; focus/capture results are ignored and only
+an explicit `render: true` repaints. Nested controls and overlays retain their exact
+dispatch target. Multiplexer button-motion policy is unchanged (no passive hover).
+Regression coverage: `packages/tui/test/mouse-leave.test.ts` and
+`packages/tui/test/tui-alt-screen.test.ts`. Retire when upstream offers equivalent
+component hover teardown notifications. Used by pi-ask-user-question.
+
 ### Triggered custom-run limitations
 
 - Overlapping starters reject before changing an active run rather than implicitly queueing a prompt that already passed its queue decision.
