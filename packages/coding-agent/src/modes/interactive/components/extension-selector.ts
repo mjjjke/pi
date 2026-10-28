@@ -1,13 +1,15 @@
 /**
  * Generic selector component for extensions.
- * Displays a list of string options with keyboard navigation.
+ * Displays a list of string options with keyboard and fullscreen mouse navigation.
  */
 
-import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, getKeybindings, MouseRegion, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+
+const MAX_VISIBLE_OPTIONS = 10;
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
@@ -63,7 +65,21 @@ export class ExtensionSelectorComponent extends Container {
 		}
 
 		this.listContainer = new Container();
-		this.addChild(this.listContainer);
+		this.addChild(
+			new MouseRegion(this.listContainer, (event) => {
+				// Short lists leave the wheel to the surrounding chat viewport.
+				if (event.type !== "wheel" || !event.wheelDelta || this.options.length <= MAX_VISIBLE_OPTIONS) {
+					return undefined;
+				}
+				const previousIndex = this.selectedIndex;
+				this.selectedIndex = Math.max(
+					0,
+					Math.min(this.options.length - 1, this.selectedIndex + (event.wheelDelta < 0 ? -1 : 1)),
+				);
+				if (this.selectedIndex !== previousIndex) this.updateList();
+				return { handled: true, render: this.selectedIndex !== previousIndex };
+			}),
+		);
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
@@ -84,12 +100,35 @@ export class ExtensionSelectorComponent extends Container {
 
 	private updateList(): void {
 		this.listContainer.clear();
-		for (let i = 0; i < this.options.length; i++) {
+		const startIndex = Math.max(
+			0,
+			Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE_OPTIONS / 2), this.options.length - MAX_VISIBLE_OPTIONS),
+		);
+		const endIndex = Math.min(startIndex + MAX_VISIBLE_OPTIONS, this.options.length);
+		for (let i = startIndex; i < endIndex; i++) {
 			const isSelected = i === this.selectedIndex;
 			const text = isSelected
 				? theme.fg("accent", "→ ") + theme.fg("accent", this.options[i])
 				: `  ${theme.fg("text", this.options[i])}`;
-			this.listContainer.addChild(new Text(text, 1, 0));
+			// Each region covers the entire wrapped option, not just its first row.
+			this.listContainer.addChild(
+				new MouseRegion(new Text(text, 1, 0), (event) => {
+					// Like SelectList, hover does not move the centered visible range.
+					if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
+					this.selectedIndex = i;
+					this.updateList();
+					if (event.type === "click") {
+						const selected = this.options[i];
+						if (selected) this.onSelectCallback(selected);
+					}
+					return { handled: true, focus: event.type === "press" };
+				}),
+			);
+		}
+		if (this.options.length > MAX_VISIBLE_OPTIONS) {
+			this.listContainer.addChild(
+				new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.options.length})`), 1, 0),
+			);
 		}
 	}
 
