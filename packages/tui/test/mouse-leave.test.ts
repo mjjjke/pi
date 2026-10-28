@@ -79,6 +79,27 @@ describe("fullscreen mouse leave", () => {
 		}
 	});
 
+	it("ends passive hover on keyboard input, including viewport-owned shortcuts", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		const events: TuiMouseEvent[] = [];
+		tui.addChild(control(events));
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			for (const key of ["x", "\x1b[5~"]) {
+				terminal.sendInput("\x1b[<35;2;1M");
+				terminal.sendInput(key);
+			}
+			assert.deepEqual(
+				events.map((event) => event.type),
+				["move", "leave", "move", "leave"],
+			);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("notifies once on focus loss and mouse-reporting shutdown, without carrying hover across restart", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);

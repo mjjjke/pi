@@ -728,6 +728,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		if (this.isMouseSequence(data)) return { consume: true };
 
+		// Keyboard interaction ends passive hover, even for viewport-owned shortcuts
+		// that never reach the focused component's input handler.
+		if (this.clearMouseHover()) this.requestRender();
 		const keybindings = getKeybindings();
 		const isRelease = isKeyRelease(data);
 		if (keybindings.matches(data, "tui.altScreen.search")) {

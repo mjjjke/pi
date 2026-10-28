@@ -57,8 +57,9 @@ Test paths below are relative to the indicated package's `test/` directory. Reti
 ### Mouse hover lifecycle
 
 Fullscreen mouse events include `leave`, sent once to the last handled `move`
-target when a later move targets another component (or no component), on terminal
-focus loss, and before mouse reporting stops. Coordinates use the previous target's
+target when a later move targets another component (or no component), on keyboard
+input (including viewport-owned shortcuts), on terminal focus loss, and before
+mouse reporting stops. Coordinates use the previous target's
 bounds and the latest pointer position; focus/capture results are ignored and only
 an explicit `render: true` repaints. Nested controls and overlays retain their exact
 dispatch target. Multiplexer button-motion policy is unchanged (no passive hover).
