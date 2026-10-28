@@ -1502,8 +1502,6 @@ export interface BashBackgroundEvent {
 	/** Command as the model wrote it, without the configured command prefix */
 	command: string;
 	spawn: BashBackgroundSpawn;
-	/** `notify_on` as the model wrote it (a JavaScript regular expression source, not validated by core) */
-	notifyOn: string | undefined;
 	/** `description`: a short UI label */
 	description: string | undefined;
 	/** Abort signal of the tool call (never aborts when the call has none) */

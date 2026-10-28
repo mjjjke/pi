@@ -56,10 +56,7 @@ describe("approved core tool texts rev 3.2", () => {
 			description:
 				"Start the command in the background and return at once instead of waiting for its output (default false). Fails when background execution is not available. timeout does not apply.",
 		});
-		expect(bash.parameters.properties.notify_on).toMatchObject({
-			description:
-				"Only with run_in_background: JavaScript regular expression source (no flags); matching output lines are reported while the command runs",
-		});
+		expect(bash.parameters.properties).not.toHaveProperty("notify_on");
 		expect(bash.parameters.properties.description).toMatchObject({
 			description: "Short label for the command, shown in the UI",
 		});

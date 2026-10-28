@@ -54,12 +54,6 @@ const bashSchema = Type.Object({
 				"Start the command in the background and return at once instead of waiting for its output (default false). Fails when background execution is not available. timeout does not apply.",
 		}),
 	),
-	notify_on: Type.Optional(
-		Type.String({
-			description:
-				"Only with run_in_background: JavaScript regular expression source (no flags); matching output lines are reported while the command runs",
-		}),
-	),
 	description: Type.Optional(Type.String({ description: "Short label for the command, shown in the UI" })),
 });
 
@@ -481,10 +475,6 @@ export function createShellToolDefinition(
 		async execute(toolCallId, params: BashToolInput, signal?: AbortSignal, onUpdate?, ctx?: ExtensionContext) {
 			const { command, timeout } = params;
 			const background = params.run_in_background === true;
-			const notifyOn = typeof params.notify_on === "string" ? params.notify_on : undefined;
-			if (!background && notifyOn !== undefined) {
-				throw new Error("notify_on requires run_in_background: true");
-			}
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(
 				resolvedCommand,
@@ -518,7 +508,6 @@ export function createShellToolDefinition(
 							toolName: "bash",
 							command,
 							spawn: { ...spawnContext, shell: localShell },
-							notifyOn,
 							description: typeof params.description === "string" ? params.description : undefined,
 							signal: signal ?? new AbortController().signal,
 							get claimed() {

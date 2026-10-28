@@ -77,11 +77,11 @@ describe("bash run_in_background", () => {
 		rmSync(testDir, { recursive: true, force: true });
 	});
 
-	it("declares run_in_background, notify_on and description in the static schema of bash and powershell", () => {
+	it("declares run_in_background and description, but no notify_on in the static schema of bash and powershell", () => {
 		for (const definition of [createBashToolDefinition(testDir), createPowerShellToolDefinition(testDir)]) {
 			const properties = definition.parameters.properties;
 			expect(properties.run_in_background.type).toBe("boolean");
-			expect(properties.notify_on.type).toBe("string");
+			expect(properties).not.toHaveProperty("notify_on");
 			expect(properties.description.type).toBe("string");
 			expect(definition.parameters.required).toEqual(["command"]);
 		}
@@ -115,19 +115,18 @@ describe("bash run_in_background", () => {
 		const result = await bash.execute("bg-1", {
 			command: "npm run dev",
 			run_in_background: true,
-			notify_on: "ready",
 			description: "dev server",
 		});
 		expect(textOf(result)).toBe("started shell-1");
 		expect(result.details).toEqual({ fullOutputPath: "/x" });
 		expect(ops.calls).toEqual([]);
 		expect(events).toHaveLength(1);
+		expect(events[0]).not.toHaveProperty("notifyOn");
 		expect(events[0]).toMatchObject({
 			type: "bash_background",
 			toolCallId: "bg-1",
 			toolName: "bash",
 			command: "npm run dev",
-			notifyOn: "ready",
 			description: "dev server",
 		});
 	});
@@ -163,24 +162,13 @@ describe("bash run_in_background", () => {
 		const bash = createBashTool(testDir, {
 			operations: ops,
 			onBackground: () => {
-				throw new Error("Invalid notify_on regular expression: nope");
+				throw new Error("background handler refused");
 			},
 		});
-		await expect(bash.execute("bad", { command: "true", run_in_background: true, notify_on: "(" })).rejects.toThrow(
-			"Invalid notify_on regular expression: nope",
+		await expect(bash.execute("bad", { command: "true", run_in_background: true })).rejects.toThrow(
+			"background handler refused",
 		);
 		expect(ops.calls).toEqual([]);
-	});
-
-	it("rejects notify_on without run_in_background before spawning", async () => {
-		const ops = spyOperations();
-		const events: BashBackgroundEvent[] = [];
-		const bash = createBashTool(testDir, { operations: ops, onBackground: (event) => void events.push(event) });
-		await expect(bash.execute("fg-notify", { command: "true", notify_on: "ready" })).rejects.toThrow(
-			/notify_on requires run_in_background: true/,
-		);
-		expect(ops.calls).toEqual([]);
-		expect(events).toEqual([]);
 	});
 
 	it("ignores timeout for background calls", async () => {
