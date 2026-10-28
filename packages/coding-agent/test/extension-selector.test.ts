@@ -113,6 +113,39 @@ describe("extension selector mouse", () => {
 		}
 	});
 
+	it.each([false, true])("does not confirm a fullscreen drag (returns to press point: %s)", async (returnsToStart) => {
+		const selected = vi.fn();
+		const terminal = new VirtualTerminal(80, 32);
+		const tui = new TuiAltScreen(terminal);
+		const selector = new ExtensionSelectorComponent("Approve?", ["Yes", "No"], selected, vi.fn());
+		tui.addChild(selector);
+		tui.setFocus(selector);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			const y = terminal.getViewport().findIndex((line) => line.includes("No")) + 1;
+			expect(y).toBeGreaterThan(0);
+			terminal.sendInput(`\x1b[<0;5;${y}M`);
+			await terminal.waitForRender();
+			expect(selected).not.toHaveBeenCalled();
+			terminal.sendInput(`\x1b[<32;8;${y}M`);
+			await terminal.waitForRender();
+			expect(selected).not.toHaveBeenCalled();
+			if (returnsToStart) terminal.sendInput(`\x1b[<32;5;${y}M`);
+			const releaseX = returnsToStart ? 5 : 8;
+			terminal.sendInput(`\x1b[<0;${releaseX};${y}m`);
+			await terminal.waitForRender();
+			expect(selected).not.toHaveBeenCalled();
+			// A cancelled drag must not break the next ordinary click.
+			terminal.sendInput(`\x1b[<0;5;${y}M`);
+			terminal.sendInput(`\x1b[<0;5;${y}m`);
+			await terminal.waitForRender();
+			expect(selected).toHaveBeenCalledExactlyOnceWith("No");
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it.each([2, 15])("lets chat scroll only when the %i-option list fits", async (count) => {
 		const terminal = new VirtualTerminal(80, 32);
 		const tui = new TuiAltScreen(terminal);
