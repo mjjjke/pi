@@ -1478,14 +1478,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	protected applyLineResets(lines: string[], width: number): string[] {
 		lines = this.terminalLinkFilter.filter(lines, this.linkPolicy, width);
-		const reset = SEGMENT_RESET;
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			if (!isImageLine(line)) {
-				lines[i] = normalizeTerminalOutput(line) + reset;
-			}
-		}
-		return lines;
+		return lines.map((line) => (isImageLine(line) ? line : normalizeTerminalOutput(line) + SEGMENT_RESET));
 	}
 
 	private compositeLineAt(

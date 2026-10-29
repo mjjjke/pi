@@ -806,13 +806,13 @@ describe("imageFallback", () => {
 		try {
 			const abs = join(homedir(), ".pi", "agent", "shot.png");
 			const result = imageFallback("image/png", { widthPx: 10, heightPx: 10 }, abs);
-			assert.ok(result.includes("\x1b]8;;file://"), "expected OSC 8 file link");
+			assert.match(result, /\x1b\]8;id=[A-Za-z0-9_-]+;file:\/\//, "expected identified OSC 8 file link");
 			assert.ok(
 				result.includes(abs.replaceAll("\\", "/")) || result.includes(abs),
 				"file URL should target absolute path",
 			);
 			// Visible text must use ~/... not the expanded home path.
-			const visible = result.replace(/\x1b\]8;;.*?\x1b\\/g, "");
+			const visible = result.replace(/\x1b\]8;[^;]*;.*?\x1b\\/g, "");
 			assert.strictEqual(visible, "[Image: ~/.pi/agent/shot.png [image/png] 10x10]");
 		} finally {
 			setImageLinkPolicy(() => undefined);

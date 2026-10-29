@@ -50,7 +50,15 @@ export {
 } from "./components/image.ts";
 export { Input } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
-export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
+export {
+	type DefaultTextStyle,
+	Markdown,
+	type MarkdownLinkify,
+	type MarkdownLinkSpan,
+	type MarkdownOptions,
+	type MarkdownTheme,
+	setMarkdownLinkOptions,
+} from "./components/markdown.ts";
 export { MouseRegion, type MouseRegionHandler } from "./components/mouse-region.ts";
 export {
 	ScrollView,
@@ -127,6 +135,7 @@ export {
 // Terminal image support
 export {
 	allocateImageId,
+	allocateLinkId,
 	type CellDimensions,
 	calculateImageRows,
 	deleteAllKittyImages,
@@ -147,6 +156,7 @@ export {
 	type ImageProtocol,
 	type ImageRenderOptions,
 	imageFallback,
+	linkTo,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,

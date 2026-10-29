@@ -1,6 +1,6 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
-import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
+import { allocateLinkId, getCapabilities, isImageLine, linkTo } from "../terminal-image.ts";
 import { type LinkPolicy, sanitizeTerminalText, webLinkPolicy } from "../terminal-links.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -218,7 +218,23 @@ export interface MarkdownTheme {
 	codeBlockIndent?: string;
 }
 
+export interface MarkdownLinkSpan {
+	start: number;
+	end: number;
+	target: string;
+}
+export type MarkdownLinkify = (text: string, kind: "text" | "codespan") => readonly MarkdownLinkSpan[];
+let defaultLinkOptions: Pick<MarkdownOptions, "linkPolicy" | "linkify"> = {};
+let linkOptionsVersion = 0;
+/** Rendering defaults for the application's active transcript; existing instances invalidate lazily. */
+export function setMarkdownLinkOptions(options: Pick<MarkdownOptions, "linkPolicy" | "linkify">): void {
+	defaultLinkOptions = { ...options };
+	linkOptionsVersion++;
+}
+
 export interface MarkdownOptions {
+	/** Return authorized display-only links in text/codespans, not explicit links or fenced code. */
+	linkify?: MarkdownLinkify;
 	/** Trusted callers may deliberately embed terminal sequences. Default: false. */
 	allowTerminalSequences?: boolean;
 	/** Authorize and rebuild explicit link targets. A refusal renders plain text. */
@@ -246,6 +262,10 @@ export class Markdown implements Component {
 	private theme: MarkdownTheme;
 	private options: MarkdownOptions;
 	private defaultStylePrefix?: string;
+	private readonly linkPrefix = allocateLinkId();
+	private linkIndex = 0;
+	private renderedLinkOptionsVersion = -1;
+	private insideLink = false;
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -284,6 +304,11 @@ export class Markdown implements Component {
 	}
 
 	render(width: number): string[] {
+		if (this.renderedLinkOptionsVersion !== linkOptionsVersion) {
+			this.invalidate();
+			this.renderedLinkOptionsVersion = linkOptionsVersion;
+		}
+		this.linkIndex = 0;
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
 			return this.cachedLines;
@@ -647,6 +672,22 @@ export class Markdown implements Component {
 		return lines;
 	}
 
+	private linkifyText(text: string, kind: "text" | "codespan", style: (text: string) => string): string {
+		const linkify = this.options.linkify ?? defaultLinkOptions.linkify;
+		if (this.insideLink || !linkify || !getCapabilities().hyperlinks) return style(text);
+		let result = "";
+		let offset = 0;
+		for (const span of linkify(text, kind)) {
+			if (span.start < offset || span.end <= span.start || span.end > text.length) continue;
+			result += style(text.slice(offset, span.start));
+			const target = span.target; // linkify authorizes discoveries; the output sink still checks every emitted target.
+			const label = style(text.slice(span.start, span.end));
+			result += target ? linkTo(label, target, { id: `${this.linkPrefix}-${this.linkIndex++}` }) : label;
+			offset = span.end;
+		}
+		return result + style(text.slice(offset));
+	}
+
 	private renderInlineTokens(tokens: Token[], styleContext?: InlineStyleContext): string {
 		let result = "";
 		const resolvedStyleContext = styleContext ?? this.getDefaultInlineStyleContext();
@@ -677,7 +718,7 @@ export class Markdown implements Component {
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						result += applyTextWithNewlines(token.text);
+						result += this.linkifyText(token.text, "text", applyTextWithNewlines);
 					}
 					break;
 
@@ -699,21 +740,23 @@ export class Markdown implements Component {
 				}
 
 				case "codespan":
-					result += this.theme.code(token.text) + stylePrefix;
+					result += this.linkifyText(token.text, "codespan", this.theme.code) + stylePrefix;
 					break;
 
 				case "link": {
+					this.insideLink = true;
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					const target = (this.options.linkPolicy ?? webLinkPolicy)(token.href);
+					this.insideLink = false;
+					const target = (this.options.linkPolicy ?? defaultLinkOptions.linkPolicy ?? webLinkPolicy)(token.href);
 					if (!target) {
 						result += linkText;
 						break;
 					}
-					const styledLink = this.theme.link(this.theme.underline(linkText));
+					const styledLink = this.theme.link(/^[[<]/.test(token.raw) ? this.theme.underline(linkText) : linkText);
 					if (getCapabilities().hyperlinks) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.
-						result += hyperlink(styledLink, target) + stylePrefix;
+						result += linkTo(styledLink, target, { id: `${this.linkPrefix}-${this.linkIndex++}` }) + stylePrefix;
 					} else {
 						// Fallback: print URL in parentheses when text differs from href.
 						// Compare raw token.text (not styled) against href for the equality check.

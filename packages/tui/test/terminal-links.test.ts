@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import xterm from "@xterm/headless";
+import { Text } from "../src/components/text.ts";
 import { encodeITerm2, encodeKitty, isImageLine } from "../src/terminal-image.ts";
-import { neutralizeTerminalLinks, sanitizeTerminalText, webLinkPolicy } from "../src/terminal-links.ts";
+import {
+	neutralizeTerminalLinks,
+	sanitizeTerminalText,
+	TerminalLinkFilter,
+	webLinkPolicy,
+} from "../src/terminal-links.ts";
+import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { visibleWidth } from "../src/utils.ts";
+import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const E = "\x1b";
 const ST = `${E}\\`;
@@ -59,6 +68,35 @@ const fixtures = [
 	`${E}]0;${"t".repeat(30)}\x07${"x".repeat(80)}`,
 ];
 
+// Independent grammar oracle: assert the partition, not only the absence of one known exploit.
+const b64 = "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?";
+const kittyGrammar = `\\x1b_G[A-Za-z]=[A-Za-z0-9]{1,16}(?:,[A-Za-z]=[A-Za-z0-9]{1,16})*(?:;${b64})?\\x1b\\\\`;
+const itermGrammar = `\\x1b\\]1337;File=(?:inline|size|width|height|name|preserveAspectRatio)=[A-Za-z0-9+/=%.]{1,256}(?:;(?:inline|size|width|height|name|preserveAspectRatio)=[A-Za-z0-9+/=%.]{1,256})*:${b64}\\x07`;
+const tokenGrammar = new RegExp(
+	`(?:\\x1b\\[[0-9;:]{0,128}m|\\x1b\\]8;(?:id=[A-Za-z0-9_-]{1,64})?;[\\x21-\\x7e]{0,4096}(?:\\x07|\\x1b\\\\)|\\x1b\\]133;[ABC]\\x07|${kittyGrammar}|${itermGrammar}|\\x1b_pi:(?:c|fc|/fc)\\x07|\\x1b\\[[1-9][0-9]{0,3}A(?=${kittyGrammar}|${itermGrammar}))`,
+	"y",
+);
+function tokens(input: string, strict: boolean): string[] {
+	const result: string[] = [];
+	for (let i = 0; i < input.length; ) {
+		if (input[i] !== E) {
+			i++;
+			continue;
+		}
+		tokenGrammar.lastIndex = i;
+		const match = tokenGrammar.exec(input);
+		const target = match && /^\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)$/.exec(match[0])?.[1];
+		if (!match || (target && !webLinkPolicy(target))) {
+			assert.ok(!strict, `unrecognized ESC at ${i}: ${JSON.stringify(input)}`);
+			i++;
+			continue;
+		}
+		result.push(match[0]);
+		i = tokenGrammar.lastIndex;
+	}
+	return result;
+}
+
 async function assertParserSafe(output: string): Promise<void> {
 	const terminal = new xterm.Terminal({ allowProposedApi: true, logLevel: "off" });
 	const targets: string[] = [];
@@ -84,11 +122,32 @@ test("all 41 security fixtures are parser-safe, C1-free and cross-width fixpoint
 	for (const input of fixtures)
 		for (const width of [1, 4, 40, 80]) {
 			const output = neutralizeTerminalLinks(input, webLinkPolicy, width);
+			assert.deepEqual(tokens(output, true), tokens(input, false));
 			assert.doesNotMatch(output, /[\u0080-\u009f]/);
 			for (const other of [1, 4, 40, 80])
 				assert.equal(neutralizeTerminalLinks(output, webLinkPolicy, other), output);
 			await assertParserSafe(output);
 			if (output !== input && !isImageLine(output)) assert.ok(visibleWidth(output) <= width);
+		}
+});
+
+test("all fixtures remain safe through Text, regular/fullscreen frames, and the fullscreen exit dump", async () => {
+	for (const input of fixtures)
+		for (const fullscreen of [false, true]) {
+			const terminal = new VirtualTerminal(80, 24);
+			const writes: string[] = [];
+			terminal.write = (data) => {
+				writes.push(data);
+			};
+			const tui = fullscreen
+				? new TuiAltScreen(terminal, false, process.env.PI_SCRATCH_DIR)
+				: new TuiMainScreen(terminal, false, process.env.PI_SCRATCH_DIR);
+			tui.addChild(new Text(input, 0, 0));
+			tui.start();
+			tui.renderNow();
+			if (tui instanceof TuiAltScreen) for (const line of tui.getScreenLines()) tokens(line, true);
+			tui.stop();
+			await assertParserSafe(writes.join(""));
 		}
 });
 
@@ -106,10 +165,21 @@ test("width repair keeps all commands including the complete iTerm image and tra
 		assert.equal(neutralizeTerminalLinks(input, webLinkPolicy, 1), input);
 });
 
+test("frame cache invalidates on width and policy changes, including mutable frame arrays", () => {
+	const filter = new TerminalLinkFilter();
+	const lines = [`${link(good)}hello${close}`];
+	assert.equal(filter.filter(lines, webLinkPolicy, 80)[0], lines[0]);
+	const refused = () => undefined;
+	assert.ok(!filter.filter(lines, refused, 4)[0].includes(`${E}]8;;${good}`));
+	assert.ok(visibleWidth(filter.filter(lines, refused, 1)[0]) <= 1);
+	lines[0] = "plain";
+	assert.deepEqual(filter.filter(lines, refused, 1), ["plain"]);
+});
+
 test("fragment generator remains safe and idempotent after repair", async () => {
 	const fragments = [...fixtures, "text", "\t", "\x00", E, "\x9c", "]8;;smb://h/", "]0;", "_G", "133;A", "\\"];
 	let seed = 42;
-	for (let n = 0; n < 1000; n++) {
+	for (let n = 0; n < 5000; n++) {
 		let input = "";
 		for (let i = 0; i < 6; i++) {
 			seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -118,7 +188,21 @@ test("fragment generator remains safe and idempotent after repair", async () => 
 		const width = [1, 4, 40, 80][n % 4];
 		const output = neutralizeTerminalLinks(input, webLinkPolicy, width);
 		assert.doesNotMatch(output, /[\u0080-\u009f]/);
-		assert.equal(neutralizeTerminalLinks(output, webLinkPolicy, 1), output);
+		assert.deepEqual(tokens(output, true), tokens(input, false));
+		for (const other of [1, 4, 40, 80, Infinity])
+			assert.equal(neutralizeTerminalLinks(output, webLinkPolicy, other), output);
+		const commands = tokens(output, true);
+		assert.equal(
+			isImageLine(output),
+			commands.some((token) => token.startsWith(`${E}_G`) || token.startsWith(`${E}]1337;File=`)),
+		);
+		if (output !== input) {
+			if (isImageLine(output)) {
+				let text = output;
+				for (const token of commands) text = text.replace(token, "");
+				assert.equal(text, "");
+			} else assert.ok(visibleWidth(output) <= width);
+		}
 		await assertParserSafe(output);
 	}
 });

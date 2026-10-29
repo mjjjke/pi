@@ -61,6 +61,8 @@ function imageEnd(line: string, start: number): number | undefined {
 /** S1: closed G1–G7 grammar, dropping only unrecognized ESC/C1, then cutting text only. */
 export function neutralizeTerminalLinks(line: string, policy: LinkPolicy = webLinkPolicy, width = Infinity): string {
 	if (!/[\x1b\u0080-\u009f]/.test(line)) return line;
+	// The overwhelmingly common cold-history case needs no token allocation.
+	if (line.includes("\x1b[") && !/[\x1b\u0080-\u009f]/.test(line.replace(/\x1b\[[0-9;:]{0,128}m/g, ""))) return line;
 	const pieces: Array<{ text: string; token: boolean }> = [];
 	let dropped = false;
 	let image = false;
@@ -123,22 +125,47 @@ export function neutralizeTerminalLinks(line: string, policy: LinkPolicy = webLi
 		.join("");
 }
 
-/** Two generations: bounded by one frame, without sequential-history LRU thrash. */
+/** Frame-bounded cache: positional hits avoid rebuilding a history-sized map for a streaming row. */
 export class TerminalLinkFilter {
 	private previous = new Map<string, string>();
+	private previousLines: readonly string[] = [];
+	private previousOutput: string[] = [];
 	private width = 0;
 	private policy: LinkPolicy | undefined;
 	filter(lines: string[], policy: LinkPolicy, width: number): string[] {
-		if (this.policy !== policy || this.width !== width) this.previous.clear();
+		const samePolicy = this.policy === policy && this.width === width;
+		if (!samePolicy) {
+			this.previous.clear();
+			this.previousLines = [];
+			this.previousOutput = [];
+		}
 		this.policy = policy;
 		this.width = width;
-		const next = new Map<string, string>();
-		const result = lines.map((line) => {
-			const output = this.previous.get(line) ?? neutralizeTerminalLinks(line, policy, width);
-			next.set(line, output);
-			return output;
-		});
-		this.previous = next;
+		let result: string[] | undefined;
+		const changed: number[] = [];
+		const count = Math.max(lines.length, this.previousLines.length);
+		for (let index = 0; index < count; index++) {
+			if (lines[index] === this.previousLines[index]) continue;
+			result ??= this.previousOutput.slice();
+			changed.push(index);
+			const line = lines[index];
+			if (line !== undefined)
+				result[index] = this.previous.get(line) ?? neutralizeTerminalLinks(line, policy, width);
+		}
+		if (!result) return this.previousOutput;
+		result.length = lines.length;
+		// All lookups precede pruning: moved lines still hit the previous generation.
+		// Removing a duplicate key is harmless: unchanged positions retain their cached output.
+		for (const index of changed) {
+			const old = this.previousLines[index];
+			if (old !== undefined) this.previous.delete(old);
+		}
+		for (const index of changed) {
+			const line = lines[index];
+			if (line !== undefined) this.previous.set(line, result[index]);
+		}
+		this.previousLines = [...lines];
+		this.previousOutput = result;
 		return result;
 	}
 }

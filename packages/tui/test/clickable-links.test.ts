@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Image } from "../src/components/image.ts";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
+import { MouseRegion } from "../src/components/mouse-region.ts";
 import { Text } from "../src/components/text.ts";
-import { hyperlink, setCapabilities } from "../src/terminal-image.ts";
+import { hyperlink, linkTo, setCapabilities } from "../src/terminal-image.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import { getOsc8LinkAtColumn, stripTerminalSequences, underlineOsc8Link } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const plain = (text: string) => text;
@@ -25,6 +27,54 @@ const theme: MarkdownTheme = {
 	strikethrough: plain,
 	underline: plain,
 };
+test("hover follows an occurrence id across wraps, restores styles and clears on keyboard/focus/wheel", async () => {
+	const terminal = new VirtualTerminal(4, 5);
+	let writes = 0;
+	const write = terminal.write.bind(terminal);
+	terminal.write = (data) => {
+		writes++;
+		write(data);
+	};
+	const tui = new TuiAltScreen(terminal, false, process.env.PI_SCRATCH_DIR);
+	const first = linkTo("abcdef", "https://ok.test/", { id: "first" });
+	const second = linkTo("abcdef", "https://ok.test/", { id: "second" });
+	tui.addChild(new Text(`\x1b[44m${first}\x1b[49m\n${second}`, 0, 0));
+	tui.start();
+	tui.renderNow();
+	assert.deepEqual(getOsc8LinkAtColumn(tui.getScreenLines()[0], 0), { url: "https://ok.test/", id: "first" });
+	const plain = tui.getScreenLines().map(stripTerminalSequences);
+	terminal.sendInput("\x1b[<35;1;1M");
+	await terminal.waitForRender();
+	const hovered = tui.getScreenLines();
+	assert.match(hovered[0], /\x1b\[4m/);
+	assert.match(hovered[1], /\x1b\[4m/);
+	assert.doesNotMatch(hovered[2], /\x1b\[4m/);
+	assert.deepEqual(hovered.map(stripTerminalSequences), plain);
+	const before = writes;
+	terminal.sendInput("\x1b[<35;2;1M");
+	terminal.sendInput("\x1b[<35;1;2M");
+	await terminal.waitForRender();
+	assert.equal(writes, before);
+	terminal.sendInput("x");
+	await terminal.waitForRender();
+	assert.doesNotMatch(tui.getScreenLines().join(""), /\x1b\[4m/);
+	terminal.sendInput("\x1b[<35;1;1M");
+	await terminal.waitForRender();
+	terminal.sendInput("\x1b[O");
+	await terminal.waitForRender();
+	assert.doesNotMatch(tui.getScreenLines().join(""), /\x1b\[4m/);
+	tui.stop();
+});
+
+test("hover leaves explicit underline styles intact and restores the original background", () => {
+	const explicit = `\x1b[44;4:3m${linkTo("abc", "https://ok.test/", { id: "a" })}\x1b[0m`;
+	assert.equal(underlineOsc8Link(explicit, { url: "https://ok.test/", id: "a" }), explicit);
+	const background = `\x1b[48;2;12;34;56m${linkTo("abc", "https://ok.test/", { id: "a" })} plain`;
+	const painted = underlineOsc8Link(background, { url: "https://ok.test/", id: "a" });
+	assert.match(painted, /\x1b\[24m\x1b\[48;2;12;34;56m/);
+	assert.equal(stripTerminalSequences(painted), stripTerminalSequences(background));
+});
+
 const hostile = "\x1b]8;;smb://host/share\x07bad\x1b]8;;\x07\x1b]0;title\x07";
 
 test("Markdown sanitizes every token sink and transformed source, with an explicit trusted opt-out", () => {
@@ -79,6 +129,32 @@ test("plain click selects; ctrl click opens before enclosing row handlers; dragg
 	terminal.sendInput("\x1b[<48;3;1M");
 	terminal.sendInput("\x1b[<16;3;1m");
 	assert.equal(opened.length, 1);
+	tui.stop();
+	await terminal.flush();
+});
+
+test("ctrl links precede a tool row's click handler while plain clicks still expand it", async () => {
+	const terminal = new VirtualTerminal(40, 5);
+	const opened: string[] = [];
+	let expanded = 0;
+	const tui = new TuiAltScreen(terminal, false, process.env.PI_SCRATCH_DIR, { openUrl: (url) => opened.push(url) });
+	tui.addChild(
+		new MouseRegion(new Text(linkTo("path.ts", "https://ok.test/", { id: "tool" }), 0, 0), (event) => {
+			if (event.type !== "click") return undefined;
+			expanded++;
+			return { handled: true };
+		}),
+	);
+	tui.start();
+	tui.renderNow();
+	terminal.sendInput("\x1b[<0;2;1M");
+	terminal.sendInput("\x1b[<0;2;1m");
+	assert.equal(expanded, 1);
+	assert.deepEqual(opened, []);
+	terminal.sendInput("\x1b[<16;2;1M");
+	terminal.sendInput("\x1b[<16;2;1m");
+	assert.equal(expanded, 1);
+	assert.deepEqual(opened, ["https://ok.test/"]);
 	tui.stop();
 	await terminal.flush();
 });

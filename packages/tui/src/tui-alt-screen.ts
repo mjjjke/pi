@@ -54,9 +54,11 @@ import {
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
 	getWordSegmenter,
+	type Osc8Link,
 	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,
+	underlineOsc8Link,
 	visibleWidth,
 } from "./utils.ts";
 import { WheelScrollAccelerator, type WheelScrollLines } from "./wheel-scroll.ts";
@@ -231,6 +233,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
+	private hoveredLink?: Osc8Link & { row: number; start: number; end: number };
+	private linkScreen: string[] = [];
 	private linkOpenModifier: "ctrl" | "none";
 	private selectionDragged = false;
 	private mouseCapture?: TuiMouseDispatchTarget;
@@ -330,6 +334,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	/** Drop the text selection and multi-click history, e.g. before the host replaces the transcript. */
 	resetTextSelection(): void {
+		this.clearLinkHover();
 		this.clearTextSelection();
 		this.lastClick = undefined;
 	}
@@ -401,6 +406,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.hoveredLink = undefined;
+		this.linkScreen = [];
 		this.clearMouseHover();
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
@@ -501,6 +508,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override resetRenderState(): void {
+		this.hoveredLink = undefined;
+		this.linkScreen = [];
 		this.previousScreen = [];
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
@@ -508,16 +517,19 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	scrollBy(lines: number): void {
+		this.clearLinkHover();
 		this.getPrimaryScrollView().scrollBy(lines);
 		this.requestRender();
 	}
 
 	scrollToTop(): void {
+		this.clearLinkHover();
 		this.getPrimaryScrollView().scrollToStart();
 		this.requestRender();
 	}
 
 	scrollToBottom(): void {
+		this.clearLinkHover();
 		this.getPrimaryScrollView().scrollToEnd();
 		this.requestRender();
 	}
@@ -696,7 +708,38 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.mousePressMoved = false;
 	}
 
+	private clearLinkHover(): void {
+		if (!this.hoveredLink) return;
+		this.hoveredLink = undefined;
+		this.requestRender();
+	}
+
+	private updateLinkHover(x: number, y: number): void {
+		const link = this.hasOverlay() ? undefined : getOsc8LinkAtColumn(this.previousScreen[y] ?? "", x);
+		let next: typeof this.hoveredLink;
+		if (link) {
+			let start = x;
+			let end = x + 1;
+			if (!link.id) {
+				const line = this.previousScreen[y] ?? "";
+				while (start > 0 && getOsc8LinkAtColumn(line, start - 1)?.url === link.url) start--;
+				while (end < this.terminal.columns && getOsc8LinkAtColumn(line, end)?.url === link.url) end++;
+			}
+			next = { ...link, row: y, start, end };
+		}
+		const previous = this.hoveredLink;
+		if (
+			previous?.url === next?.url &&
+			previous?.id === next?.id &&
+			(next?.id || (previous?.row === next?.row && previous?.start === next?.start && previous?.end === next?.end))
+		)
+			return;
+		this.hoveredLink = next;
+		this.requestRender();
+	}
+
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
+		if (!this.parseSgrMouseEvent(data) || this.parseWheelEvent(data)) this.clearLinkHover();
 		if (data === FOCUS_OUT) {
 			if (this.clearMouseHover()) this.requestRender();
 			const hadActiveSelection = this.selectionPressActive;
@@ -989,6 +1032,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					: "drag"
 				: "press";
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
+		if (type !== "move") this.clearLinkHover();
 		let moveTarget: TuiMouseDispatchTarget | undefined;
 		try {
 			// Authorized modified links win over a row's press/click handler.
@@ -1059,6 +1103,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		} finally {
 			if (this.reconcileMouseHover(event)) this.requestRender();
 			if (type === "move") {
+				if (moveTarget) this.clearLinkHover();
+				else this.updateLinkHover(raw.x, raw.y);
 				// Captured targets may receive out-of-bounds moves; those end hover too.
 				if (
 					moveTarget &&
@@ -1502,7 +1548,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);
 		const word = this.getWordSelection(anchor);
-		const clickCount = this.getClickCount(anchor, word);
+		const clickCount =
+			this.linkOpenModifier === "none" || (event.button & 16) !== 0 ? 1 : this.getClickCount(anchor, word);
 		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
 		this.selectionInitialRange = range;
@@ -1515,7 +1562,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				: getOsc8LinkAtColumn(
 						this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
 						Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
-					);
+					)?.url;
 		this.requestRender();
 	}
 
@@ -1825,6 +1872,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (isImageLine(line) || visibleWidth(line) <= width) return line;
 			return sliceByColumn(line, 0, width, true);
 		});
+
+		if (
+			this.hasOverlay() ||
+			this.previousScreenWidth !== width ||
+			this.previousScreenHeight !== height ||
+			screen.length !== this.linkScreen.length ||
+			screen.some((line, row) => line !== this.linkScreen[row])
+		)
+			this.hoveredLink = undefined;
+		this.linkScreen = screen;
+		const hovered = this.hoveredLink;
+		if (hovered)
+			screen = screen.map((line, row) =>
+				isImageLine(line) || (!hovered.id && row !== hovered.row)
+					? line
+					: underlineOsc8Link(line, hovered, hovered.id ? undefined : hovered),
+			);
 
 		const fullRedraw =
 			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;

@@ -1,5 +1,6 @@
 import {
 	allocateImageId,
+	allocateLinkId,
 	getCapabilities,
 	getCellDimensions,
 	getImageDimensions,
@@ -54,6 +55,7 @@ export interface ImageOptions {
 
 export class Image implements Component {
 	private base64Data: string;
+	private readonly linkId = allocateLinkId();
 	private mimeType: string;
 	private dimensions: ImageDimensions;
 	private theme: ImageTheme;
@@ -151,11 +153,11 @@ export class Image implements Component {
 					lines.push(moveUp + result.sequence);
 				}
 			} else {
-				const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
+				const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename, this.linkId);
 				lines = [truncateToWidth(this.theme.fallbackColor(fallback), width)];
 			}
 		} else {
-			const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
+			const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename, this.linkId);
 			lines = [truncateToWidth(this.theme.fallbackColor(fallback), width)];
 		}
 

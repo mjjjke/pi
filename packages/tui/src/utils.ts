@@ -356,15 +356,23 @@ export function getGraphemeCellRange(line: string, column: number): GraphemeCell
 }
 
 /** Return the OSC 8 hyperlink covering a visible terminal column. */
-export function getOsc8LinkAtColumn(line: string, column: number): string | undefined {
-	let activeUrl: string | undefined;
+export interface Osc8Link {
+	url: string;
+	id?: string;
+}
+
+export function getOsc8LinkAtColumn(line: string, column: number): Osc8Link | undefined {
+	let activeUrl: Osc8Link | undefined;
 	let currentCol = 0;
 	let i = 0;
 	while (i < line.length) {
 		const ansi = extractAnsiCode(line, i);
 		if (ansi) {
-			const hyperlink = /^\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)$/.exec(ansi.code);
-			if (hyperlink) activeUrl = hyperlink[1] || undefined;
+			const hyperlink = /^\x1b\]8;([^;]*);([^\x07\x1b]*)(?:\x07|\x1b\\)$/.exec(ansi.code);
+			if (hyperlink)
+				activeUrl = hyperlink[2]
+					? { url: hyperlink[2], ...(hyperlink[1].startsWith("id=") ? { id: hyperlink[1].slice(3) } : {}) }
+					: undefined;
 			i += ansi.length;
 			continue;
 		}
@@ -547,7 +555,7 @@ class AnsiCodeTracker {
 	private bold = false;
 	private dim = false;
 	private italic = false;
-	private underline = false;
+	private underline: string | null = null;
 	private blink = false;
 	private inverse = false;
 	private hidden = false;
@@ -572,7 +580,7 @@ class AnsiCodeTracker {
 		}
 
 		// Extract the parameters between \x1b[ and m
-		const match = ansiCode.match(/\x1b\[([\d;]*)m/);
+		const match = ansiCode.match(/\x1b\[([\d;:]*)m/);
 		if (!match) return;
 
 		const params = match[1];
@@ -590,6 +598,12 @@ class AnsiCodeTracker {
 
 			// Handle 256-color and RGB codes which consume multiple parameters
 			if (code === 38 || code === 48) {
+				if (parts[i].includes(":")) {
+					if (code === 38) this.fgColor = parts[i];
+					else this.bgColor = parts[i];
+					i++;
+					continue;
+				}
 				// 38;5;N (256 color fg) or 38;2;R;G;B (RGB fg)
 				// 48;5;N (256 color bg) or 48;2;R;G;B (RGB bg)
 				if (parts[i + 1] === "5" && parts[i + 2] !== undefined) {
@@ -630,7 +644,7 @@ class AnsiCodeTracker {
 					this.italic = true;
 					break;
 				case 4:
-					this.underline = true;
+					this.underline = parts[i] === "4:0" ? null : parts[i];
 					break;
 				case 5:
 					this.blink = true;
@@ -655,7 +669,7 @@ class AnsiCodeTracker {
 					this.italic = false;
 					break;
 				case 24:
-					this.underline = false;
+					this.underline = null;
 					break;
 				case 25:
 					this.blink = false;
@@ -694,7 +708,7 @@ class AnsiCodeTracker {
 		this.bold = false;
 		this.dim = false;
 		this.italic = false;
-		this.underline = false;
+		this.underline = null;
 		this.blink = false;
 		this.inverse = false;
 		this.hidden = false;
@@ -715,7 +729,7 @@ class AnsiCodeTracker {
 		if (this.bold) codes.push("1");
 		if (this.dim) codes.push("2");
 		if (this.italic) codes.push("3");
-		if (this.underline) codes.push("4");
+		if (this.underline) codes.push(this.underline);
 		if (this.blink) codes.push("5");
 		if (this.inverse) codes.push("7");
 		if (this.hidden) codes.push("8");
@@ -730,6 +744,14 @@ class AnsiCodeTracker {
 		return result;
 	}
 
+	getUnderlineAndBackgroundCodes(): string {
+		return `\x1b[${this.underline ?? "24"}m${this.getActiveBackgroundCode() || "\x1b[49m"}`;
+	}
+
+	isUnderlined(): boolean {
+		return this.underline !== null;
+	}
+
 	getActiveBackgroundCode(): string {
 		return this.bgColor ? `\x1b[${this.bgColor}m` : "";
 	}
@@ -739,7 +761,7 @@ class AnsiCodeTracker {
 			this.bold ||
 			this.dim ||
 			this.italic ||
-			this.underline ||
+			this.underline !== null ||
 			this.blink ||
 			this.inverse ||
 			this.hidden ||
@@ -1001,6 +1023,45 @@ function wrapSingleLine(line: string, width: number): string[] {
 
 	// Trailing whitespace can cause lines to exceed the requested width
 	return wrapped.length > 0 ? wrapped.map((line) => line.trimEnd()) : [""];
+}
+
+/** Paint only matching link cells, preserving every original sequence and style. */
+export function underlineOsc8Link(line: string, link: Osc8Link, range?: { start: number; end: number }): string {
+	const tracker = new AnsiCodeTracker();
+	let active: Osc8Link | undefined;
+	let result = "";
+	let column = 0;
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			tracker.process(ansi.code);
+			const parsed = parseOsc8Hyperlink(ansi.code);
+			if (parsed !== undefined)
+				active = parsed
+					? { url: parsed.url, id: parsed.params.startsWith("id=") ? parsed.params.slice(3) : undefined }
+					: undefined;
+			result += ansi.code;
+			i += ansi.length;
+			continue;
+		}
+		let end = line.indexOf("\x1b", i);
+		if (end < 0) end = line.length;
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, end))) {
+			const width = visibleWidth(segment);
+			const selected =
+				active?.url === link.url &&
+				active?.id === link.id &&
+				(!range || (column >= range.start && column < range.end));
+			result +=
+				selected && !tracker.isUnderlined()
+					? `\x1b[4m${segment}${tracker.getUnderlineAndBackgroundCodes()}`
+					: segment;
+			column += width;
+		}
+		i = end;
+	}
+	return result;
 }
 
 export const PUNCTUATION_REGEX = /[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]/;

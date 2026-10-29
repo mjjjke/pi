@@ -739,6 +739,19 @@ export function hyperlink(text: string, url: string): string {
 	return `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
 }
 
+let nextLinkId = 0;
+/** Allocate once per component, then append its occurrence index on each render. */
+export function allocateLinkId(): string {
+	return `pi-${++nextLinkId}`;
+}
+
+/** Application links carry occurrence identity through wrapping and clipping. Label may already be styled. */
+export function linkTo(text: string, target: string, options: { id?: string } = {}): string {
+	const id = options.id ?? allocateLinkId();
+	if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("Invalid terminal link id");
+	return `\x1b]8;id=${id};${target}\x1b\\${text}\x1b]8;;\x1b\\`;
+}
+
 /** Shorten home-prefixed absolute paths to ~/... for compact display. */
 function shortenImagePath(filename: string): string {
 	const home = homedir();
@@ -753,13 +766,13 @@ function shortenImagePath(filename: string): string {
  * Absolute paths are shown shortened (~/...) and, when OSC 8 hyperlinks are
  * available, linked to file:// so the full path remains openable.
  */
-export function imageFallback(mimeType: string, dimensions?: ImageDimensions, filename?: string): string {
+export function imageFallback(mimeType: string, dimensions?: ImageDimensions, filename?: string, id?: string): string {
 	const parts: string[] = [];
 	if (filename) {
 		const display = sanitizeTerminalText(shortenImagePath(filename));
 		const target = isAbsolute(filename) ? imageLinkPolicy(pathToFileURL(filename).href) : undefined;
 		if (getCapabilities().hyperlinks && target) {
-			parts.push(hyperlink(display, target));
+			parts.push(linkTo(display, target, { id }));
 		} else {
 			parts.push(display);
 		}
