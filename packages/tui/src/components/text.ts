@@ -1,3 +1,4 @@
+import { allocateLinkId } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
@@ -9,6 +10,7 @@ export class Text implements Component {
 	private paddingX: number; // Left/right padding
 	private paddingY: number; // Top/bottom padding
 	private customBgFn?: (text: string) => string;
+	private readonly wrapLinkId = allocateLinkId();
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -70,7 +72,7 @@ export class Text implements Component {
 		const contentWidth = Math.max(1, width - paddingX * 2);
 
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
+		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth, this.wrapLinkId);
 
 		// Add margins and background to each line
 		const leftMargin = " ".repeat(paddingX);

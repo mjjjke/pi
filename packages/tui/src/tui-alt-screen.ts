@@ -718,7 +718,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private updateLinkHover(x: number, y: number): void {
-		const link = this.hasOverlay() ? undefined : getOsc8LinkAtColumn(this.previousScreen[y] ?? "", x);
+		// Activation and hover both hit-test the final composited frame.
+		const link = getOsc8LinkAtColumn(this.previousScreen[y] ?? "", x);
 		let next: typeof this.hoveredLink;
 		if (link) {
 			let start = x;
@@ -1147,8 +1148,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		} finally {
 			if (this.reconcileMouseHover(event)) this.requestRender();
 			if (type === "move") {
-				if (moveTarget) this.clearLinkHover();
-				else this.updateLinkHover(raw.x, raw.y);
+				// Modified link activation wins over component handlers, so hover must too.
+				// Keep dispatching moves above for component feedback and leave tracking.
+				this.updateLinkHover(raw.x, raw.y);
 				// Captured targets may receive out-of-bounds moves; those end hover too.
 				if (
 					moveTarget &&
@@ -1919,12 +1921,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return sliceByColumn(line, 0, width, true);
 		});
 
-		if (
-			this.hasOverlay() ||
-			this.previousScreenWidth !== width ||
-			this.previousScreenHeight !== height ||
-			!this.isLinkHoverValid(screen)
-		)
+		if (this.previousScreenWidth !== width || this.previousScreenHeight !== height || !this.isLinkHoverValid(screen))
 			this.hoveredLink = undefined;
 		this.linkScreen = screen;
 		const hovered = this.hoveredLink;

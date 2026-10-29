@@ -562,6 +562,7 @@ class AnsiCodeTracker {
 	private strikethrough = false;
 	private fgColor: string | null = null; // Stores the full code like "31" or "38;5;240"
 	private bgColor: string | null = null; // Stores the full code like "41" or "48;5;240"
+	private underlineColor: string | null = null;
 	private activeHyperlink: ActiveHyperlink | null = null;
 
 	process(ansiCode: string): void {
@@ -596,37 +597,16 @@ class AnsiCodeTracker {
 		while (i < parts.length) {
 			const code = Number.parseInt(parts[i], 10);
 
-			// Handle 256-color and RGB codes which consume multiple parameters
-			if (code === 38 || code === 48) {
-				if (parts[i].includes(":")) {
-					if (code === 38) this.fgColor = parts[i];
-					else this.bgColor = parts[i];
-					i++;
-					continue;
-				}
-				// 38;5;N (256 color fg) or 38;2;R;G;B (RGB fg)
-				// 48;5;N (256 color bg) or 48;2;R;G;B (RGB bg)
-				if (parts[i + 1] === "5" && parts[i + 2] !== undefined) {
-					// 256 color: 38;5;N or 48;5;N
-					const colorCode = `${parts[i]};${parts[i + 1]};${parts[i + 2]}`;
-					if (code === 38) {
-						this.fgColor = colorCode;
-					} else {
-						this.bgColor = colorCode;
-					}
-					i += 3;
-					continue;
-				} else if (parts[i + 1] === "2" && parts[i + 4] !== undefined) {
-					// RGB color: 38;2;R;G;B or 48;2;R;G;B
-					const colorCode = `${parts[i]};${parts[i + 1]};${parts[i + 2]};${parts[i + 3]};${parts[i + 4]}`;
-					if (code === 38) {
-						this.fgColor = colorCode;
-					} else {
-						this.bgColor = colorCode;
-					}
-					i += 5;
-					continue;
-				}
+			// Extended colors are one attribute, not SGR commands for each channel.
+			// This includes underline color (58), whose channel values can be 0/4/7.
+			if (code === 38 || code === 48 || code === 58) {
+				const count = parts[i].includes(":") ? 1 : parts[i + 1] === "5" ? 3 : parts[i + 1] === "2" ? 5 : 1;
+				const color = parts.slice(i, i + count).join(";");
+				if (code === 38) this.fgColor = color;
+				else if (code === 48) this.bgColor = color;
+				else this.underlineColor = color;
+				i += count;
+				continue;
 			}
 
 			// Standard SGR codes
@@ -689,6 +669,9 @@ class AnsiCodeTracker {
 				case 49:
 					this.bgColor = null;
 					break; // Default bg
+				case 59:
+					this.underlineColor = null;
+					break;
 				default:
 					// Standard foreground colors 30-37, 90-97
 					if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
@@ -715,6 +698,7 @@ class AnsiCodeTracker {
 		this.strikethrough = false;
 		this.fgColor = null;
 		this.bgColor = null;
+		this.underlineColor = null;
 		// SGR reset does not affect OSC 8 hyperlink state
 	}
 
@@ -736,6 +720,7 @@ class AnsiCodeTracker {
 		if (this.strikethrough) codes.push("9");
 		if (this.fgColor) codes.push(this.fgColor);
 		if (this.bgColor) codes.push(this.bgColor);
+		if (this.underlineColor) codes.push(this.underlineColor);
 
 		let result = codes.length > 0 ? `\x1b[${codes.join(";")}m` : "";
 		if (this.activeHyperlink) {
@@ -745,10 +730,10 @@ class AnsiCodeTracker {
 	}
 
 	getLinkHoverCodes(): { start: string; end: string } {
-		// Underline alone is invisible on explicit Markdown links, which are already
-		// underlined. Add inverse without replacing their underline style or colors.
+		// Toggle per cell so selection, search and fake cursors remain contrasting.
+		// Only add missing underline; preserve explicit underline styles and colors.
 		return {
-			start: `${this.underline ? "" : "\x1b[4m"}\x1b[7m`,
+			start: `${this.underline ? "" : "\x1b[4m"}\x1b[${this.inverse ? "27" : "7"}m`,
 			end: `\x1b[${this.underline ?? "24"}m\x1b[${this.inverse ? "7" : "27"}m`,
 		};
 	}
@@ -769,6 +754,7 @@ class AnsiCodeTracker {
 			this.strikethrough ||
 			this.fgColor !== null ||
 			this.bgColor !== null ||
+			this.underlineColor !== null ||
 			this.activeHyperlink !== null
 		);
 	}
@@ -920,9 +906,39 @@ export function flattenLines(lines: readonly string[]): void {
 	for (const line of lines) Number(line);
 }
 
-export function wrapTextWithAnsi(text: string, width: number): string[] {
+let nextWrapLinkId = 0;
+
+/**
+ * Wrap styled text, assigning id-less OSC 8 opens an identity before splitting.
+ * Callers that re-wrap changing source should retain a unique linkIdPrefix per component.
+ */
+export function wrapTextWithAnsi(text: string, width: number, linkIdPrefix?: string): string[] {
 	if (!text) {
 		return [""];
+	}
+
+	// Each source open gets its own identity, never a URL-derived identity. Preserve
+	// existing IDs and terminators; continuation opens inherit the assigned ID.
+	if (text.includes("\x1b]8;;")) {
+		const prefix = linkIdPrefix ?? `pi-wrap-${++nextWrapLinkId}`;
+		let occurrence = 0;
+		let identified = "";
+		let copied = 0;
+		let index = text.indexOf("\x1b");
+		while (index !== -1) {
+			const ansi = extractAnsiCode(text, index);
+			if (ansi) {
+				const hyperlink = parseOsc8Hyperlink(ansi.code);
+				if (hyperlink && !hyperlink.params) {
+					identified += text.slice(copied, index);
+					identified += formatOsc8Hyperlink({ ...hyperlink, params: `id=${prefix}-${occurrence++}` });
+					copied = index + ansi.length;
+				}
+				index += ansi.length;
+			} else index++;
+			index = text.indexOf("\x1b", index);
+		}
+		text = identified + text.slice(copied);
 	}
 
 	// Handle newlines by processing each line separately

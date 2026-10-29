@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
+import { getOsc8LinkAtColumn, stripTerminalSequences, visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
 
 describe("wrapTextWithAnsi", () => {
 	describe("underline styling", () => {
@@ -205,15 +205,14 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 
 		// Every line that contains visible text from inside the hyperlink
 		// should start with the OSC 8 open sequence (or be preceded by it).
+		const occurrence = getOsc8LinkAtColumn(lines[0], 0);
+		assert.ok(occurrence?.id);
 		for (const line of lines) {
 			// If the line has visible content it must begin with the OSC 8 re-open
 			// OR it is the line where the close appeared with no following content.
-			const stripped = line.replace(/\x1b\]8;;[^\x1b\x07]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, "");
+			const stripped = stripTerminalSequences(line);
 			if (stripped.trim().length > 0) {
-				assert.ok(
-					line.startsWith(`\x1b]8;;${url}\x1b\\`) || line.includes(`\x1b]8;;${url}\x1b\\`),
-					`Line "${line}" has visible text but no OSC 8 re-open`,
-				);
+				assert.deepStrictEqual(getOsc8LinkAtColumn(line, 0), occurrence);
 			}
 		}
 	});
@@ -226,7 +225,7 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 		for (let i = 0; i < lines.length - 1; i++) {
 			const line = lines[i];
 			// Every non-final line that is inside a hyperlink should end with the close
-			if (line.includes(`\x1b]8;;${url}\x1b\\`)) {
+			if (getOsc8LinkAtColumn(line, 0)?.url === url) {
 				assert.ok(
 					line.endsWith("\x1b]8;;\x1b\\"),
 					`Non-final line "${line}" is inside a hyperlink but does not close it`,
@@ -241,9 +240,12 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 		const lines = wrapTextWithAnsi(input, 20);
 
 		assert.ok(lines.length > 1);
+		const occurrence = getOsc8LinkAtColumn(lines[0], 0);
+		assert.ok(occurrence?.id);
 		for (const line of lines) {
-			assert.ok(line.includes(`\x1b]8;;${url}\x07`), `Line "${line}" does not reopen the hyperlink with BEL`);
-			assert.ok(!line.includes(`\x1b]8;;${url}\x1b\\`), `Line "${line}" reopens the hyperlink with ST`);
+			assert.deepStrictEqual(getOsc8LinkAtColumn(line, 0), occurrence);
+			assert.ok(line.includes(`;${url}\x07`), `Line "${line}" does not reopen the hyperlink with BEL`);
+			assert.ok(!line.includes(`;${url}\x1b\\`), `Line "${line}" reopens the hyperlink with ST`);
 		}
 		for (const line of lines.slice(0, -1)) {
 			assert.ok(line.endsWith("\x1b]8;;\x07"), `Line "${line}" does not close the hyperlink with BEL`);
@@ -258,7 +260,7 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 		// With width 80 everything fits on one line; there should be exactly one
 		// OSC 8 open and one OSC 8 close.
 		assert.strictEqual(lines.length, 1);
-		const openCount = (lines[0].match(/\x1b\]8;;https:[^\x1b]+\x1b\\/g) ?? []).length;
+		const openCount = (lines[0].match(/\x1b\]8;id=[^;]+;https:[^\x1b]+\x1b\\/g) ?? []).length;
 		const closeCount = (lines[0].match(/\x1b\]8;;\x1b\\/g) ?? []).length;
 		assert.strictEqual(openCount, 1);
 		assert.strictEqual(closeCount, 1);

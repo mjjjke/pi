@@ -253,7 +253,7 @@ for (const change of ["move", "remove", "url", "id", "width", "height", "overlay
 			else if (change === "id") text.setText(linkTo("link", "https://ok.test/", { id: "new" }));
 			else if (change === "width") terminal.resize(41, 6);
 			else if (change === "height") terminal.resize(40, 7);
-			else tui.showOverlay(new Text("overlay", 0, 0), { anchor: "bottom-right", width: 10 });
+			else tui.showOverlay(new Text("overlay", 0, 0), { anchor: "top-left", width: 10 });
 			tui.renderNow();
 			assert.doesNotMatch(tui.getScreenLines().join(""), /\x1b\[4m/);
 		} finally {
