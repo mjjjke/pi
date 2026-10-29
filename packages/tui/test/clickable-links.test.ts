@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import xterm from "@xterm/headless";
 import { Image } from "../src/components/image.ts";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
 import { MouseRegion } from "../src/components/mouse-region.ts";
@@ -27,6 +28,146 @@ const theme: MarkdownTheme = {
 	strikethrough: plain,
 	underline: plain,
 };
+const styledTheme: MarkdownTheme = {
+	...theme,
+	bold: (text) => `\x1b[1m${text}\x1b[22m`,
+	italic: (text) => `\x1b[3m${text}\x1b[23m`,
+	strikethrough: (text) => `\x1b[9m${text}\x1b[29m`,
+	code: (text) => `\x1b[38;2;12;34;56;48;5;17m${text}\x1b[0m`,
+	link: (text) => `\x1b[36m${text}\x1b[39m`,
+	underline: (text) => `\x1b[4m${text}\x1b[24m`,
+};
+
+async function screenCells(terminal: xterm.Terminal, lines: string[]) {
+	await new Promise<void>((resolve) =>
+		terminal.write(`\x1b[0m\x1b[2J${lines.map((line, row) => `\x1b[${row + 1};1H${line}`).join("")}`, resolve),
+	);
+	return lines.map((_, row) =>
+		Array.from({ length: terminal.cols }, (_, column) => {
+			const cell = terminal.buffer.active.getLine(row)!.getCell(column)!;
+			return {
+				text: cell.getChars(),
+				width: cell.getWidth(),
+				bold: cell.isBold(),
+				italic: cell.isItalic(),
+				strike: cell.isStrikethrough(),
+				underline: cell.isUnderline(),
+				inverse: cell.isInverse(),
+				fgMode: cell.getFgColorMode(),
+				fg: cell.getFgColor(),
+				bgMode: cell.getBgColorMode(),
+				bg: cell.getBgColor(),
+			};
+		}),
+	);
+}
+
+const hoverStyles = {
+	plain: (label: string) => `[${label}](https://ok.test/)`,
+	"bold outside": (label: string) => `**[${label}](https://ok.test/)**`,
+	"bold inside": (label: string) => `[**${label}**](https://ok.test/)`,
+	italic: (label: string) => `[*${label}*](https://ok.test/)`,
+	code: (label: string) => `[\`${label}\`](https://ok.test/)`,
+	strike: (label: string) => `~~[${label}](https://ok.test/)~~`,
+	mixed: (label: string) => `[**${label}** \`code\` *tail*](https://ok.test/)`,
+	bare: (_label: string) => "https://ok.test/",
+};
+const hoverPositions = {
+	start: (link: string) => `${link} tail`,
+	end: (link: string) => `prefix ${link}`,
+	parentheses: (link: string) => `(${link}), next.`,
+	multiple: (link: string) => `${link}; [other](https://other.test/), ${link}`,
+	list: (link: string) =>
+		`- ${link}: está abierta ([este](https://other.test/#discussioncomment-15588804), por ejemplo).`,
+	continuation: (link: string) => `- abierta (\n  ${link}).`,
+};
+for (const [style, format] of Object.entries(hoverStyles)) {
+	for (const [position, place] of Object.entries(hoverPositions)) {
+		for (const width of [16, 80]) {
+			test(`Markdown hover preserves styles and matches ctrl+click: ${style}, ${position}, width=${width}`, async () => {
+				setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+				const terminal = new VirtualTerminal(width, 20);
+				const emulator = new xterm.Terminal({ cols: width, rows: 20, allowProposedApi: true });
+				const opened: string[] = [];
+				const tui = new TuiAltScreen(terminal, false, process.env.PI_SCRATCH_DIR, {
+					openUrl: (url) => opened.push(url),
+					copyOnSelect: false,
+				});
+				tui.addChild(new Markdown(place(format("target link 界界")), 0, 0, styledTheme));
+				tui.start();
+				try {
+					tui.renderNow();
+					const original = tui.getScreenLines();
+					// With SGR removed, xterm's native underline independently identifies OSC 8 cells.
+					const nativeLinks = await screenCells(
+						emulator,
+						original.map((line) => line.replace(/\x1b\[[0-9;:]*m/g, "")),
+					);
+					// Then measure pi's SGR paint without xterm's automatic OSC 8 decoration.
+					emulator.parser.registerOscHandler(8, () => true);
+					const baseline = await screenCells(emulator, original);
+					const links = original.map((line) =>
+						Array.from({ length: width }, (_, column) => getOsc8LinkAtColumn(line, column)),
+					);
+					assert.deepEqual(
+						links.map((row) => row.map(Boolean)),
+						nativeLinks.map((row) => row.map((cell) => Boolean(cell.underline))),
+						"hit-testing must cover exactly the terminal's native OSC 8 cells",
+					);
+					const ids = new Set(links.flat().flatMap((link) => (link?.id ? [link.id] : [])));
+					assert.equal(ids.size, position === "multiple" ? 3 : position === "list" ? 2 : 1);
+					for (const id of ids) {
+						// Hover both edges of every physical segment, including wide-cell halves.
+						for (let row = 0; row < links.length; row++) {
+							const columns = links[row].flatMap((link, col) => (link?.id === id ? [col] : []));
+							if (!columns.length) continue;
+							for (const column of new Set([columns[0], columns[columns.length - 1]])) {
+								terminal.sendInput(`\x1b[<35;${column + 1};${row + 1}M`);
+								tui.renderNow();
+								const painted = await screenCells(emulator, tui.getScreenLines());
+								assert.notDeepEqual(
+									painted[row][column],
+									baseline[row][column],
+									`hover must visibly change link ${id} at ${column},${row}, even if already underlined`,
+								);
+								for (let y = 0; y < baseline.length; y++) {
+									for (let x = 0; x < width; x++) {
+										const before = baseline[y][x];
+										const after = painted[y][x];
+										if (links[y][x]?.id !== id) assert.deepEqual(after, before, `unlinked cell ${x},${y}`);
+										else {
+											assert.ok(after.underline, `link cell ${x},${y} must be underlined`);
+											assert.ok(after.inverse, `link cell ${x},${y} must have hover emphasis`);
+											assert.deepEqual(
+												{ ...after, underline: before.underline, inverse: before.inverse },
+												before,
+												`link styles at ${x},${y}`,
+											);
+										}
+									}
+								}
+								terminal.sendInput(`\x1b[<16;${column + 1};${row + 1}M`);
+								terminal.sendInput(`\x1b[<16;${column + 1};${row + 1}m`);
+								assert.equal(opened.pop(), links[row][column]!.url);
+								tui.renderNow();
+								assert.deepEqual(tui.getScreenLines(), original, "click restores exact sequences");
+								terminal.sendInput(`\x1b[<35;${column + 1};${row + 1}M`);
+								tui.renderNow();
+								terminal.sendInput(`\x1b[<35;${width};20M`);
+								tui.renderNow();
+								assert.deepEqual(tui.getScreenLines(), original, "pointer leave restores exact sequences");
+							}
+						}
+					}
+				} finally {
+					tui.stop();
+					emulator.dispose();
+				}
+			});
+		}
+	}
+}
+
 test("hover follows an occurrence id across wraps, restores styles and clears on keyboard/focus/wheel", async () => {
 	const terminal = new VirtualTerminal(4, 5);
 	let writes = 0;
@@ -151,10 +292,14 @@ test("id-link hover spans rows through ticks and drops when the occurrence disap
 
 test("hover leaves explicit underline styles intact and restores the original background", () => {
 	const explicit = `\x1b[44;4:3m${linkTo("abc", "https://ok.test/", { id: "a" })}\x1b[0m`;
-	assert.equal(underlineOsc8Link(explicit, { url: "https://ok.test/", id: "a" }), explicit);
+	const emphasized = underlineOsc8Link(explicit, { url: "https://ok.test/", id: "a" });
+	assert.match(emphasized, /\x1b\[7m/);
+	assert.doesNotMatch(emphasized, /\x1b\[4m|\x1b\[24m/);
+	assert.match(emphasized, /\x1b\[7ma\x1b\[4:3m\x1b\[27m/);
 	const background = `\x1b[48;2;12;34;56m${linkTo("abc", "https://ok.test/", { id: "a" })} plain`;
 	const painted = underlineOsc8Link(background, { url: "https://ok.test/", id: "a" });
-	assert.match(painted, /\x1b\[24m\x1b\[48;2;12;34;56m/);
+	assert.match(painted, /\x1b\[24m\x1b\[27m/);
+	assert.match(painted, /\x1b\[48;2;12;34;56m/);
 	assert.equal(stripTerminalSequences(painted), stripTerminalSequences(background));
 });
 

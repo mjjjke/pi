@@ -744,12 +744,13 @@ class AnsiCodeTracker {
 		return result;
 	}
 
-	getUnderlineAndBackgroundCodes(): string {
-		return `\x1b[${this.underline ?? "24"}m${this.getActiveBackgroundCode() || "\x1b[49m"}`;
-	}
-
-	isUnderlined(): boolean {
-		return this.underline !== null;
+	getLinkHoverCodes(): { start: string; end: string } {
+		// Underline alone is invisible on explicit Markdown links, which are already
+		// underlined. Add inverse without replacing their underline style or colors.
+		return {
+			start: `${this.underline ? "" : "\x1b[4m"}\x1b[7m`,
+			end: `\x1b[${this.underline ?? "24"}m\x1b[${this.inverse ? "7" : "27"}m`,
+		};
 	}
 
 	getActiveBackgroundCode(): string {
@@ -1053,10 +1054,10 @@ export function underlineOsc8Link(line: string, link: Osc8Link, range?: { start:
 				active?.url === link.url &&
 				active?.id === link.id &&
 				(!range || (column >= range.start && column < range.end));
-			result +=
-				selected && !tracker.isUnderlined()
-					? `\x1b[4m${segment}${tracker.getUnderlineAndBackgroundCodes()}`
-					: segment;
+			if (selected) {
+				const hover = tracker.getLinkHoverCodes();
+				result += `${hover.start}${segment}${hover.end}`;
+			} else result += segment;
 			column += width;
 		}
 		i = end;
