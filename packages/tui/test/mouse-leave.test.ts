@@ -212,6 +212,34 @@ describe("fullscreen mouse leave", () => {
 		}
 	});
 
+	it("keeps stationary component hover through repeated background ticks", () => {
+		const terminal = new VirtualTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		const events: TuiMouseEvent[] = [];
+		const sibling = new Text("tick 0", 0, 0);
+		tui.addChild(control(events));
+		tui.addChild(sibling);
+		tui.start();
+		try {
+			tui.renderNow();
+			terminal.sendInput("\x1b[<35;2;1M");
+			for (let tick = 1; tick <= 5; tick++) {
+				sibling.setText(`tick ${tick}`);
+				tui.renderNow();
+			}
+			assert.deepEqual(
+				events.map((event) => event.type),
+				["move"],
+			);
+		} finally {
+			tui.stop();
+		}
+		assert.deepEqual(
+			events.map((event) => event.type),
+			["move", "leave"],
+		);
+	});
+
 	it("repaints only when leave explicitly requests it, ignoring focus and capture", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);

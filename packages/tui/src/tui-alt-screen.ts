@@ -720,11 +720,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (link) {
 			let start = x;
 			let end = x + 1;
-			if (!link.id) {
-				const line = this.previousScreen[y] ?? "";
-				while (start > 0 && getOsc8LinkAtColumn(line, start - 1)?.url === link.url) start--;
-				while (end < this.terminal.columns && getOsc8LinkAtColumn(line, end)?.url === link.url) end++;
-			}
+			const line = this.previousScreen[y] ?? "";
+			const matches = (column: number) => {
+				const candidate = getOsc8LinkAtColumn(line, column);
+				return candidate?.url === link.url && candidate?.id === link.id;
+			};
+			while (start > 0 && matches(start - 1)) start--;
+			while (end < this.terminal.columns && matches(end)) end++;
 			next = { ...link, row: y, start, end };
 		}
 		const previous = this.hoveredLink;
@@ -732,10 +734,32 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			previous?.url === next?.url &&
 			previous?.id === next?.id &&
 			(next?.id || (previous?.row === next?.row && previous?.start === next?.start && previous?.end === next?.end))
-		)
+		) {
+			// Moving between wrapped segments keeps the paint, but updates its validation anchor.
+			this.hoveredLink = next;
 			return;
+		}
 		this.hoveredLink = next;
 		this.requestRender();
+	}
+
+	private isLinkHoverValid(screen: string[]): boolean {
+		const hovered = this.hoveredLink;
+		if (!hovered) return false;
+		const line = screen[hovered.row];
+		// Background animation usually changes other rows; avoid parsing the link row then.
+		if (line !== undefined && line === this.linkScreen[hovered.row]) return true;
+		if (line === undefined || isImageLine(line)) return false;
+		const matches = (column: number) => {
+			const link = getOsc8LinkAtColumn(line, column);
+			return link?.url === hovered.url && link?.id === hovered.id;
+		};
+		// The same URL/id must still occupy exactly the original hit region.
+		if (matches(hovered.start - 1) || matches(hovered.end)) return false;
+		for (let column = hovered.start; column < hovered.end; column++) {
+			if (!matches(column)) return false;
+		}
+		return true;
 	}
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
@@ -1878,8 +1902,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.hasOverlay() ||
 			this.previousScreenWidth !== width ||
 			this.previousScreenHeight !== height ||
-			screen.length !== this.linkScreen.length ||
-			screen.some((line, row) => line !== this.linkScreen[row])
+			!this.isLinkHoverValid(screen)
 		)
 			this.hoveredLink = undefined;
 		this.linkScreen = screen;

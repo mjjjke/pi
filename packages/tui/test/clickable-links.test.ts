@@ -66,6 +66,89 @@ test("hover follows an occurrence id across wraps, restores styles and clears on
 	tui.stop();
 });
 
+for (const id of [undefined, "occurrence"]) {
+	test(`stationary link hover survives ticking rows and unrelated edits on its row, id=${id}`, () => {
+		const terminal = new VirtualTerminal(40, 6);
+		const tui = new TuiAltScreen(terminal);
+		const link = id ? linkTo("link", "https://ok.test/", { id }) : "\x1b]8;;https://ok.test/\x07link\x1b]8;;\x07";
+		const text = new Text(`${link} tail\ntick 0`, 0, 0);
+		tui.addChild(text);
+		tui.start();
+		try {
+			tui.renderNow();
+			terminal.sendInput("\x1b[<35;2;1M");
+			tui.renderNow();
+			assert.match(tui.getScreenLines()[0], /\x1b\[4m/);
+			for (let tick = 1; tick <= 3; tick++) {
+				text.setText(`${link} tail\ntick ${tick}`);
+				tui.renderNow();
+				assert.match(tui.getScreenLines()[0], /\x1b\[4m/);
+				text.setText(`${link} tail ${tick}\ntick ${tick}`);
+				tui.renderNow();
+				assert.match(tui.getScreenLines()[0], /\x1b\[4m/);
+			}
+		} finally {
+			tui.stop();
+		}
+	});
+}
+
+for (const change of ["move", "remove", "url", "id", "width", "height", "overlay"]) {
+	test(`stationary link hover drops on ${change}`, () => {
+		const terminal = new VirtualTerminal(40, 6);
+		const tui = new TuiAltScreen(terminal);
+		const link = "\x1b]8;;https://ok.test/\x07link\x1b]8;;\x07";
+		const text = new Text(`${link}\ntick`, 0, 0);
+		tui.addChild(text);
+		tui.start();
+		try {
+			tui.renderNow();
+			terminal.sendInput("\x1b[<35;2;1M");
+			tui.renderNow();
+			assert.match(tui.getScreenLines()[0], /\x1b\[4m/);
+			if (change === "move") text.setText(` ${link}\ntick`);
+			else if (change === "remove") text.setText("gone\ntick");
+			else if (change === "url") text.setText(linkTo("link", "https://other.test/"));
+			else if (change === "id") text.setText(linkTo("link", "https://ok.test/", { id: "new" }));
+			else if (change === "width") terminal.resize(41, 6);
+			else if (change === "height") terminal.resize(40, 7);
+			else tui.showOverlay(new Text("overlay", 0, 0), { anchor: "bottom-right", width: 10 });
+			tui.renderNow();
+			assert.doesNotMatch(tui.getScreenLines().join(""), /\x1b\[4m/);
+		} finally {
+			tui.stop();
+		}
+	});
+}
+
+test("id-link hover spans rows through ticks and drops when the occurrence disappears", () => {
+	const terminal = new VirtualTerminal(40, 6);
+	const tui = new TuiAltScreen(terminal);
+	const first = linkTo("first", "https://ok.test/", { id: "wrapped" });
+	const second = linkTo("second", "https://ok.test/", { id: "wrapped" });
+	const text = new Text(`${first}\n${second}\ntick 0`, 0, 0);
+	tui.addChild(text);
+	tui.start();
+	try {
+		tui.renderNow();
+		terminal.sendInput("\x1b[<35;2;1M");
+		tui.renderNow();
+		for (let tick = 1; tick <= 3; tick++) {
+			text.setText(`${first}\n${second}\ntick ${tick}`);
+			tui.renderNow();
+			assert.match(tui.getScreenLines()[0], /\x1b\[4m/);
+			assert.match(tui.getScreenLines()[1], /\x1b\[4m/);
+		}
+		text.setText("gone\ngone\ntick 4");
+		tui.renderNow();
+		text.setText(`${first}\n${second}\ntick 5`);
+		tui.renderNow();
+		assert.doesNotMatch(tui.getScreenLines().join(""), /\x1b\[4m/);
+	} finally {
+		tui.stop();
+	}
+});
+
 test("hover leaves explicit underline styles intact and restores the original background", () => {
 	const explicit = `\x1b[44;4:3m${linkTo("abc", "https://ok.test/", { id: "a" })}\x1b[0m`;
 	assert.equal(underlineOsc8Link(explicit, { url: "https://ok.test/", id: "a" }), explicit);
