@@ -3,6 +3,12 @@ import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TerminalColorMode } from "./colors.ts";
+import { type LinkPolicy, sanitizeTerminalText } from "./terminal-links.ts";
+
+let imageLinkPolicy: LinkPolicy = () => undefined;
+export function setImageLinkPolicy(policy: LinkPolicy): void {
+	imageLinkPolicy = policy;
+}
 
 export type ImageProtocol = "kitty" | "iterm2" | null;
 
@@ -750,9 +756,10 @@ function shortenImagePath(filename: string): string {
 export function imageFallback(mimeType: string, dimensions?: ImageDimensions, filename?: string): string {
 	const parts: string[] = [];
 	if (filename) {
-		const display = shortenImagePath(filename);
-		if (getCapabilities().hyperlinks && isAbsolute(filename)) {
-			parts.push(hyperlink(display, pathToFileURL(filename).href));
+		const display = sanitizeTerminalText(shortenImagePath(filename));
+		const target = isAbsolute(filename) ? imageLinkPolicy(pathToFileURL(filename).href) : undefined;
+		if (getCapabilities().hyperlinks && target) {
+			parts.push(hyperlink(display, target));
 		} else {
 			parts.push(display);
 		}

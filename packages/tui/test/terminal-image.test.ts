@@ -28,6 +28,7 @@ import {
 	setCapabilities,
 	setCapabilityOverrides,
 	setCellDimensions,
+	setImageLinkPolicy,
 } from "../src/terminal-image.ts";
 import { visibleWidth } from "../src/utils.ts";
 
@@ -799,7 +800,8 @@ describe("imageFallback", () => {
 		}
 	});
 
-	it("wraps shortened absolute paths in OSC 8 file links when hyperlinks are enabled", () => {
+	it("wraps shortened absolute paths only with an application-authorized image target", () => {
+		setImageLinkPolicy((target) => target);
 		setCapabilities({ images: null, trueColor: false, hyperlinks: true });
 		try {
 			const abs = join(homedir(), ".pi", "agent", "shot.png");
@@ -813,6 +815,7 @@ describe("imageFallback", () => {
 			const visible = result.replace(/\x1b\]8;;.*?\x1b\\/g, "");
 			assert.strictEqual(visible, "[Image: ~/.pi/agent/shot.png [image/png] 10x10]");
 		} finally {
+			setImageLinkPolicy(() => undefined);
 			resetCapabilitiesCache();
 		}
 	});

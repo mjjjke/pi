@@ -152,8 +152,10 @@ export {
 	setCapabilities,
 	setCapabilityOverrides,
 	setCellDimensions,
+	setImageLinkPolicy,
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
+export { type LinkPolicy, neutralizeTerminalLinks, sanitizeTerminalText, webLinkPolicy } from "./terminal-links.ts";
 export {
 	type Component,
 	Container,

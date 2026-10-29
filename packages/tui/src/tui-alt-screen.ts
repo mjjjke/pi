@@ -187,6 +187,7 @@ export interface TuiAltScreenOptions {
 	scrollToEndIndicator?: () => string;
 	/** Open an OSC 8 hyperlink activated with a primary-button click. */
 	openUrl?: (url: string) => void;
+	linkOpenModifier?: "ctrl" | "none";
 	/** Handle an unmodified secondary-button press for clipboard paste. Currently enabled on Windows only. */
 	onRightClickPaste?: () => void;
 	/** Automatically copy selected text to the clipboard on mouse release (default: true). */
@@ -230,6 +231,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
 	private activeSearch?: ActiveSearch;
 	private pressedUrl?: string;
+	private linkOpenModifier: "ctrl" | "none";
 	private selectionDragged = false;
 	private mouseCapture?: TuiMouseDispatchTarget;
 	private mouseHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent; hit?: TuiMouseDispatchTarget };
@@ -283,10 +285,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
 		this.openUrl = options.openUrl;
+		this.linkOpenModifier = options.linkOpenModifier ?? "ctrl";
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
 		this.copySelection = options.copySelection;
 		this.addInputListener((data) => this.handleViewportInput(data));
+	}
+
+	setLinkOpenModifier(modifier: "ctrl" | "none"): void {
+		this.linkOpenModifier = modifier;
 	}
 
 	get viewportTop(): number {
@@ -419,8 +426,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const documentLines = this.resolveFakeCursors(this.render(width)).map((line) =>
 				line.replace(OSC133_ZONE_PREFIX, ""),
 			);
-			this.lastDocument = this.applyLineResets(documentLines.map((line) => line.replaceAll(CURSOR_MARKER, ""))).map(
-				(line) => (isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true)),
+			this.lastDocument = this.applyLineResets(
+				documentLines.map((line) => line.replaceAll(CURSOR_MARKER, "")),
+				width,
+			).map((line) =>
+				isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true),
 			);
 			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
 			for (let row = 0; row < this.lastDocument.length; row++) {
@@ -981,6 +991,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
 		let moveTarget: TuiMouseDispatchTarget | undefined;
 		try {
+			// Authorized modified links win over a row's press/click handler.
+			if (
+				this.pressedUrl ||
+				(type === "press" &&
+					(raw.button & 3) === 0 &&
+					(this.linkOpenModifier === "none" || event.ctrl) &&
+					getOsc8LinkAtColumn(this.previousScreen[raw.y] ?? "", raw.x))
+			) {
+				this.handleSelectionMouseEvent(raw);
+				return;
+			}
 			if (this.mouseCapture || this.mousePressTarget) {
 				const target = this.mouseCapture ?? this.mousePressTarget!;
 				if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
@@ -1488,12 +1509,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionAnchor = range?.start ?? anchor;
 		this.selectionFocus = range?.end ?? anchor;
 		this.selectionDragged = false;
-		this.pressedUrl = range
-			? undefined
-			: getOsc8LinkAtColumn(
-					this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
-					Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
-				);
+		this.pressedUrl =
+			range || (this.linkOpenModifier === "ctrl" && (event.button & 16) === 0)
+				? undefined
+				: getOsc8LinkAtColumn(
+						this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
+						Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
+					);
 		this.requestRender();
 	}
 
@@ -1799,7 +1821,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeFlashes(screen, width, height);
 
 		const cursorPos = this.extractCursorPosition(screen, height);
-		screen = this.applyLineResets(screen).map((line) => {
+		screen = this.applyLineResets(screen, width).map((line) => {
 			if (isImageLine(line) || visibleWidth(line) <= width) return line;
 			return sliceByColumn(line, 0, width, true);
 		});

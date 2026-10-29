@@ -1294,6 +1294,7 @@ describe("TuiAltScreen", () => {
 		const openedUrls: string[] = [];
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
 			openUrl: (url) => openedUrls.push(url),
+			linkOpenModifier: "none",
 		});
 		const url = "https://example.com/path?q=1";
 		const belUrl = "https://example.com/bel";

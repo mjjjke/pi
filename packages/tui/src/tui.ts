@@ -14,6 +14,7 @@ import {
 	type TerminalColors,
 } from "./terminal-colors.ts";
 import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
+import { type LinkPolicy, TerminalLinkFilter, webLinkPolicy } from "./terminal-links.ts";
 import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
 
 /**
@@ -480,6 +481,7 @@ export interface TUI extends Component {
 	setShowHardwareCursor(enabled: boolean): void;
 	getClearOnShrink(): boolean;
 	setClearOnShrink(enabled: boolean): void;
+	setLinkPolicy(policy: LinkPolicy): void;
 	setFocus(component: Component | null): void;
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle;
 	hideOverlay(): void;
@@ -512,6 +514,14 @@ export function isViewportTUI(tui: TUI): tui is ViewportTUI {
 }
 
 export abstract class TuiBase extends Container implements TUI {
+	private readonly terminalLinkFilter = new TerminalLinkFilter();
+	private linkPolicy: LinkPolicy = webLinkPolicy;
+
+	setLinkPolicy(policy: LinkPolicy): void {
+		this.linkPolicy = policy;
+		this.invalidate();
+		this.requestRender();
+	}
 	abstract readonly mode: TuiMode;
 	public terminal: Terminal;
 	private focusedComponent: Component | null = null;
@@ -1466,7 +1476,8 @@ export abstract class TuiBase extends Container implements TUI {
 		return result;
 	}
 
-	protected applyLineResets(lines: string[]): string[] {
+	protected applyLineResets(lines: string[], width: number): string[] {
+		lines = this.terminalLinkFilter.filter(lines, this.linkPolicy, width);
 		const reset = SEGMENT_RESET;
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];

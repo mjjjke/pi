@@ -1,6 +1,7 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
+import { type LinkPolicy, sanitizeTerminalText, webLinkPolicy } from "../terminal-links.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
@@ -218,6 +219,10 @@ export interface MarkdownTheme {
 }
 
 export interface MarkdownOptions {
+	/** Trusted callers may deliberately embed terminal sequences. Default: false. */
+	allowTerminalSequences?: boolean;
+	/** Authorize and rebuild explicit link targets. A refusal renders plain text. */
+	linkPolicy?: LinkPolicy;
 	/** Preserve source list markers instead of normalizing them. */
 	preserveOrderedListMarkers?: boolean;
 	/** Preserve source backslash escapes instead of normalizing escaped punctuation. */
@@ -259,7 +264,7 @@ export class Markdown implements Component {
 		defaultTextStyle?: DefaultTextStyle,
 		options?: MarkdownOptions,
 	) {
-		this.text = text;
+		this.text = options?.allowTerminalSequences ? text : sanitizeTerminalText(text);
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.theme = theme;
@@ -268,7 +273,7 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): void {
-		this.text = text;
+		this.text = this.options.allowTerminalSequences ? text : sanitizeTerminalText(text);
 		this.invalidate();
 	}
 
@@ -286,7 +291,8 @@ export class Markdown implements Component {
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
-		const text = this.options.transform?.(this.text, contentWidth) ?? this.text;
+		const transformed = this.options.transform?.(this.text, contentWidth) ?? this.text;
+		const text = this.options.allowTerminalSequences ? transformed : sanitizeTerminalText(transformed);
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
@@ -698,11 +704,16 @@ export class Markdown implements Component {
 
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					const target = (this.options.linkPolicy ?? webLinkPolicy)(token.href);
+					if (!target) {
+						result += linkText;
+						break;
+					}
 					const styledLink = this.theme.link(this.theme.underline(linkText));
 					if (getCapabilities().hyperlinks) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.
-						result += hyperlink(styledLink, token.href) + stylePrefix;
+						result += hyperlink(styledLink, target) + stylePrefix;
 					} else {
 						// Fallback: print URL in parentheses when text differs from href.
 						// Compare raw token.text (not styled) against href for the equality check.
