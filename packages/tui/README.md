@@ -795,6 +795,23 @@ const lines = wrapTextWithAnsi("This is a long line that needs wrapping", 20);
 // ["This is a long line", "that needs wrapping"]
 ```
 
+OSC 8 links without an explicit ID receive an occurrence ID before wrapping. Framework rendering supplies a retained component-owner namespace, so uncached custom components stay distinct across renders, width changes and trailing text updates. Standalone utility calls outside framework rendering use a stable shared fallback. Supply an explicit retained prefix to isolate standalone sources, or to make a source independent of the order of wrapping calls within a component:
+
+```typescript
+class LinkedText implements Component {
+  private readonly linkIdPrefix = allocateLinkId(); // import from @earendil-works/pi-tui
+  text = "";
+
+  render(width: number): string[] {
+    return wrapTextWithAnsi(this.text, width, this.linkIdPrefix);
+  }
+
+  invalidate(): void {}
+}
+```
+
+Do not allocate the prefix inside `render()`. For reconstructed `Markdown` children, pass a retained per-owner/per-block prefix through `MarkdownOptions.linkIdPrefix`. Existing explicit OSC 8 IDs are preserved.
+
 ## Creating Custom Components
 
 When creating custom components, **each line returned by `render()` must not exceed the `width` parameter**. The TUI will error if any line is wider than the terminal.

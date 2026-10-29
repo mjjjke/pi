@@ -1,3 +1,4 @@
+import { renderComponent } from "../link-identity.ts";
 import { compositeTuiLine } from "../tui.ts";
 import { visibleWidth } from "../utils.ts";
 import { allocateStackSizes, Stack, type StackChild, type StackOptions, visibleStackEntries } from "./stack.ts";
@@ -16,12 +17,12 @@ export class HStack extends Stack {
 		if (entries.length === 0) return [];
 
 		const intrinsicWidths = entries.map((entry) => {
-			const lines = entry.component.render(safeWidth);
+			const lines = renderComponent(entry.component, safeWidth);
 			return lines.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 		});
 		const widths = allocateStackSizes(entries, intrinsicWidths, safeWidth, this.gap);
 		const rendered = entries.map((entry, index) =>
-			widths[index] === 0 ? [] : entry.component.render(widths[index]!),
+			widths[index] === 0 ? [] : renderComponent(entry.component, widths[index]!),
 		);
 		const height = rendered.reduce((max, lines) => Math.max(max, lines.length), 0);
 		const result = Array.from({ length: height }, () => "");

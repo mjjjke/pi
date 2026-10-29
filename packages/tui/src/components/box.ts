@@ -1,3 +1,4 @@
+import { renderComponent } from "../link-identity.ts";
 import { recordMouseLayout } from "../mouse-layout.ts";
 import {
 	type Component,
@@ -93,7 +94,10 @@ export class Box implements Component {
 		const mouseChildren =
 			this.mouseLayout?.width === contentWidth
 				? this.mouseLayout.children
-				: this.children.map((component) => ({ component, height: component.render(contentWidth).length }));
+				: this.children.map((component) => ({
+						component,
+						height: renderComponent(component, contentWidth).length,
+					}));
 		let childY = 0;
 		for (const { component: child, height: childHeight } of mouseChildren) {
 			if (contentY >= childY && contentY < childY + childHeight) {
@@ -127,7 +131,7 @@ export class Box implements Component {
 		const mouseTargets: TuiMouseDispatchTarget[] = [];
 		for (const child of this.children) {
 			const originY = this.paddingY + childLines.length;
-			const lines = child.render(contentWidth);
+			const lines = renderComponent(child, contentWidth);
 			mouseTargets.push({
 				component: child,
 				originX: this.paddingX,

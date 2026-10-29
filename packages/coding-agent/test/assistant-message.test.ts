@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { TuiMouseEvent } from "@earendil-works/pi-tui";
+import { getOsc8LinkAtColumn, setCapabilities, TuiAltScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { getProgressUpdateIndices } from "../src/modes/interactive/components/progress-update.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
@@ -35,6 +36,56 @@ function createAssistantMessage(
 }
 
 describe("AssistantMessageComponent", () => {
+	test.each([1, 2])(
+		"stationary hover survives streaming tails, invalidation and separate owners (blocks=%s)",
+		(blocks) => {
+			initTheme("dark");
+			setCapabilities({ images: null, hyperlinks: true, trueColor: true });
+			const url = "https://ok.test/";
+			const source = `[abcdefghijklmnop](${url}) tail`;
+			const content = (tail = ""): AssistantMessage["content"] =>
+				Array.from({ length: blocks }, (_, index) => ({
+					type: "text",
+					text: source + (index === blocks - 1 ? tail : ""),
+				}));
+			const message = createAssistantMessage(content());
+			const component = new AssistantMessageComponent(message);
+			const other = new AssistantMessageComponent(message);
+			const terminal = new VirtualTerminal(12, 16);
+			const opened: string[] = [];
+			const tui = new TuiAltScreen(terminal, false, process.env.PI_SCRATCH_DIR, {
+				copyOnSelect: false,
+				openUrl: (target) => opened.push(target),
+			});
+			tui.addChild(component);
+			tui.start();
+			try {
+				tui.renderNow();
+				const original = tui.getScreenLines();
+				const row = original.findIndex((line) => getOsc8LinkAtColumn(line, 1)?.url === url);
+				const identity = getOsc8LinkAtColumn(original[row], 1);
+				expect(identity?.id).toBeTruthy();
+				expect(getOsc8LinkAtColumn(other.render(12)[row], 1)?.id).not.toBe(identity?.id);
+				terminal.sendInput(`\x1b[<35;2;${row + 1}M`);
+				tui.renderNow();
+				expect(tui.getScreenLines()[row]).toContain("\x1b[7m");
+				for (const tail of [" more", " more again"]) {
+					component.updateContent(createAssistantMessage(content(tail)), true);
+					tui.renderNow();
+					expect(getOsc8LinkAtColumn(tui.getScreenLines()[row], 1)).toEqual(identity);
+					expect(tui.getScreenLines()[row]).toContain("\x1b[7m");
+					component.invalidate();
+					tui.renderNow();
+					expect(tui.getScreenLines()[row]).toContain("\x1b[7m");
+				}
+				terminal.sendInput(`\x1b[<16;2;${row + 1}M`);
+				terminal.sendInput(`\x1b[<16;2;${row + 1}m`);
+				expect(opened).toEqual([url]);
+			} finally {
+				tui.stop({ preserveScreen: true });
+			}
+		},
+	);
 	test("adds OSC 133 zone markers to assistant messages without tool calls", () => {
 		initTheme("dark");
 

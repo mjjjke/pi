@@ -1,5 +1,7 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
+import { renderComponent } from "../link-identity.ts";
+import { allocateLinkId } from "../terminal-image.ts";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
@@ -46,6 +48,7 @@ export class SettingsList implements Component {
 	private onCancel: () => void;
 	private searchInput?: Input;
 	private searchEnabled: boolean;
+	private readonly wrapLinkId = allocateLinkId();
 
 	// Submenu state
 	private submenuComponent: Component | null = null;
@@ -96,7 +99,7 @@ export class SettingsList implements Component {
 	render(width: number): string[] {
 		// If submenu is active, render it instead
 		if (this.submenuComponent) {
-			return this.submenuComponent.render(width);
+			return renderComponent(this.submenuComponent, width);
 		}
 
 		return this.renderMainList(width);
@@ -164,7 +167,11 @@ export class SettingsList implements Component {
 		const selectedItem = displayItems[this.selectedIndex];
 		if (selectedItem?.description) {
 			lines.push("");
-			const wrappedDesc = wrapTextWithAnsi(selectedItem.description, width - 4);
+			const wrappedDesc = wrapTextWithAnsi(
+				selectedItem.description,
+				width - 4,
+				`${this.wrapLinkId}-${this.items.indexOf(selectedItem)}`,
+			);
 			for (const line of wrappedDesc) {
 				lines.push(this.theme.description(`  ${line}`));
 			}

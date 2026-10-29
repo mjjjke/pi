@@ -18,6 +18,7 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { renderComponent } from "./link-identity.ts";
 import { getRenderedMouseTarget, recordMouseLayout } from "./mouse-layout.ts";
 import type { Terminal } from "./terminal.ts";
 import {
@@ -53,6 +54,7 @@ import {
 	extractAnsiCode,
 	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
+	getOsc8LinkRangeAtColumn,
 	getWordSegmenter,
 	type Osc8Link,
 	sliceByColumn,
@@ -353,7 +355,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	override render(width: number): string[] {
-		return this.layoutRoot?.render(width) ?? super.render(width);
+		return this.layoutRoot ? renderComponent(this.layoutRoot, width) : super.render(width);
 	}
 
 	protected override getMountedRoots(): readonly Component[] {
@@ -718,21 +720,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private updateLinkHover(x: number, y: number): void {
-		// Activation and hover both hit-test the final composited frame.
-		const link = getOsc8LinkAtColumn(this.previousScreen[y] ?? "", x);
-		let next: typeof this.hoveredLink;
-		if (link) {
-			let start = x;
-			let end = x + 1;
-			const line = this.previousScreen[y] ?? "";
-			const matches = (column: number) => {
-				const candidate = getOsc8LinkAtColumn(line, column);
-				return candidate?.url === link.url && candidate?.id === link.id;
-			};
-			while (start > 0 && matches(start - 1)) start--;
-			while (end < this.terminal.columns && matches(end)) end++;
-			next = { ...link, row: y, start, end };
-		}
+		// Use the final composited, unpainted frame for both activation and hover.
+		const hit = getOsc8LinkRangeAtColumn(this.linkScreen[y] ?? "", x);
+		const next = hit ? { ...hit.link, row: y, start: hit.start, end: hit.end } : undefined;
 		const previous = this.hoveredLink;
 		if (
 			previous?.url === next?.url &&
@@ -754,16 +744,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// Background animation usually changes other rows; avoid parsing the link row then.
 		if (line !== undefined && line === this.linkScreen[hovered.row]) return true;
 		if (line === undefined || isImageLine(line)) return false;
-		const matches = (column: number) => {
-			const link = getOsc8LinkAtColumn(line, column);
-			return link?.url === hovered.url && link?.id === hovered.id;
-		};
+		const hit = getOsc8LinkRangeAtColumn(line, hovered.start);
 		// The same URL/id must still occupy exactly the original hit region.
-		if (matches(hovered.start - 1) || matches(hovered.end)) return false;
-		for (let column = hovered.start; column < hovered.end; column++) {
-			if (!matches(column)) return false;
-		}
-		return true;
+		return (
+			hit?.link.url === hovered.url &&
+			hit?.link.id === hovered.id &&
+			hit?.start === hovered.start &&
+			hit?.end === hovered.end
+		);
 	}
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
@@ -1086,7 +1074,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				(type === "press" &&
 					(raw.button & 3) === 0 &&
 					(this.linkOpenModifier === "none" || event.ctrl) &&
-					getOsc8LinkAtColumn(this.previousScreen[raw.y] ?? "", raw.x))
+					getOsc8LinkAtColumn(this.linkScreen[raw.y] ?? "", raw.x))
 			) {
 				this.handleSelectionMouseEvent(raw);
 				return;
@@ -1595,8 +1583,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);
 		const word = this.getWordSelection(anchor);
-		const modifiedLink =
-			(event.button & 16) !== 0 && getOsc8LinkAtColumn(this.previousScreen[event.y] ?? "", event.x);
+		const modifiedLink = (event.button & 16) !== 0 && getOsc8LinkAtColumn(this.linkScreen[event.y] ?? "", event.x);
 		const clickCount = modifiedLink ? 1 : this.getClickCount(anchor, word);
 		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
@@ -1608,7 +1595,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			range || (this.linkOpenModifier === "ctrl" && (event.button & 16) === 0)
 				? undefined
 				: getOsc8LinkAtColumn(
-						this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
+						this.linkScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
 						Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
 					)?.url;
 		this.requestRender();

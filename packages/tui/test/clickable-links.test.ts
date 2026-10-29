@@ -295,7 +295,7 @@ test("hover leaves explicit underline styles intact and restores the original ba
 	const emphasized = underlineOsc8Link(explicit, { url: "https://ok.test/", id: "a" });
 	assert.match(emphasized, /\x1b\[7m/);
 	assert.doesNotMatch(emphasized, /\x1b\[4m|\x1b\[24m/);
-	assert.match(emphasized, /\x1b\[7ma\x1b\[4:3m\x1b\[27m/);
+	assert.match(emphasized, /\x1b\[7mabc\x1b\[4:3m\x1b\[27m/);
 	const background = `\x1b[48;2;12;34;56m${linkTo("abc", "https://ok.test/", { id: "a" })} plain`;
 	const painted = underlineOsc8Link(background, { url: "https://ok.test/", id: "a" });
 	assert.match(painted, /\x1b\[24m\x1b\[27m/);

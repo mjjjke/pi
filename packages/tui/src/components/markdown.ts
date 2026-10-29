@@ -3,7 +3,7 @@ import { renderLatex } from "../latex.ts";
 import { allocateLinkId, getCapabilities, isImageLine, linkTo } from "../terminal-image.ts";
 import { type LinkPolicy, sanitizeTerminalText, webLinkPolicy } from "../terminal-links.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import { applyBackgroundToLine, assignOsc8LinkIds, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -233,6 +233,8 @@ export function setMarkdownLinkOptions(options: Pick<MarkdownOptions, "linkPolic
 }
 
 export interface MarkdownOptions {
+	/** Retained source-owner namespace when reconstructing a Markdown component (e.g. a streaming message block). */
+	linkIdPrefix?: string;
 	/** Defer bare links in the trailing non-whitespace token while more text may arrive. */
 	streaming?: boolean;
 	/** Return authorized display-only links in text/codespans, not explicit links or fenced code. */
@@ -264,8 +266,8 @@ export class Markdown implements Component {
 	private theme: MarkdownTheme;
 	private options: MarkdownOptions;
 	private defaultStylePrefix?: string;
-	private readonly linkPrefix = allocateLinkId();
-	private linkIndex = 0;
+	private readonly linkPrefix: string;
+	private sourceIndices = new WeakMap<Token, number>();
 	private renderedLinkOptionsVersion = -1;
 	private insideLink = false;
 	private pendingBareLinks = new WeakSet<Token>();
@@ -288,6 +290,7 @@ export class Markdown implements Component {
 		defaultTextStyle?: DefaultTextStyle,
 		options?: MarkdownOptions,
 	) {
+		this.linkPrefix = options?.linkIdPrefix ?? allocateLinkId();
 		this.text = options?.allowTerminalSequences ? text : sanitizeTerminalText(text);
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
@@ -312,7 +315,6 @@ export class Markdown implements Component {
 			this.invalidate();
 			this.renderedLinkOptionsVersion = linkOptionsVersion;
 		}
-		this.linkIndex = 0;
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
 			return this.cachedLines;
@@ -334,7 +336,7 @@ export class Markdown implements Component {
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = text.replace(/\t/g, "   ");
+		const normalizedText = assignOsc8LinkIds(text.replace(/\t/g, "   "), `${this.linkPrefix}-raw`);
 
 		// Parse markdown to HTML-like tokens
 		const cached = this.cachedTokens?.deref();
@@ -344,6 +346,14 @@ export class Markdown implements Component {
 			trimPartialClosingFences(tokens);
 			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
 		}
+
+		// Allocate identities from source order before layout. Table sizing renders
+		// cells more than once; render-time counters would renumber unchanged links.
+		this.sourceIndices = new WeakMap<Token, number>();
+		let sourceIndex = 0;
+		markdownParser.walkTokens(tokens, (token) => {
+			this.sourceIndices.set(token, sourceIndex++);
+		});
 
 		this.pendingBareLinks = new WeakSet<Token>();
 		this.pendingDiscoveries = new WeakSet<Token>();
@@ -710,6 +720,7 @@ export class Markdown implements Component {
 	}
 
 	private linkifyText(
+		token: Token,
 		text: string,
 		kind: "text" | "codespan",
 		style: (text: string) => string,
@@ -719,13 +730,16 @@ export class Markdown implements Component {
 		if (this.insideLink || !linkify || !getCapabilities().hyperlinks) return style(text);
 		let result = "";
 		let offset = 0;
+		let occurrence = 0;
 		for (const span of linkify(text, kind)) {
 			if (span.start < offset || span.end <= span.start || span.end > text.length) continue;
 			if (pending && !/\s/.test(text.slice(span.end))) continue;
 			result += style(text.slice(offset, span.start));
 			const target = span.target; // linkify authorizes discoveries; the output sink still checks every emitted target.
 			const label = style(text.slice(span.start, span.end));
-			result += target ? linkTo(label, target, { id: `${this.linkPrefix}-${this.linkIndex++}` }) : label;
+			result += target
+				? linkTo(label, target, { id: `${this.linkPrefix}-${this.sourceIndices.get(token)}-${occurrence++}` })
+				: label;
 			offset = span.end;
 		}
 		return result + style(text.slice(offset));
@@ -762,6 +776,7 @@ export class Markdown implements Component {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
 						result += this.linkifyText(
+							token,
 							token.text,
 							"text",
 							applyTextWithNewlines,
@@ -789,7 +804,7 @@ export class Markdown implements Component {
 
 				case "codespan":
 					result +=
-						this.linkifyText(token.text, "codespan", this.theme.code, this.pendingDiscoveries.has(token)) +
+						this.linkifyText(token, token.text, "codespan", this.theme.code, this.pendingDiscoveries.has(token)) +
 						stylePrefix;
 					break;
 
@@ -810,7 +825,9 @@ export class Markdown implements Component {
 					if (getCapabilities().hyperlinks) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
 						// so we always show only the link text regardless of whether it matches href.
-						result += linkTo(styledLink, target, { id: `${this.linkPrefix}-${this.linkIndex++}` }) + stylePrefix;
+						result +=
+							linkTo(styledLink, target, { id: `${this.linkPrefix}-${this.sourceIndices.get(token)}` }) +
+							stylePrefix;
 					} else {
 						// Fallback: print URL in parentheses when text differs from href.
 						// Compare raw token.text (not styled) against href for the equality check.

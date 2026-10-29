@@ -4,6 +4,7 @@
 
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
+import { renderComponent } from "./link-identity.ts";
 import { recordMouseLayout } from "./mouse-layout.ts";
 import type { Terminal } from "./terminal.ts";
 import {
@@ -388,7 +389,7 @@ export class Container implements Component {
 		const mouseChildren =
 			this.mouseLayout?.width === event.width
 				? this.mouseLayout.children
-				: this.children.map((component) => ({ component, height: component.render(event.width).length }));
+				: this.children.map((component) => ({ component, height: renderComponent(component, event.width).length }));
 		let childY = 0;
 		for (const { component: child, height: childHeight } of mouseChildren) {
 			if (event.y >= childY && event.y < childY + childHeight) {
@@ -411,7 +412,7 @@ export class Container implements Component {
 		const mouseTargets: TuiMouseDispatchTarget[] = [];
 		for (const child of this.children) {
 			const originY = lines.length;
-			const childLines = child.render(width);
+			const childLines = renderComponent(child, width);
 			mouseChildren.push({ component: child, height: childLines.length });
 			mouseTargets.push({ component: child, originX: 0, originY, width, height: childLines.length });
 			for (const line of childLines) {
@@ -1425,7 +1426,7 @@ export abstract class TuiBase extends Container implements TUI {
 			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
 
 			// Render component at calculated width
-			let overlayLines = this.resolveFakeCursors(component.render(width));
+			let overlayLines = this.resolveFakeCursors(renderComponent(component, width));
 
 			// Apply maxHeight if specified
 			if (maxHeight !== undefined && overlayLines.length > maxHeight) {

@@ -1,4 +1,5 @@
 import { eastAsianWidth } from "get-east-asian-width";
+import { getDefaultWrapLinkPrefix } from "./link-identity.ts";
 
 // segmenters (shared instance)
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -362,30 +363,53 @@ export interface Osc8Link {
 }
 
 export function getOsc8LinkAtColumn(line: string, column: number): Osc8Link | undefined {
-	let activeUrl: Osc8Link | undefined;
+	return getOsc8LinkRangeAtColumn(line, column)?.link;
+}
+
+/** Find the complete contiguous hit region in one scan of an unpainted composited row. */
+export function getOsc8LinkRangeAtColumn(
+	line: string,
+	column: number,
+): { link: Osc8Link; start: number; end: number } | undefined {
+	if (column < 0 || !line.includes("\x1b]8;")) return undefined;
+	let active: Osc8Link | undefined;
+	let run: { link: Osc8Link; start: number; end: number } | undefined;
 	let currentCol = 0;
 	let i = 0;
 	while (i < line.length) {
 		const ansi = extractAnsiCode(line, i);
 		if (ansi) {
-			const hyperlink = /^\x1b\]8;([^;]*);([^\x07\x1b]*)(?:\x07|\x1b\\)$/.exec(ansi.code);
-			if (hyperlink)
-				activeUrl = hyperlink[2]
-					? { url: hyperlink[2], ...(hyperlink[1].startsWith("id=") ? { id: hyperlink[1].slice(3) } : {}) }
-					: undefined;
+			const parsed = parseOsc8Hyperlink(ansi.code);
+			if (parsed !== undefined) active = parsed ? { url: parsed.url, id: getOsc8Id(parsed.params) } : undefined;
 			i += ansi.length;
 			continue;
 		}
-		let textEnd = i;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
-		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
-			const width = segment === "\t" ? 3 : graphemeWidth(segment);
-			if (column >= currentCol && column < currentCol + width) return activeUrl;
+		let end = line.indexOf("\x1b", i);
+		if (end < 0) end = line.length;
+		// An unsupported ESC is visible input, not a recognized sequence.
+		if (end === i) end++;
+		const width = visibleWidth(line.slice(i, end));
+		if (width > 0) {
+			if (run && (run.link.url !== active?.url || run.link.id !== active?.id)) {
+				if (column >= run.start && column < run.end) return run;
+				run = undefined;
+			}
+			if (active) run = { link: active, start: run?.start ?? currentCol, end: currentCol + width };
+			else if (column >= currentCol && column < currentCol + width) return undefined;
 			currentCol += width;
 		}
-		i = textEnd;
+		i = end;
 	}
-	return undefined;
+	return run && column >= run.start && column < run.end ? run : undefined;
+}
+
+function getOsc8Id(params: string): string | undefined {
+	return (
+		params
+			.split(":")
+			.find((param) => param.startsWith("id="))
+			?.slice(3) || undefined
+	);
 }
 
 /**
@@ -548,6 +572,44 @@ function getActiveOsc8Close(prefix: string): string {
 }
 
 /**
+ * Decode an extended color as one grammar production, including mixed semicolon/
+ * colon forms and omitted operands. The six fields are target, mode, color space,
+ * and three channels; semicolon forms omit the color-space field (as in xterm).
+ */
+function readSgrColor(parts: string[], start: number): { next: number; color?: string } {
+	const fields = [0, 0, 0, 0, 0, 0];
+	let index = start;
+	let field = 0;
+	let omitColorSpace = false;
+	while (true) {
+		const values = parts[index].split(":");
+		fields[field] = Number(values[0] || "0");
+		if (values.length > 1) {
+			for (let sub = 1; sub < values.length; sub++) {
+				if (fields[1] === 5) omitColorSpace = true;
+				const destination = index - start + sub + (omitColorSpace ? 1 : 0);
+				if (destination >= fields.length) break;
+				fields[destination] = Number(values[sub] || "0");
+			}
+			break;
+		}
+		if ((fields[1] === 5 && field >= 2) || (fields[1] === 2 && field >= 5)) break;
+		if (fields[1]) omitColorSpace = true;
+		index++;
+		field = index - start + (omitColorSpace ? 1 : 0);
+		if (index >= parts.length || field >= fields.length) break;
+	}
+	const next = index + 1;
+	if (fields[1] !== 2 && fields[1] !== 5) return { next };
+	// A colon group is already self-contained. Canonicalize other forms so a
+	// missing operand cannot consume a following attribute in reconstructed state.
+	const color = parts[start].includes(":")
+		? parts[start]
+		: `${fields[0]};${fields[1]};${(fields[1] === 5 ? [fields[3]] : fields.slice(3)).map((channel) => channel & 255).join(";")}`;
+	return { next, color };
+}
+
+/**
  * Track active ANSI SGR codes to preserve styling across line breaks.
  */
 class AnsiCodeTracker {
@@ -560,6 +622,7 @@ class AnsiCodeTracker {
 	private inverse = false;
 	private hidden = false;
 	private strikethrough = false;
+	private overline = false;
 	private fgColor: string | null = null; // Stores the full code like "31" or "38;5;240"
 	private bgColor: string | null = null; // Stores the full code like "41" or "48;5;240"
 	private underlineColor: string | null = null;
@@ -595,17 +658,19 @@ class AnsiCodeTracker {
 		const parts = params.split(";");
 		let i = 0;
 		while (i < parts.length) {
-			const code = Number.parseInt(parts[i], 10);
+			// Empty top-level parameters mean reset; color operands are consumed atomically.
+			const code = Number.parseInt(parts[i].split(":")[0] || "0", 10);
 
 			// Extended colors are one attribute, not SGR commands for each channel.
 			// This includes underline color (58), whose channel values can be 0/4/7.
 			if (code === 38 || code === 48 || code === 58) {
-				const count = parts[i].includes(":") ? 1 : parts[i + 1] === "5" ? 3 : parts[i + 1] === "2" ? 5 : 1;
-				const color = parts.slice(i, i + count).join(";");
-				if (code === 38) this.fgColor = color;
-				else if (code === 48) this.bgColor = color;
-				else this.underlineColor = color;
-				i += count;
+				const { color, next } = readSgrColor(parts, i);
+				if (color) {
+					if (code === 38) this.fgColor = color;
+					else if (code === 48) this.bgColor = color;
+					else this.underlineColor = color;
+				}
+				i = next;
 				continue;
 			}
 
@@ -623,9 +688,11 @@ class AnsiCodeTracker {
 				case 3:
 					this.italic = true;
 					break;
-				case 4:
-					this.underline = parts[i] === "4:0" ? null : parts[i];
+				case 4: {
+					const style = Number.parseInt(parts[i].split(":")[1] ?? "1", 10);
+					this.underline = style === 0 ? null : style >= 2 && style <= 5 ? `4:${style}` : "4";
 					break;
+				}
 				case 5:
 					this.blink = true;
 					break;
@@ -639,8 +706,8 @@ class AnsiCodeTracker {
 					this.strikethrough = true;
 					break;
 				case 21:
-					this.bold = false;
-					break; // Some terminals
+					this.underline = "21";
+					break;
 				case 22:
 					this.bold = false;
 					this.dim = false;
@@ -669,8 +736,15 @@ class AnsiCodeTracker {
 				case 49:
 					this.bgColor = null;
 					break; // Default bg
+				case 53:
+					this.overline = true;
+					break;
+				case 55:
+					this.overline = false;
+					break;
 				case 59:
-					this.underlineColor = null;
+					// Preserve an explicit default-color reset when reconstructing state.
+					this.underlineColor = "59";
 					break;
 				default:
 					// Standard foreground colors 30-37, 90-97
@@ -696,6 +770,7 @@ class AnsiCodeTracker {
 		this.inverse = false;
 		this.hidden = false;
 		this.strikethrough = false;
+		this.overline = false;
 		this.fgColor = null;
 		this.bgColor = null;
 		this.underlineColor = null;
@@ -718,6 +793,7 @@ class AnsiCodeTracker {
 		if (this.inverse) codes.push("7");
 		if (this.hidden) codes.push("8");
 		if (this.strikethrough) codes.push("9");
+		if (this.overline) codes.push("53");
 		if (this.fgColor) codes.push(this.fgColor);
 		if (this.bgColor) codes.push(this.bgColor);
 		if (this.underlineColor) codes.push(this.underlineColor);
@@ -752,6 +828,7 @@ class AnsiCodeTracker {
 			this.inverse ||
 			this.hidden ||
 			this.strikethrough ||
+			this.overline ||
 			this.fgColor !== null ||
 			this.bgColor !== null ||
 			this.underlineColor !== null ||
@@ -906,21 +983,12 @@ export function flattenLines(lines: readonly string[]): void {
 	for (const line of lines) Number(line);
 }
 
-let nextWrapLinkId = 0;
-
-/**
- * Wrap styled text, assigning id-less OSC 8 opens an identity before splitting.
- * Callers that re-wrap changing source should retain a unique linkIdPrefix per component.
- */
-export function wrapTextWithAnsi(text: string, width: number, linkIdPrefix?: string): string[] {
-	if (!text) {
-		return [""];
-	}
-
+/** Assign owner-scoped source occurrence identities before any layout or wrapping. */
+export function assignOsc8LinkIds(text: string, linkIdPrefix: string): string {
 	// Each source open gets its own identity, never a URL-derived identity. Preserve
 	// existing IDs and terminators; continuation opens inherit the assigned ID.
 	if (text.includes("\x1b]8;;")) {
-		const prefix = linkIdPrefix ?? `pi-wrap-${++nextWrapLinkId}`;
+		const prefix = linkIdPrefix;
 		let occurrence = 0;
 		let identified = "";
 		let copied = 0;
@@ -940,6 +1008,19 @@ export function wrapTextWithAnsi(text: string, width: number, linkIdPrefix?: str
 		}
 		text = identified + text.slice(copied);
 	}
+
+	return text;
+}
+
+/**
+ * Wrap styled text, assigning id-less OSC 8 opens an identity before splitting.
+ * Framework renders default to a retained component-owner namespace. Outside a
+ * framework render the default is deterministic; independent sources must supply
+ * their own retained prefix (allocateLinkId), never a new prefix on each call.
+ */
+export function wrapTextWithAnsi(text: string, width: number, linkIdPrefix?: string): string[] {
+	if (!text) return [""];
+	if (text.includes("\x1b]8;;")) text = assignOsc8LinkIds(text, linkIdPrefix ?? getDefaultWrapLinkPrefix());
 
 	// Handle newlines by processing each line separately
 	// Track ANSI state across lines so styles carry over after literal newlines
@@ -1049,15 +1130,16 @@ export function underlineOsc8Link(line: string, link: Osc8Link, range?: { start:
 	let result = "";
 	let column = 0;
 	let i = 0;
+	let hoverEnd = "";
 	while (i < line.length) {
 		const ansi = extractAnsiCode(line, i);
 		if (ansi) {
+			// End a uniform painted run before processing original style transitions.
+			result += hoverEnd;
+			hoverEnd = "";
 			tracker.process(ansi.code);
 			const parsed = parseOsc8Hyperlink(ansi.code);
-			if (parsed !== undefined)
-				active = parsed
-					? { url: parsed.url, id: parsed.params.startsWith("id=") ? parsed.params.slice(3) : undefined }
-					: undefined;
+			if (parsed !== undefined) active = parsed ? { url: parsed.url, id: getOsc8Id(parsed.params) } : undefined;
 			result += ansi.code;
 			i += ansi.length;
 			continue;
@@ -1070,15 +1152,20 @@ export function underlineOsc8Link(line: string, link: Osc8Link, range?: { start:
 				active?.url === link.url &&
 				active?.id === link.id &&
 				(!range || (column >= range.start && column < range.end));
-			if (selected) {
+			if (selected && !hoverEnd) {
 				const hover = tracker.getLinkHoverCodes();
-				result += `${hover.start}${segment}${hover.end}`;
-			} else result += segment;
+				result += hover.start;
+				hoverEnd = hover.end;
+			} else if (!selected && hoverEnd) {
+				result += hoverEnd;
+				hoverEnd = "";
+			}
+			result += segment;
 			column += width;
 		}
 		i = end;
 	}
-	return result;
+	return result + hoverEnd;
 }
 
 export const PUNCTUATION_REGEX = /[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]/;

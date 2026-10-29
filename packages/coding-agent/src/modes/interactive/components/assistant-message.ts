@@ -1,5 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	allocateLinkId,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -23,6 +31,8 @@ export class AssistantMessageComponent extends Container {
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
+	// Message ownership survives Markdown reconstruction, invalidation and streaming tails.
+	private readonly linkIdPrefix = allocateLinkId();
 
 	constructor(
 		message?: AssistantMessage,
@@ -110,11 +120,13 @@ export class AssistantMessageComponent extends Container {
 		let thinkingRunIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
+			const linkIdPrefix = `${this.linkIdPrefix}-${i}`;
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(
 					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
+						linkIdPrefix,
 						streaming: this.isStreaming && i === message.content.length - 1 && !/\s$/.test(content.text),
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
@@ -125,6 +137,7 @@ export class AssistantMessageComponent extends Container {
 				// Progress updates are ordinary assistant text, always visible even with thinking hidden.
 				this.contentContainer.addChild(
 					new Markdown(text, this.outputPad, 0, this.markdownTheme, undefined, {
+						linkIdPrefix,
 						streaming: this.isStreaming && i === message.content.length - 1 && !/\s$/.test(content.thinking),
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
 					}),
@@ -168,6 +181,7 @@ export class AssistantMessageComponent extends Container {
 								italic: true,
 							},
 							{
+								linkIdPrefix,
 								streaming:
 									this.isStreaming &&
 									i === message.content.length - 1 &&

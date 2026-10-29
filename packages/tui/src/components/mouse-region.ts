@@ -1,3 +1,4 @@
+import { renderComponent } from "../link-identity.ts";
 import { recordMouseLayout } from "../mouse-layout.ts";
 import {
 	type Component,
@@ -20,7 +21,7 @@ export class MouseRegion implements Component {
 	}
 
 	render(width: number): string[] {
-		const lines = this.child.render(width);
+		const lines = renderComponent(this.child, width);
 		recordMouseLayout(this, [{ component: this.child, originX: 0, originY: 0, width, height: lines.length }]);
 		return lines;
 	}

@@ -1,3 +1,4 @@
+import { renderComponent } from "../link-identity.ts";
 import { allocateStackSizes, Stack, type StackChild, type StackOptions, visibleStackEntries } from "./stack.ts";
 
 export class VStack extends Stack {
@@ -10,7 +11,7 @@ export class VStack extends Stack {
 	override render(width: number): string[] {
 		const viewport = { width: Math.max(1, width), height: Number.MAX_SAFE_INTEGER };
 		const entries = visibleStackEntries(this.entries, viewport);
-		const rendered = entries.map((entry) => entry.component.render(viewport.width));
+		const rendered = entries.map((entry) => renderComponent(entry.component, viewport.width));
 		const sizes = allocateStackSizes(
 			entries,
 			rendered.map((lines) => lines.length),

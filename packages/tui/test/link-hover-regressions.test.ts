@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import xterm from "@xterm/headless";
+import { Box } from "../src/components/box.ts";
+import { HStack } from "../src/components/h-stack.ts";
+import { Markdown } from "../src/components/markdown.ts";
 import { MouseRegion } from "../src/components/mouse-region.ts";
+import { ScrollView } from "../src/components/scroll-view.ts";
+import { SettingsList } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
+import { VStack } from "../src/components/v-stack.ts";
 import { linkTo, setCapabilities } from "../src/terminal-image.ts";
-import { CURSOR_MARKER, renderFakeCursor } from "../src/tui.ts";
+import { Container, CURSOR_MARKER, renderFakeCursor } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import {
 	extractSegments,
@@ -257,6 +263,159 @@ for (const sgr of ["58;5;7", "58;2;0;7;0"]) {
 		}
 	});
 }
+
+test("uncached wrapping has stable default identities across renders, widths and tail updates", () => {
+	const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
+	const original = getOsc8LinkAtColumn(wrapTextWithAnsi(raw, 4)[0], 0);
+	for (const text of [raw, `${raw} tail`, `${raw} tail more`]) {
+		for (const width of [4, 8, 40]) {
+			assert.deepEqual(getOsc8LinkAtColumn(wrapTextWithAnsi(text, width)[0], 0), original);
+		}
+	}
+});
+
+test("uncached custom components get stable distinct default owner namespaces", async () => {
+	const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
+	const state = setup("", 4);
+	let source = raw;
+	const make = () => ({ render: (width: number) => wrapTextWithAnsi(source, width), invalidate() {} });
+	state.tui.addChild(make());
+	state.tui.addChild(make());
+	try {
+		state.tui.renderNow();
+		const original = state.tui.getScreenLines();
+		assert.notEqual(getOsc8LinkAtColumn(original[0], 0)?.id, getOsc8LinkAtColumn(original[2], 0)?.id);
+		await assertHover(state, 1, 1);
+		await assertHover(state, 1, 2);
+		await assertHover(state, 1, 3);
+		hover(state, 1, 1);
+		source += " tail";
+		state.tui.renderNow();
+		assert.equal(getOsc8LinkAtColumn(state.tui.getScreenLines()[0], 0)?.id, getOsc8LinkAtColumn(original[0], 0)?.id);
+		assert.match(state.tui.getScreenLines()[0], /\x1b\[7m/);
+	} finally {
+		state.tui.stop({ preserveScreen: true });
+	}
+});
+
+for (const boundary of ["box", "mouse", "scroll", "vertical", "horizontal", "layout", "overlay"] as const) {
+	test(`default wrapping ownership survives nested render boundary: ${boundary}`, async () => {
+		const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
+		const make = () => ({ render: (width: number) => wrapTextWithAnsi(raw, width), invalidate() {} });
+		const first = make(),
+			second = make();
+		const container = new Container();
+		container.addChild(first);
+		container.addChild(second);
+		const state = setup("", 20);
+		try {
+			if (boundary === "box") {
+				const box = new Box(0, 0);
+				box.addChild(first);
+				box.addChild(second);
+				state.tui.addChild(box);
+			} else if (boundary === "mouse") state.tui.addChild(new MouseRegion(container, () => undefined));
+			else if (boundary === "scroll") state.tui.addChild(new ScrollView(container));
+			else if (boundary === "vertical") state.tui.addChild(new VStack([first, second]));
+			else if (boundary === "horizontal") state.tui.addChild(new HStack([first, second]));
+			else if (boundary === "layout") state.tui.setLayoutRoot(new VStack([first, second]));
+			else state.tui.showOverlay(container, { row: 0, col: 0, width: 20 });
+			state.tui.renderNow();
+			const lines = state.tui.getScreenLines();
+			const ids = new Set(
+				lines.flatMap((line) =>
+					Array.from({ length: 20 }, (_, col) => getOsc8LinkAtColumn(line, col)?.id).filter(Boolean),
+				),
+			);
+			assert.equal(ids.size, 2);
+			await assertHover(state, 1, 1);
+		} finally {
+			state.tui.stop({ preserveScreen: true });
+		}
+	});
+}
+
+test("SettingsList description remains hoverable across uncached renders and distinct owners", async () => {
+	const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
+	const plain = (s: string) => s;
+	const make = () =>
+		new SettingsList(
+			[{ id: "one", label: "one", currentValue: "yes", description: raw }],
+			4,
+			{ label: plain, value: plain, description: plain, cursor: "> ", hint: plain },
+			() => {},
+			() => {},
+		);
+	const state = setup("", 12);
+	const first = make();
+	const second = make();
+	state.tui.addChild(first);
+	state.tui.addChild(second);
+	try {
+		state.tui.renderNow();
+		const original = state.tui.getScreenLines();
+		const row = original.findIndex((line) => getOsc8LinkAtColumn(line, 2)?.url === url);
+		const id = getOsc8LinkAtColumn(original[row], 2)?.id;
+		assert.ok(id);
+		assert.notEqual(getOsc8LinkAtColumn(second.render(12)[2], 2)?.id, id);
+		await assertHover(state, 3, row + 1);
+		hover(state, 3, row + 1);
+		first.invalidate();
+		state.tui.renderNow();
+		assert.match(state.tui.getScreenLines()[row], /\x1b\[7m/);
+	} finally {
+		state.tui.stop({ preserveScreen: true });
+	}
+});
+
+for (const sgr of ["7;", "4;", "21"]) {
+	test(`review SGR ${sgr} preserves the unlinked tail and explicit underline style`, async () => {
+		const state = setup(`\x1b[${sgr}m${link("abc")} tail\x1b[0m`);
+		try {
+			await assertHover(state);
+		} finally {
+			state.tui.stop({ preserveScreen: true });
+		}
+	});
+}
+
+test("Markdown table occurrences are allocated from source, not measurement passes", () => {
+	setCapabilities({ images: null, hyperlinks: true, trueColor: true });
+	const plain = (s: string) => s;
+	const markdownTheme = {
+		heading: plain,
+		link: plain,
+		linkUrl: plain,
+		code: plain,
+		codeBlock: plain,
+		codeBlockBorder: plain,
+		quote: plain,
+		quoteBorder: plain,
+		hr: plain,
+		listBullet: plain,
+		bold: plain,
+		italic: plain,
+		strikethrough: plain,
+		underline: plain,
+	};
+	const table = `| label |\n| --- |\n| [abcdefgh](${url}) |`;
+	const component = new Markdown(table, 0, 0, markdownTheme);
+	const ids = () =>
+		component.render(20).flatMap((line) => {
+			const links = Array.from({ length: 20 }, (_, col) => getOsc8LinkAtColumn(line, col)?.id).filter(Boolean);
+			return [...new Set(links)];
+		});
+	const original = ids()[0];
+	component.setText(`${table}\n| [another](${url}) |`);
+	assert.equal(ids()[0], original, "a later row must not renumber an earlier source occurrence");
+	assert.equal(new Set(ids()).size, 2);
+});
+
+test("uniform hover runs do not emit one restore/start pair per cell", () => {
+	const source = `\x1b[4m${link("x".repeat(240))}\x1b[24m`;
+	const painted = underlineOsc8Link(source, { url, id: "review" });
+	assert.ok(painted.length - source.length < 40);
+});
 
 test("all tracker consumers preserve underline colors atomically, including colon colors and SGR 59", async () => {
 	for (const color of [

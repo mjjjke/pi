@@ -1,4 +1,5 @@
 import { LAYOUT_NODE, type ScrollLayoutNode } from "../layout-node.ts";
+import { renderComponent } from "../link-identity.ts";
 import { type Component, Container } from "../tui.ts";
 
 export type ScrollViewScrollbar = "hidden" | "auto" | "always";
@@ -214,7 +215,7 @@ export class ScrollView extends Container {
 
 	override render(width: number): string[] {
 		const contentWidth = this.getContentWidth(width);
-		const lines = this.child.render(contentWidth);
+		const lines = renderComponent(this.child, contentWidth);
 		return contentWidth === width ? lines : lines.map((line) => `${line} `);
 	}
 
