@@ -1548,8 +1548,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);
 		const word = this.getWordSelection(anchor);
-		const clickCount =
-			this.linkOpenModifier === "none" || (event.button & 16) !== 0 ? 1 : this.getClickCount(anchor, word);
+		const modifiedLink =
+			(event.button & 16) !== 0 && getOsc8LinkAtColumn(this.previousScreen[event.y] ?? "", event.x);
+		const clickCount = modifiedLink ? 1 : this.getClickCount(anchor, word);
 		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
 		this.selectionInitialRange = range;

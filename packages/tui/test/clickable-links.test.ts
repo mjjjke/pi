@@ -159,6 +159,24 @@ test("ctrl links precede a tool row's click handler while plain clicks still exp
 	await terminal.flush();
 });
 
+test("the no-modifier fallback still permits ordinary double-click word selection", async () => {
+	const terminal = new VirtualTerminal(40, 5);
+	const tui = new TuiAltScreen(terminal, false, process.env.PI_SCRATCH_DIR, {
+		linkOpenModifier: "none",
+		copyOnSelect: false,
+	});
+	tui.addChild(new Text("selectable text", 0, 0));
+	tui.start();
+	tui.renderNow();
+	for (let i = 0; i < 2; i++) {
+		terminal.sendInput("\x1b[<0;2;1M");
+		terminal.sendInput("\x1b[<0;2;1m");
+	}
+	assert.equal(tui.hasActiveSelection(), true);
+	tui.stop();
+	await terminal.flush();
+});
+
 test("S1 protects regular differential output, fullscreen frames and direct exit", async () => {
 	for (const fullscreen of [false, true]) {
 		const terminal = new VirtualTerminal(80, 10);
