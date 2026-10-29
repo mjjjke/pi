@@ -1,4 +1,4 @@
-import { sliceByColumn } from "./utils.ts";
+import { sliceByColumn, supportedSgrParameters } from "./utils.ts";
 
 export type LinkPolicy = (target: string) => string | undefined;
 const CONTROLS = /[\x00-\x1f\x7f-\x9f]/;
@@ -23,7 +23,9 @@ export function sanitizeTerminalText(text: string): string {
 	);
 }
 
-const sgr = /\x1b\[[0-9;:]{0,128}m/y;
+// Recognize complete numeric SGRs even when rejected, so their operands do not
+// become visible text. The shared predicate bounds accepted bytes and parameters.
+const sgr = /\x1b\[([0-9;:]*)m/y;
 const osc8 = /\x1b\]8;(?:id=[A-Za-z0-9_-]{1,64})?;([\x21-\x7e]{0,4096})(?:\x07|\x1b\\)/y;
 const marker = /\x1b(?:\]133;[ABC]|_pi:(?:c|fc|\/fc))\x07/y;
 const up = /\x1b\[[1-9][0-9]{0,3}A/y;
@@ -62,7 +64,15 @@ function imageEnd(line: string, start: number): number | undefined {
 export function neutralizeTerminalLinks(line: string, policy: LinkPolicy = webLinkPolicy, width = Infinity): string {
 	if (!/[\x1b\u0080-\u009f]/.test(line)) return line;
 	// The overwhelmingly common cold-history case needs no token allocation.
-	if (line.includes("\x1b[") && !/[\x1b\u0080-\u009f]/.test(line.replace(/\x1b\[[0-9;:]{0,128}m/g, ""))) return line;
+	if (
+		line.includes("\x1b[") &&
+		!/[\x1b\u0080-\u009f]/.test(
+			line.replace(/\x1b\[([0-9;:]*)m/g, (sequence, params: string) =>
+				supportedSgrParameters(params) ? "" : sequence,
+			),
+		)
+	)
+		return line;
 	const pieces: Array<{ text: string; token: boolean }> = [];
 	let dropped = false;
 	let image = false;
@@ -80,8 +90,16 @@ export function neutralizeTerminalLinks(line: string, policy: LinkPolicy = webLi
 			sgr.lastIndex = i;
 			marker.lastIndex = i;
 			osc8.lastIndex = i;
-			if (sgr.exec(line)) end = sgr.lastIndex;
-			else if (marker.exec(line)) end = marker.lastIndex;
+			const style = sgr.exec(line);
+			if (style) {
+				end = sgr.lastIndex;
+				if (!supportedSgrParameters(style[1])) {
+					dropped = true;
+					i = end;
+					textStart = i;
+					continue;
+				}
+			} else if (marker.exec(line)) end = marker.lastIndex;
 			else {
 				const link = osc8.exec(line);
 				if (link && (!link[1] || policy(link[1]))) end = osc8.lastIndex;

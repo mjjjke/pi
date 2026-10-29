@@ -66,6 +66,15 @@ describe("AssistantMessageComponent", () => {
 				const identity = getOsc8LinkAtColumn(original[row], 1);
 				expect(identity?.id).toBeTruthy();
 				expect(getOsc8LinkAtColumn(other.render(12)[row], 1)?.id).not.toBe(identity?.id);
+				const blockIds = new Set(
+					original.flatMap((line) =>
+						Array.from({ length: 12 }, (_, col) => getOsc8LinkAtColumn(line, col)?.id).filter(Boolean),
+					),
+				);
+				expect(blockIds.size).toBe(blocks);
+				other.invalidate();
+				other.render(20);
+				expect(getOsc8LinkAtColumn(component.render(12)[row], 1)).toEqual(identity);
 				terminal.sendInput(`\x1b[<35;2;${row + 1}M`);
 				tui.renderNow();
 				expect(tui.getScreenLines()[row]).toContain("\x1b[7m");

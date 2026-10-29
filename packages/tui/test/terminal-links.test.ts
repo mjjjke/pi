@@ -165,6 +165,22 @@ test("width repair keeps all commands including the complete iTerm image and tra
 		assert.equal(neutralizeTerminalLinks(input, webLinkPolicy, 1), input);
 });
 
+test("SGR sink drops whole sequences beyond 32 top-level parameters, including the SGR-only fast path", () => {
+	for (const count of [30, 31, 32, 33, 34, 63, 64, 70]) {
+		const sequence = `\x1b[${[...Array(count - 1).fill("1"), "7"].join(";")}m`;
+		for (const prefix of ["", link(good, ST, "id=boundary")]) {
+			const input = `${prefix}\x1b[4m${sequence}abc tail\x1b[0m`;
+			const expected = `${prefix}\x1b[4m${count <= 32 ? sequence : ""}abc tail\x1b[0m`;
+			assert.equal(neutralizeTerminalLinks(input), expected, `count=${count}, linked=${Boolean(prefix)}`);
+			assert.equal(neutralizeTerminalLinks(expected), expected);
+		}
+	}
+	// Colon subparameters are not top-level parameters; empty fields still count.
+	const accepted = `\x1b[${[...Array(31).fill(""), "4:3"].join(";")}m`;
+	assert.equal(neutralizeTerminalLinks(accepted), accepted);
+	assert.equal(neutralizeTerminalLinks(`\x1b[${";".repeat(32)}mtext`), "text");
+});
+
 test("frame cache invalidates on width and policy changes, including mutable frame arrays", () => {
 	const filter = new TerminalLinkFilter();
 	const lines = [`${link(good)}hello${close}`];

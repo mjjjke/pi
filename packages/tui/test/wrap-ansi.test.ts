@@ -1,8 +1,16 @@
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { getOsc8LinkAtColumn, stripTerminalSequences, visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
 
 describe("wrapTextWithAnsi", () => {
+	it("two-argument output is byte-equal to main, without implicit OSC 8 identities", () => {
+		// Captured from main adb5aa165937d06d6fdc16cccd0ddb408bf8f325, not this implementation.
+		const fixtures: { text: string; width: number; lines: string[] }[] = JSON.parse(
+			readFileSync(new URL("./fixtures/wrap-ansi-main.json", import.meta.url), "utf8"),
+		);
+		for (const { text, width, lines } of fixtures) assert.deepStrictEqual(wrapTextWithAnsi(text, width), lines);
+	});
 	describe("underline styling", () => {
 		it("should not apply underline style before the styled text", () => {
 			const underlineOn = "\x1b[4m";
@@ -206,7 +214,7 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 		// Every line that contains visible text from inside the hyperlink
 		// should start with the OSC 8 open sequence (or be preceded by it).
 		const occurrence = getOsc8LinkAtColumn(lines[0], 0);
-		assert.ok(occurrence?.id);
+		assert.strictEqual(occurrence?.id, undefined);
 		for (const line of lines) {
 			// If the line has visible content it must begin with the OSC 8 re-open
 			// OR it is the line where the close appeared with no following content.
@@ -241,7 +249,7 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 
 		assert.ok(lines.length > 1);
 		const occurrence = getOsc8LinkAtColumn(lines[0], 0);
-		assert.ok(occurrence?.id);
+		assert.strictEqual(occurrence?.id, undefined);
 		for (const line of lines) {
 			assert.deepStrictEqual(getOsc8LinkAtColumn(line, 0), occurrence);
 			assert.ok(line.includes(`;${url}\x07`), `Line "${line}" does not reopen the hyperlink with BEL`);
@@ -260,7 +268,7 @@ describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
 		// With width 80 everything fits on one line; there should be exactly one
 		// OSC 8 open and one OSC 8 close.
 		assert.strictEqual(lines.length, 1);
-		const openCount = (lines[0].match(/\x1b\]8;id=[^;]+;https:[^\x1b]+\x1b\\/g) ?? []).length;
+		const openCount = (lines[0].match(/\x1b\]8;;https:[^\x1b]+\x1b\\/g) ?? []).length;
 		const closeCount = (lines[0].match(/\x1b\]8;;\x1b\\/g) ?? []).length;
 		assert.strictEqual(openCount, 1);
 		assert.strictEqual(closeCount, 1);

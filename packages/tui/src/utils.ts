@@ -1,5 +1,4 @@
 import { eastAsianWidth } from "get-east-asian-width";
-import { getDefaultWrapLinkPrefix } from "./link-identity.ts";
 
 // segmenters (shared instance)
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -583,13 +582,14 @@ function readSgrColor(parts: string[], start: number): { next: number; color?: s
 	let omitColorSpace = false;
 	while (true) {
 		const values = parts[index].split(":");
-		fields[field] = Number(values[0] || "0");
+		// Terminal parsers saturate decimal operands before color-byte masking.
+		fields[field] = Math.min(0x7fff_ffff, Number(values[0] || "0"));
 		if (values.length > 1) {
 			for (let sub = 1; sub < values.length; sub++) {
 				if (fields[1] === 5) omitColorSpace = true;
 				const destination = index - start + sub + (omitColorSpace ? 1 : 0);
 				if (destination >= fields.length) break;
-				fields[destination] = Number(values[sub] || "0");
+				fields[destination] = Math.min(0x7fff_ffff, Number(values[sub] || "0"));
 			}
 			break;
 		}
@@ -607,6 +607,20 @@ function readSgrColor(parts: string[], start: number): { next: number; color?: s
 		? parts[start]
 		: `${fields[0]};${fields[1]};${(fields[1] === 5 ? [fields[3]] : fields.slice(3)).map((channel) => channel & 255).join(";")}`;
 	return { next, color };
+}
+
+/**
+ * Shared sink/tracker grammar. xterm truncates after 32 top-level parameters;
+ * reject the whole sequence instead of depending on a terminal's truncation.
+ * Colon subparameters do not consume top-level slots. Keep the sink's byte bound.
+ */
+export function supportedSgrParameters(params: string): boolean {
+	if (params.length > 128) return false;
+	let count = 1;
+	for (let i = 0; i < params.length; i++) {
+		if (params[i] === ";" && ++count > 32) return false;
+	}
+	return true;
 }
 
 /**
@@ -648,6 +662,8 @@ class AnsiCodeTracker {
 		if (!match) return;
 
 		const params = match[1];
+		// Layout can track raw component output before it reaches the final sink.
+		if (!supportedSgrParameters(params)) return;
 		if (params === "" || params === "0") {
 			// Full reset
 			this.reset();
@@ -1013,14 +1029,13 @@ export function assignOsc8LinkIds(text: string, linkIdPrefix: string): string {
 }
 
 /**
- * Wrap styled text, assigning id-less OSC 8 opens an identity before splitting.
- * Framework renders default to a retained component-owner namespace. Outside a
- * framework render the default is deterministic; independent sources must supply
- * their own retained prefix (allocateLinkId), never a new prefix on each call.
+ * Wrap styled text. Only an explicit retained source namespace assigns IDs to
+ * id-less OSC 8 opens before splitting. Two-argument callers preserve the original
+ * IDs (or lack of IDs), so generic id-less links retain row-local hover behavior.
  */
 export function wrapTextWithAnsi(text: string, width: number, linkIdPrefix?: string): string[] {
 	if (!text) return [""];
-	if (text.includes("\x1b]8;;")) text = assignOsc8LinkIds(text, linkIdPrefix ?? getDefaultWrapLinkPrefix());
+	if (linkIdPrefix !== undefined && text.includes("\x1b]8;;")) text = assignOsc8LinkIds(text, linkIdPrefix);
 
 	// Handle newlines by processing each line separately
 	// Track ANSI state across lines so styles carry over after literal newlines

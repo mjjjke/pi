@@ -795,7 +795,9 @@ const lines = wrapTextWithAnsi("This is a long line that needs wrapping", 20);
 // ["This is a long line", "that needs wrapping"]
 ```
 
-OSC 8 links without an explicit ID receive an occurrence ID before wrapping. Framework rendering supplies a retained component-owner namespace, so uncached custom components stay distinct across renders, width changes and trailing text updates. Standalone utility calls outside framework rendering use a stable shared fallback. Supply an explicit retained prefix to isolate standalone sources, or to make a source independent of the order of wrapping calls within a component:
+`wrapTextWithAnsi(text, width)` preserves OSC 8 opens without assigning IDs, including inside framework rendering. Such id-less links highlight only the hovered row segment, as before; independently cached extension output does not acquire shared identities. Only an explicit stable source namespace (the optional third argument) assigns occurrence IDs before wrapping, allowing all row segments of that occurrence to highlight together:
+
+Pi's `Text` owns a namespace per instance, `SettingsList` per item description, and `Markdown` per instance/source token. Assistant messages retain a namespace per message component and content block, including streaming updates. These identities do not depend on render-call order or cache hits. `Text` and `Markdown` cache complete rendered output; Markdown's separate token cache does not skip wrapping individual sources. Containers can partially hit their children's caches: each child still owns its namespace.
 
 ```typescript
 class LinkedText implements Component {
@@ -810,7 +812,9 @@ class LinkedText implements Component {
 }
 ```
 
-Do not allocate the prefix inside `render()`. For reconstructed `Markdown` children, pass a retained per-owner/per-block prefix through `MarkdownOptions.linkIdPrefix`. Existing explicit OSC 8 IDs are preserved.
+Do not allocate the prefix inside `render()`, or share one between independent sources. For reconstructed `Markdown` children, pass a retained per-owner/per-block prefix through `MarkdownOptions.linkIdPrefix`. Existing explicit OSC 8 IDs and BEL/ST terminators are preserved.
+
+The final output sink drops entire numeric SGR sequences with more than 32 semicolon-separated top-level parameters (colon subparameters do not count), or more than 128 parameter bytes. The style tracker uses the same limit before layout reconstruction. The 32-parameter bound avoids xterm's demonstrated truncation rather than relying on terminal-specific handling of longer lists; it is not a claim about every terminal's parser capacity.
 
 ## Creating Custom Components
 

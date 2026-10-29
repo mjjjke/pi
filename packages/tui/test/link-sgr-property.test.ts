@@ -4,6 +4,7 @@ import { inspect } from "node:util";
 import xterm from "@xterm/headless";
 import { Text } from "../src/components/text.ts";
 import { linkTo, setCapabilities } from "../src/terminal-image.ts";
+import { neutralizeTerminalLinks } from "../src/terminal-links.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { extractSegments, underlineOsc8Link, wrapTextWithAnsi } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -47,6 +48,11 @@ test("seeded SGR parser property: reconstruction, wrapping, hover and exact poin
 		"999",
 		"1234:5",
 	];
+	// Generate lists around and beyond the terminal parameter capacity. Minimized
+	// reset-state cases also live in link-hover-regressions.test.ts.
+	for (let count = 30; count <= 70; count++) {
+		parameters.push([...Array(count - 1).fill("1"), "7"].join(";"));
+	}
 	for (const code of [38, 48, 58]) {
 		// The sink admits omitted operands and mixed parameter/subparameter forms too.
 		parameters.push(
@@ -58,6 +64,10 @@ test("seeded SGR parser property: reconstruction, wrapping, hover and exact poin
 			`${code};2::0:7:0`,
 			`${code};2;0:7:0`,
 			`${code};0;1;2;3;4;7`,
+			`${code};5;2147483648`,
+			`${code};2;2147483648;4294967296;9999999999999999999999999999999999`,
+			`${code}:5:2147483648`,
+			`${code}:2::2147483648:4294967296:9999999999999999999999999999999999`,
 		);
 		for (let i = 0; i < 8; i++) {
 			const channels = [random(256), random(256), random(256)];
@@ -121,16 +131,21 @@ test("seeded SGR parser property: reconstruction, wrapping, hover and exact poin
 					step === 3 && iteration < parameters.length
 						? parameters[iteration]
 						: Array.from({ length: 1 + random(4) }, () => parameters[random(parameters.length)]).join(";");
-				styleSource += `\x1b[${p}m`;
+				styleSource += neutralizeTerminalLinks(`\x1b[${p}m`);
 				styles.push(styleSource);
 				source += `\x1b[${p}m${step % 2 ? linkTo("b", url, { id: "oracle" }) : "a"}`;
 			}
 			source += "tail";
 			styles.push(styleSource, styleSource, styleSource, styleSource);
-			const painted = underlineOsc8Link(source, target);
-			const reconstructed = Array.from({ length: 8 }, (_, col) => extractSegments(source, 0, col, 1).after);
-			const wrapped = wrapTextWithAnsi(source, 1);
-			const baseline = (await read([source]))[0];
+			const filtered = neutralizeTerminalLinks(source);
+			const painted = neutralizeTerminalLinks(underlineOsc8Link(filtered, target));
+			// Layout consumes raw component output before the final sink, so its
+			// reconstructed state must agree with the sink's supported grammar too.
+			const reconstructed = Array.from({ length: 8 }, (_, col) =>
+				neutralizeTerminalLinks(extractSegments(source, 0, col, 1).after),
+			);
+			const wrapped = wrapTextWithAnsi(source, 1).map((line) => neutralizeTerminalLinks(line));
+			const baseline = (await read([filtered]))[0];
 			const expectedHover = await read(
 				styles.map((style, col) => {
 					const selected = col === 1 || col === 3;

@@ -1,0 +1,222 @@
+[
+	{
+		"text": "\u001b]8;;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007",
+		"width": 4,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u0007abcd\u001b]8;;\u0007",
+			"\u001b]8;;https://ok.test/\u0007efgh\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007",
+		"width": 40,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "before \u001b]8;;https://ok.test/\u0007abc def ghi\u001b]8;;\u0007 after",
+		"width": 4,
+		"lines": [
+			"befo",
+			"re",
+			"\u001b]8;;https://ok.test/\u0007abc\u001b]8;;\u0007",
+			"\u001b]8;;https://ok.test/\u0007def\u001b]8;;\u0007",
+			"\u001b]8;;https://ok.test/\u0007ghi\u001b]8;;\u0007",
+			"afte",
+			"r"
+		]
+	},
+	{
+		"text": "before \u001b]8;;https://ok.test/\u0007abc def ghi\u001b]8;;\u0007 after",
+		"width": 40,
+		"lines": [
+			"before \u001b]8;;https://ok.test/\u0007abc def ghi\u001b]8;;\u0007 after"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u0007界界\n界界\u001b]8;;\u0007",
+		"width": 4,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u0007界界",
+			"\u001b]8;;https://ok.test/\u0007界界\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u0007界界\n界界\u001b]8;;\u0007",
+		"width": 40,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u0007界界",
+			"\u001b]8;;https://ok.test/\u0007界界\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u0007ab\u001b]8;;\u0007\n\u001b]8;;https://ok.test/\u0007cd\u001b]8;;\u0007",
+		"width": 4,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u0007ab\u001b]8;;\u0007",
+			"\u001b]8;;https://ok.test/\u0007cd\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u0007ab\u001b]8;;\u0007\n\u001b]8;;https://ok.test/\u0007cd\u001b]8;;\u0007",
+		"width": 40,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u0007ab\u001b]8;;\u0007",
+			"\u001b]8;;https://ok.test/\u0007cd\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b[1;4;31m\u001b]8;;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007\u001b[0m",
+		"width": 4,
+		"lines": [
+			"\u001b[1;4;31m\u001b]8;;https://ok.test/\u0007abcd\u001b[24m\u001b]8;;\u0007",
+			"\u001b[1;4;31m\u001b]8;;https://ok.test/\u0007efgh\u001b]8;;\u0007\u001b[0m"
+		]
+	},
+	{
+		"text": "\u001b[1;4;31m\u001b]8;;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007\u001b[0m",
+		"width": 40,
+		"lines": [
+			"\u001b[1;4;31m\u001b]8;;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007\u001b[0m"
+		]
+	},
+	{
+		"text": "\u001b]8;id=existing;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007",
+		"width": 4,
+		"lines": [
+			"\u001b]8;id=existing;https://ok.test/\u0007abcd\u001b]8;;\u0007",
+			"\u001b]8;id=existing;https://ok.test/\u0007efgh\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b]8;id=existing;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007",
+		"width": 40,
+		"lines": [
+			"\u001b]8;id=existing;https://ok.test/\u0007abcdefgh\u001b]8;;\u0007"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\",
+		"width": 4,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u001b\\abcd\u001b]8;;\u001b\\",
+			"\u001b]8;;https://ok.test/\u001b\\efgh\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\",
+		"width": 40,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "before \u001b]8;;https://ok.test/\u001b\\abc def ghi\u001b]8;;\u001b\\ after",
+		"width": 4,
+		"lines": [
+			"befo",
+			"re",
+			"\u001b]8;;https://ok.test/\u001b\\abc\u001b]8;;\u001b\\",
+			"\u001b]8;;https://ok.test/\u001b\\def\u001b]8;;\u001b\\",
+			"\u001b]8;;https://ok.test/\u001b\\ghi\u001b]8;;\u001b\\",
+			"afte",
+			"r"
+		]
+	},
+	{
+		"text": "before \u001b]8;;https://ok.test/\u001b\\abc def ghi\u001b]8;;\u001b\\ after",
+		"width": 40,
+		"lines": [
+			"before \u001b]8;;https://ok.test/\u001b\\abc def ghi\u001b]8;;\u001b\\ after"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u001b\\界界\n界界\u001b]8;;\u001b\\",
+		"width": 4,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u001b\\界界",
+			"\u001b]8;;https://ok.test/\u001b\\界界\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u001b\\界界\n界界\u001b]8;;\u001b\\",
+		"width": 40,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u001b\\界界",
+			"\u001b]8;;https://ok.test/\u001b\\界界\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u001b\\ab\u001b]8;;\u001b\\\n\u001b]8;;https://ok.test/\u001b\\cd\u001b]8;;\u001b\\",
+		"width": 4,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u001b\\ab\u001b]8;;\u001b\\",
+			"\u001b]8;;https://ok.test/\u001b\\cd\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "\u001b]8;;https://ok.test/\u001b\\ab\u001b]8;;\u001b\\\n\u001b]8;;https://ok.test/\u001b\\cd\u001b]8;;\u001b\\",
+		"width": 40,
+		"lines": [
+			"\u001b]8;;https://ok.test/\u001b\\ab\u001b]8;;\u001b\\",
+			"\u001b]8;;https://ok.test/\u001b\\cd\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "\u001b[1;4;31m\u001b]8;;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\\u001b[0m",
+		"width": 4,
+		"lines": [
+			"\u001b[1;4;31m\u001b]8;;https://ok.test/\u001b\\abcd\u001b[24m\u001b]8;;\u001b\\",
+			"\u001b[1;4;31m\u001b]8;;https://ok.test/\u001b\\efgh\u001b]8;;\u001b\\\u001b[0m"
+		]
+	},
+	{
+		"text": "\u001b[1;4;31m\u001b]8;;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\\u001b[0m",
+		"width": 40,
+		"lines": [
+			"\u001b[1;4;31m\u001b]8;;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\\u001b[0m"
+		]
+	},
+	{
+		"text": "\u001b]8;id=existing;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\",
+		"width": 4,
+		"lines": [
+			"\u001b]8;id=existing;https://ok.test/\u001b\\abcd\u001b]8;;\u001b\\",
+			"\u001b]8;id=existing;https://ok.test/\u001b\\efgh\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "\u001b]8;id=existing;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\",
+		"width": 40,
+		"lines": [
+			"\u001b]8;id=existing;https://ok.test/\u001b\\abcdefgh\u001b]8;;\u001b\\"
+		]
+	},
+	{
+		"text": "",
+		"width": 8,
+		"lines": [
+			""
+		]
+	},
+	{
+		"text": "plain words that wrap",
+		"width": 8,
+		"lines": [
+			"plain",
+			"words",
+			"that",
+			"wrap"
+		]
+	},
+	{
+		"text": "\u001b[31mfirst\r\nsecond\rthird\u001b[0m",
+		"width": 8,
+		"lines": [
+			"\u001b[31mfirst",
+			"\u001b[31msecond",
+			"\u001b[31mthird\u001b[0m"
+		]
+	}
+]

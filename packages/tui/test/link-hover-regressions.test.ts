@@ -21,6 +21,12 @@ import {
 } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
+// xterm exposes underline-color details at runtime but not in its public types.
+interface UnderlineCell extends xterm.IBufferCell {
+	getUnderlineColor(): number;
+	getUnderlineColorMode(): number;
+}
+
 // Ported from the independent review of 887121c08. Never launch an external URL handler.
 const url = "https://ok.test/";
 const link = (text: string) => linkTo(text, url, { id: "review" });
@@ -34,12 +40,14 @@ async function cells(lines: string[], cols = 40) {
 		);
 		return lines.map((_, row) =>
 			Array.from({ length: cols }, (_, column) => {
-				const cell = emulator.buffer.active.getLine(row)!.getCell(column)!;
+				const cell = emulator.buffer.active.getLine(row)!.getCell(column)! as UnderlineCell;
 				return {
 					text: cell.getChars(),
 					width: cell.getWidth(),
 					inverse: cell.isInverse(),
 					underline: cell.isUnderline(),
+					underlineColor: cell.getUnderlineColor(),
+					underlineMode: cell.getUnderlineColorMode(),
 					bold: cell.isBold(),
 					italic: cell.isItalic(),
 					fg: cell.getFgColor(),
@@ -264,23 +272,26 @@ for (const sgr of ["58;5;7", "58;2;0;7;0"]) {
 	});
 }
 
-test("uncached wrapping has stable default identities across renders, widths and tail updates", () => {
+test("explicit wrapping namespaces stay stable across renders, widths and tail updates", () => {
 	const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
-	const original = getOsc8LinkAtColumn(wrapTextWithAnsi(raw, 4)[0], 0);
+	const original = getOsc8LinkAtColumn(wrapTextWithAnsi(raw, 4, "retained-source")[0], 0);
 	for (const text of [raw, `${raw} tail`, `${raw} tail more`]) {
 		for (const width of [4, 8, 40]) {
-			assert.deepEqual(getOsc8LinkAtColumn(wrapTextWithAnsi(text, width)[0], 0), original);
+			assert.deepEqual(getOsc8LinkAtColumn(wrapTextWithAnsi(text, width, "retained-source")[0], 0), original);
 		}
 	}
 });
 
-test("uncached custom components get stable distinct default owner namespaces", async () => {
+test("built-in Text sources stay distinct across partial child-cache hits and render order", async () => {
 	const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
 	const state = setup("", 4);
 	let source = raw;
-	const make = () => ({ render: (width: number) => wrapTextWithAnsi(source, width), invalidate() {} });
-	state.tui.addChild(make());
-	state.tui.addChild(make());
+	const first = new Text(source, 0, 0);
+	const second = new Text(source, 0, 0);
+	const container = new Container();
+	container.addChild(first);
+	container.addChild(second);
+	state.tui.addChild(container);
 	try {
 		state.tui.renderNow();
 		const original = state.tui.getScreenLines();
@@ -288,20 +299,33 @@ test("uncached custom components get stable distinct default owner namespaces", 
 		await assertHover(state, 1, 1);
 		await assertHover(state, 1, 2);
 		await assertHover(state, 1, 3);
-		hover(state, 1, 1);
-		source += " tail";
+		// Port the reviewer's partial-cache case to Container + Text: only the
+		// second child is invalidated, while the first returns cached wrapped rows.
+		hover(state, 1, 3);
+		second.invalidate();
 		state.tui.renderNow();
-		assert.equal(getOsc8LinkAtColumn(state.tui.getScreenLines()[0], 0)?.id, getOsc8LinkAtColumn(original[0], 0)?.id);
-		assert.match(state.tui.getScreenLines()[0], /\x1b\[7m/);
+		assert.equal(getOsc8LinkAtColumn(state.tui.getScreenLines()[2], 0)?.id, getOsc8LinkAtColumn(original[2], 0)?.id);
+		assert.match(state.tui.getScreenLines()[2], /\x1b\[7m/);
+		assert.match(state.tui.getScreenLines()[3], /\x1b\[7m/);
+		assert.doesNotMatch(state.tui.getScreenLines()[0], /\x1b\[7m/);
+		const identity = getOsc8LinkAtColumn(second.render(4)[0], 0);
+		first.invalidate();
+		first.render(8); // A different source's cache miss must not renumber the second.
+		second.invalidate();
+		assert.deepEqual(getOsc8LinkAtColumn(second.render(4)[0], 0), identity);
+		source += " tail";
+		second.setText(source);
+		state.tui.renderNow();
+		assert.match(state.tui.getScreenLines()[2], /\x1b\[7m/);
 	} finally {
 		state.tui.stop({ preserveScreen: true });
 	}
 });
 
 for (const boundary of ["box", "mouse", "scroll", "vertical", "horizontal", "layout", "overlay"] as const) {
-	test(`default wrapping ownership survives nested render boundary: ${boundary}`, async () => {
+	test(`built-in Text ownership survives nested render boundary: ${boundary}`, async () => {
 		const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
-		const make = () => ({ render: (width: number) => wrapTextWithAnsi(raw, width), invalidate() {} });
+		const make = () => new Text(raw, 0, 0);
 		const first = make(),
 			second = make();
 		const container = new Container();
@@ -335,12 +359,49 @@ for (const boundary of ["box", "mouse", "scroll", "vertical", "horizontal", "lay
 	});
 }
 
+for (const partialCache of [false, true]) {
+	test(`generic id-less wrappers keep main's row-local hover (partial cache=${partialCache})`, async () => {
+		const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
+		const state = setup("", 4);
+		let cached: string[] | undefined;
+		const prewrapped = wrapTextWithAnsi(raw, 4);
+		state.tui.addChild({
+			render(width: number) {
+				cached ??= wrapTextWithAnsi(raw, width);
+				return [...cached, ...(partialCache ? wrapTextWithAnsi(raw, width) : prewrapped)];
+			},
+			invalidate() {
+				cached = undefined;
+			},
+		});
+		try {
+			state.tui.renderNow();
+			const original = state.tui.getScreenLines();
+			for (const row of [0, 1, 2, 3]) {
+				assert.equal(getOsc8LinkAtColumn(original[row], 0)?.id, undefined);
+				hover(state, 1, row + 1);
+				const painted = await cells(state.tui.getScreenLines(), 4);
+				for (let other = 0; other < 4; other++)
+					assert.equal(Boolean(painted[other][0].inverse), other === row, `row ${other} hovering ${row}`);
+				click(state, 1, row + 1);
+			}
+			hover(state, 4, 10);
+			assert.deepEqual(state.tui.getScreenLines(), original);
+		} finally {
+			state.tui.stop({ preserveScreen: true });
+		}
+	});
+}
+
 test("SettingsList description remains hoverable across uncached renders and distinct owners", async () => {
 	const raw = `\x1b]8;;${url}\x07abcdefgh\x1b]8;;\x07`;
 	const plain = (s: string) => s;
 	const make = () =>
 		new SettingsList(
-			[{ id: "one", label: "one", currentValue: "yes", description: raw }],
+			[
+				{ id: "one", label: "one", currentValue: "yes", description: raw },
+				{ id: "two", label: "two", currentValue: "yes", description: raw },
+			],
 			4,
 			{ label: plain, value: plain, description: plain, cursor: "> ", hint: plain },
 			() => {},
@@ -357,7 +418,18 @@ test("SettingsList description remains hoverable across uncached renders and dis
 		const row = original.findIndex((line) => getOsc8LinkAtColumn(line, 2)?.url === url);
 		const id = getOsc8LinkAtColumn(original[row], 2)?.id;
 		assert.ok(id);
-		assert.notEqual(getOsc8LinkAtColumn(second.render(12)[2], 2)?.id, id);
+		const descriptionId = (list: SettingsList) =>
+			list
+				.render(12)
+				.map((line) => getOsc8LinkAtColumn(line, 2)?.id)
+				.find(Boolean);
+		assert.notEqual(descriptionId(second), id);
+		first.selectItem("two");
+		assert.notEqual(descriptionId(first), id, "each description owns its namespace");
+		second.invalidate();
+		second.render(16);
+		first.selectItem("one");
+		assert.equal(descriptionId(first), id, "selection and other renders do not renumber sources");
 		await assertHover(state, 3, row + 1);
 		hover(state, 3, row + 1);
 		first.invalidate();
@@ -406,10 +478,53 @@ test("Markdown table occurrences are allocated from source, not measurement pass
 			return [...new Set(links)];
 		});
 	const original = ids()[0];
+	const other = new Markdown(table, 0, 0, markdownTheme);
+	const otherId = getOsc8LinkAtColumn(other.render(20)[3], 2)?.id;
+	assert.ok(otherId);
+	assert.notEqual(otherId, original);
+	other.invalidate();
+	other.render(12);
+	assert.equal(ids()[0], original, "another source's measurement must not renumber a cache hit");
+	component.invalidate();
+	assert.equal(ids()[0], original, "a render-cache miss preserves the same token namespace");
+	component.render(12);
+	assert.equal(ids()[0], original, "width-dependent table measurements do not renumber the source");
 	component.setText(`${table}\n| [another](${url}) |`);
 	assert.equal(ids()[0], original, "a later row must not renumber an earlier source occurrence");
 	assert.equal(new Set(ids()).size, 2);
 });
+
+for (const count of [31, 32, 33, 63]) {
+	for (const initial of ["", "\x1b[4m", "\x1b[4;7m"]) {
+		test(`SGR boundary hover preserves unlinked cells from known state count=${count}, initial=${JSON.stringify(initial)}`, async () => {
+			const sequence = `\x1b[${[...Array(count).fill("1"), "7"].join(";")}m`;
+			const state = setup(`${initial}${sequence}${link("abc")} tail\x1b[0m`);
+			try {
+				await assertHover(state);
+			} finally {
+				state.tui.stop({ preserveScreen: true });
+			}
+		});
+	}
+}
+
+for (const code of [38, 48, 58]) {
+	for (const operand of ["2147483647", "2147483648", "4294967296", "9999999999999999999999999999999999"]) {
+		test(`oversized color operands reconstruct like xterm: ${code}, ${operand}`, async () => {
+			for (const params of [
+				`${code};5;${operand}`,
+				`${code};2;${operand};7;0`,
+				`${code}:5:${operand}`,
+				`${code}:2::${operand}:7:0`,
+			]) {
+				const source = `\x1b[${params}mab`;
+				const before = (await cells([source]))[0][1];
+				for (const continuation of [wrapTextWithAnsi(source, 1)[1], extractSegments(source, 0, 1, 1).after])
+					assert.deepEqual((await cells([continuation]))[0][0], before);
+			}
+		});
+	}
+}
 
 test("uniform hover runs do not emit one restore/start pair per cell", () => {
 	const source = `\x1b[4m${link("x".repeat(240))}\x1b[24m`;
