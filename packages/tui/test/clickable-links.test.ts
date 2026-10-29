@@ -146,14 +146,68 @@ test("streaming only defers discoveries and bare autolinks at the source end", (
 	for (const source of [
 		"[label](https://pi/)",
 		"<https://pi/>",
-		"`a.ts`",
-		"**a.ts**",
+		"`a.ts` ",
+		"**a.ts** ",
 		"https://pi/\n\n```\nhttps://pi/",
 		"a.ts\n\n```\na.ts",
 	]) {
 		assert.match(
 			new Markdown(source, 0, 0, theme, undefined, { streaming: true, linkify }).render(120).join(""),
 			/\x1b\]8;/,
+		);
+	}
+});
+
+test("streaming discoveries wait for whitespace after the entire punctuation-bearing token", () => {
+	setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+	const linkify = (text: string) =>
+		[...text.matchAll(/foo\.ts(?::\d+)?/g)].map((match) => ({
+			start: match.index,
+			end: match.index + match[0].length,
+			target: "https://files.test/foo.ts",
+		}));
+	for (const tail of ["foo.ts.", "foo.ts:", "foo.ts:1", "foo.ts:1?", "foo.ts#", "`foo.ts`", "**foo.ts**"]) {
+		const source = `foo.ts ${tail}`;
+		const markdown = new Markdown(source, 0, 0, theme, undefined, { streaming: true, linkify });
+		assert.equal(
+			(
+				markdown
+					.render(120)
+					.join("")
+					.match(/\x1b\]8;id=/g) ?? []
+			).length,
+			1,
+			source,
+		);
+		for (const delimiter of [" ", "\n", "\t"]) {
+			markdown.setText(`${source}${delimiter}`);
+			assert.equal(
+				(
+					markdown
+						.render(120)
+						.join("")
+						.match(/\x1b\]8;id=/g) ?? []
+				).length,
+				2,
+				source,
+			);
+		}
+	}
+	for (const source of [
+		"- https://example.com/a\n- https://example.com/a.",
+		"https://example.com/a\n\nhttps://example.com/a.",
+		"| A | B |\n|---|---|\n| https://example.com/a | https://example.com/a.",
+	]) {
+		const markdown = new Markdown(source, 0, 0, theme, undefined, { streaming: true });
+		assert.equal(
+			(
+				markdown
+					.render(120)
+					.join("")
+					.match(/\x1b\]8;id=/g) ?? []
+			).length,
+			1,
+			source,
 		);
 	}
 });

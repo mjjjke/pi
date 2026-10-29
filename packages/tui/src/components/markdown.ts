@@ -233,7 +233,7 @@ export function setMarkdownLinkOptions(options: Pick<MarkdownOptions, "linkPolic
 }
 
 export interface MarkdownOptions {
-	/** Defer bare links touching the source end while more text may arrive. */
+	/** Defer bare links in the trailing non-whitespace token while more text may arrive. */
 	streaming?: boolean;
 	/** Return authorized display-only links in text/codespans, not explicit links or fenced code. */
 	linkify?: MarkdownLinkify;
@@ -268,8 +268,8 @@ export class Markdown implements Component {
 	private linkIndex = 0;
 	private renderedLinkOptionsVersion = -1;
 	private insideLink = false;
-	private pendingBareLink?: Token;
-	private pendingDiscovery?: Token;
+	private pendingBareLinks = new WeakSet<Token>();
+	private pendingDiscoveries = new WeakSet<Token>();
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -345,27 +345,36 @@ export class Markdown implements Component {
 			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
 		}
 
-		this.pendingBareLink = undefined;
-		this.pendingDiscovery = undefined;
-		if (this.options.streaming) {
-			// Marked has no source offsets. Only the last leaf in source order can still grow;
-			// checking its raw suffix excludes closing Markdown delimiters and trailing whitespace.
-			let lastToken: Token | undefined;
-			let lastLink: Tokens.Link | undefined;
+		this.pendingBareLinks = new WeakSet<Token>();
+		this.pendingDiscoveries = new WeakSet<Token>();
+		if (this.options.streaming && !/\s$/.test(normalizedText)) {
+			// Marked may split a growing URL into a link and punctuation. Walk leaves backwards
+			// through the whole trailing non-whitespace token, not just the last parsed leaf.
+			const leaves: Token[] = [];
+			const links: Tokens.Link[] = [];
 			markdownParser.walkTokens(tokens, (token) => {
-				lastToken = token;
-				if (token.type === "link") lastLink = token as Tokens.Link;
+				if (token.type === "link") links.push(token as Tokens.Link);
+				if (("tokens" in token && token.tokens?.length) || ["list", "list_item", "table"].includes(token.type))
+					return;
+				leaves.push(token);
 			});
-			if (lastToken?.type === "text" && normalizedText.endsWith(lastToken.raw)) {
-				this.pendingDiscovery = lastToken;
+			let tail = /\S+$/.exec(normalizedText)?.[0] ?? "";
+			for (let i = leaves.length - 1; i >= 0 && tail; i--) {
+				const leaf = leaves[i];
+				if (!leaf.raw) continue;
+				const offset = tail.lastIndexOf(leaf.raw);
+				if (offset >= 0) {
+					this.pendingDiscoveries.add(leaf);
+					tail = tail.slice(0, offset);
+				} else {
+					if (leaf.raw.endsWith(tail)) this.pendingDiscoveries.add(leaf);
+					break;
+				}
 			}
-			if (
-				lastToken &&
-				lastLink?.tokens.includes(lastToken) &&
-				!/^[[<]/.test(lastLink.raw) &&
-				normalizedText.endsWith(lastLink.raw)
-			) {
-				this.pendingBareLink = lastLink;
+			for (const link of links) {
+				if (!/^[[<]/.test(link.raw) && link.tokens.some((token) => this.pendingDiscoveries.has(token))) {
+					this.pendingBareLinks.add(link);
+				}
 			}
 		}
 
@@ -712,7 +721,7 @@ export class Markdown implements Component {
 		let offset = 0;
 		for (const span of linkify(text, kind)) {
 			if (span.start < offset || span.end <= span.start || span.end > text.length) continue;
-			if (pending && span.end === text.length) continue;
+			if (pending && !/\s/.test(text.slice(span.end))) continue;
 			result += style(text.slice(offset, span.start));
 			const target = span.target; // linkify authorizes discoveries; the output sink still checks every emitted target.
 			const label = style(text.slice(span.start, span.end));
@@ -756,7 +765,7 @@ export class Markdown implements Component {
 							token.text,
 							"text",
 							applyTextWithNewlines,
-							token === this.pendingDiscovery,
+							this.pendingDiscoveries.has(token),
 						);
 					}
 					break;
@@ -779,14 +788,16 @@ export class Markdown implements Component {
 				}
 
 				case "codespan":
-					result += this.linkifyText(token.text, "codespan", this.theme.code) + stylePrefix;
+					result +=
+						this.linkifyText(token.text, "codespan", this.theme.code, this.pendingDiscoveries.has(token)) +
+						stylePrefix;
 					break;
 
 				case "link": {
 					this.insideLink = true;
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					this.insideLink = false;
-					if (token === this.pendingBareLink) {
+					if (this.pendingBareLinks.has(token)) {
 						result += linkText;
 						break;
 					}
