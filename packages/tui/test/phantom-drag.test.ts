@@ -7,6 +7,52 @@ import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 describe("fullscreen observed mouse buttons", () => {
+	for (const code of [64, 65, 66, 67, 68, 69, 70, 71, 128, 129, 130, 131, 132, 133, 134, 135, 255, 256]) {
+		it(`does not authorize button drags from wheel or extended code ${code}`, () => {
+			const terminal = new VirtualTerminal(30, 4);
+			const tui = new TuiAltScreen(terminal);
+			const events: TuiMouseEvent[] = [];
+			tui.addChild({
+				render: () => ["control"],
+				invalidate() {},
+				handleMouse(event) {
+					events.push(event);
+					return { handled: true, capture: event.type === "press", render: false };
+				},
+			});
+			tui.start();
+			try {
+				tui.renderNow();
+				terminal.sendInput(`\x1b[<${code};2;1M`);
+				for (const motion of [32, 33, 34]) {
+					terminal.sendInput(`\x1b[<${motion};2;1M`);
+					assert.equal(events.at(-1)?.type, "move");
+					assert.equal(events.at(-1)?.button, "none");
+				}
+				assert.ok(!events.some((event) => event.type === "press" || event.type === "drag"));
+			} finally {
+				tui.stop();
+			}
+		});
+	}
+
+	it("keeps orphan right-motion link hover after a horizontal wheel", () => {
+		const terminal = new VirtualTerminal(30, 4);
+		const tui = new TuiAltScreen(terminal, false, undefined, { copyOnSelect: false });
+		tui.addChild(new Text("\x1b]8;;https://example.com\x07example\x1b]8;;\x07", 0, 0));
+		tui.start();
+		try {
+			tui.renderNow();
+			terminal.sendInput("\x1b[<66;2;1M");
+			terminal.sendInput("\x1b[<34;2;1M");
+			tui.renderNow();
+			assert.match(tui.getScreenLines()[0], /\x1b\[4m/);
+			assert.equal(tui.hasActiveSelection(), false);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("underlines links on orphan right-button motion without selecting text", () => {
 		const terminal = new VirtualTerminal(30, 4);
 		const tui = new TuiAltScreen(terminal, false, undefined, { copyOnSelect: false });

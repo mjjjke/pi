@@ -1051,6 +1051,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleMouseEvent(raw: SgrMouseEvent): void {
+		// Vertical wheels are routed separately. Unsupported wheel/extended codes
+		// must not alias left/middle/right through their low two bits.
+		if (raw.button >= 64) return;
 		const isMotion = (raw.button & 32) !== 0;
 		const button = this.decodeMouseButton(raw.button);
 		if (raw.release) {
@@ -1061,6 +1064,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// a held button. Normalize before every consumer, not just hover dispatch.
 			if (!this.pressedMouseButtons.has(button)) raw = { ...raw, button: raw.button | 3 };
 		} else if (button !== "none") {
+			// A swallowed release after this press still needs a focus/lifecycle reset:
+			// motion alone cannot distinguish it from a real held button.
 			this.pressedMouseButtons.add(button);
 		}
 		const type: TuiMouseEvent["type"] = raw.release
