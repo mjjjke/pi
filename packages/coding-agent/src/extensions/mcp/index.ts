@@ -39,6 +39,7 @@ import type {
 } from "../../core/extensions/types.ts";
 import { mcpNamespace } from "../../core/mcp-servers.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
+import { authorizeBrowserUrl } from "../../utils/link-policy.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { CODEMODE_TOOL_NAME } from "../codemode/tool.ts";
 import { TOOL_SEARCH_TOOL_NAME } from "../tool-search/tool.ts";
@@ -928,8 +929,10 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 				server,
 				{
 					showAuthorizationUrl: (url) => {
-						authorizationUrl = url.href;
-						openUrl(url.href);
+						const target = authorizeBrowserUrl(url.href);
+						if (!target) throw new Error("Not opened: unsupported URL scheme");
+						authorizationUrl = target;
+						openUrl(target);
 					},
 					promptForRedirectUrl: async (signal) => {
 						const value = await ui.redirectUrl(title, authorizationUrl, signal);
@@ -1090,8 +1093,10 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 			} else {
 				failure = await signIn(server, {
 					showAuthorizationUrl: (url) => {
-						ctx.ui.notify(`Sign in to MCP server "${name}" in your browser:\n${url.href}`, "info");
-						openUrl(url.href);
+						const target = authorizeBrowserUrl(url.href);
+						if (!target) throw new Error("Not opened: unsupported URL scheme");
+						ctx.ui.notify(`Sign in to MCP server "${name}" in your browser:\n${target}`, "info");
+						openUrl(target);
 					},
 					promptForRedirectUrl: (signal) =>
 						ctx.ui.input(

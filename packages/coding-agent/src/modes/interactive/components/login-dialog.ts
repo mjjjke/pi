@@ -1,5 +1,16 @@
 import type { AuthInfoLink, OAuthDeviceCodeInfo } from "@earendil-works/pi-ai";
-import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+	Container,
+	type Focusable,
+	getKeybindings,
+	Input,
+	Spacer,
+	sanitizeTerminalText,
+	Text,
+	type TUI,
+} from "@earendil-works/pi-tui";
+import { browserLink } from "../../../utils/browser-link.ts";
+import { authorizeBrowserUrl } from "../../../utils/link-policy.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
 import { theme } from "../theme/theme.ts";
 import { AuthUrlComponent } from "./auth-url.ts";
@@ -104,10 +115,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 		if (instructions) {
 			this.contentContainer.addChild(new Spacer(1));
-			this.contentContainer.addChild(new Text(theme.fg("warning", instructions), 1, 0));
+			this.contentContainer.addChild(new Text(theme.fg("warning", sanitizeTerminalText(instructions)), 1, 0));
 		}
 
-		openBrowser(url);
+		const target = authorizeBrowserUrl(url);
+		if (target) openBrowser(target);
 		this.tui.requestRender();
 	}
 
@@ -118,11 +130,11 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.authUrl = undefined;
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
-		const linkedUrl = `\x1b]8;;${info.verificationUri}\x07${info.verificationUri}\x1b]8;;\x07`;
+		const linkedUrl = browserLink(info.verificationUri, info.verificationUri);
 		this.contentContainer.addChild(new Text(theme.fg("accent", linkedUrl), 1, 0));
 
 		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
-		const hyperlink = `\x1b]8;;${info.verificationUri}\x07${clickHint}\x1b]8;;\x07`;
+		const hyperlink = browserLink(clickHint, info.verificationUri);
 		this.contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("warning", `Enter code: ${info.userCode}`), 1, 0));
@@ -189,10 +201,10 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/** Show provider-owned information and links without starting an auth callback flow. */
 	showInfo(message: string, links: readonly AuthInfoLink[] = [], showCloseHint = false): void {
 		this.contentContainer.addChild(new Spacer(1));
-		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
+		this.contentContainer.addChild(new Text(theme.fg("text", sanitizeTerminalText(message)), 1, 0));
 		for (const link of links) {
 			const text = link.label ? `${link.label}: ${link.url}` : link.url;
-			const hyperlink = `\x1b]8;;${link.url}\x07${text}\x1b]8;;\x07`;
+			const hyperlink = browserLink(text, link.url);
 			this.contentContainer.addChild(new Text(theme.fg("accent", hyperlink), 1, 0));
 		}
 		if (showCloseHint) {

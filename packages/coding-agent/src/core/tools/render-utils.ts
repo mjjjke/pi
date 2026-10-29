@@ -1,9 +1,16 @@
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@earendil-works/pi-tui";
+import {
+	getCapabilities,
+	getImageDimensions,
+	hyperlink,
+	imageFallback,
+	sanitizeTerminalText,
+} from "@earendil-works/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
+import { authorizeLinkTarget } from "../../utils/link-policy.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 import type { ToolRenderContext } from "../extensions/types.ts";
@@ -17,10 +24,17 @@ export function shortenPath(path: unknown): string {
 	return path;
 }
 
-export function linkPath(styledText: string, rawPath: string, cwd: string): string {
-	if (!getCapabilities().hyperlinks) return styledText;
-	const absolutePath = resolvePath(rawPath, cwd);
-	return hyperlink(styledText, pathToFileURL(absolutePath).href);
+export function linkPath(
+	rawLabel: string,
+	rawPath: string,
+	cwd: string,
+	options: { line?: number; col?: number; style?: (text: string) => string } = {},
+): string {
+	const label = sanitizeTerminalText(rawLabel);
+	const styled = options.style?.(label) ?? label;
+	if (!getCapabilities().hyperlinks) return styled;
+	const target = authorizeLinkTarget(pathToFileURL(resolvePath(rawPath, cwd)).href, options);
+	return target ? hyperlink(styled, target) : styled;
 }
 
 export function str(value: unknown): string | null {
@@ -181,5 +195,5 @@ export function renderToolPath(
 	if (rawPath === null) return invalidArgText(theme);
 	const value = rawPath || options?.emptyFallback;
 	if (!value) return theme.fg("toolOutput", "...");
-	return linkPath(theme.fg("accent", shortenPath(value)), value, cwd);
+	return linkPath(shortenPath(value), value, cwd, { style: (text) => theme.fg("accent", text) });
 }

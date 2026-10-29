@@ -12,6 +12,7 @@ import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME } from "../../config.ts";
 import { validateMcpServerConfig } from "../../core/mcp-servers.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
+import { authorizeBrowserUrl } from "../../utils/link-policy.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import {
 	addMcpServerConfig,
@@ -546,8 +547,10 @@ async function login(
 			challenge: connection.challenge,
 			prompt: {
 				showAuthorizationUrl: (authorizationUrl) => {
+					const target = authorizeBrowserUrl(authorizationUrl.href);
+					if (!target) throw new Error("Not opened: unsupported URL scheme");
 					log(`Sign in to MCP server "${name}" in your browser:\n${authorizationUrl.href}`);
-					openUrl(authorizationUrl.href);
+					openUrl(target);
 				},
 				promptForRedirectUrl: (signal) => waitForRedirectUrl(signal, interactive),
 			},

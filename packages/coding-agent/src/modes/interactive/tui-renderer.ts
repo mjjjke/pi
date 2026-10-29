@@ -1,6 +1,7 @@
 import type { Terminal, WheelScrollLines } from "@earendil-works/pi-tui";
-import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
+import { ProcessTerminal, setImageLinkPolicy, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
+import { authorizeLinkTarget, openTranscriptLink, transcriptSinkPolicy } from "../../utils/link-policy.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { keyDisplayText } from "./components/keybinding-hints.ts";
 import { theme } from "./theme/theme.ts";
@@ -21,9 +22,10 @@ export function createInteractiveTui(options: InteractiveTuiOptions & { readonly
 export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen;
 export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen {
 	const terminal = options.terminal ?? new ProcessTerminal();
+	setImageLinkPolicy((target) => authorizeLinkTarget(target, { origin: "imageFallback" }));
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
-		return new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
+		const tui = new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),
 			searchCurrentMatchStyle: (text) => theme.bold(theme.inverse(styleSearchMatch(text))),
 			searchNavigationButtonStyle: (text, hovered) => (hovered ? theme.underline(text) : text),
@@ -32,7 +34,10 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				const label = ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ""} `;
 				return theme.bg("selectedBg", theme.fg("text", label));
 			},
-			openUrl: openBrowser,
+			openUrl: (target) => {
+				const reason = openTranscriptLink(target, {}, openBrowser);
+				if (reason) tui.flash(reason);
+			},
 			onRightClickPaste: options.onRightClickPaste,
 			copyOnSelect: options.fullscreenCopyOnSelect,
 			wheelScrollLines: options.fullscreenWheelScrollLines ?? "auto",
@@ -45,8 +50,12 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 		});
+		tui.setLinkPolicy(transcriptSinkPolicy());
+		return tui;
 	}
-	return new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
+	const tui = new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
+	tui.setLinkPolicy(transcriptSinkPolicy());
+	return tui;
 }
 
 /** Stable reference for components while InteractiveMode replaces the active renderer. */

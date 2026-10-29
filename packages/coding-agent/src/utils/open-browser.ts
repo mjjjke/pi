@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 
 /**
  * Open a URL or file in the platform browser/default handler.
+ * Low-level primitive: callers must authorize the target first.
  *
  * This intentionally never invokes a shell. On Windows, do not use
  * `cmd /c start`: cmd.exe re-parses metacharacters (&, |, ^, ...) before

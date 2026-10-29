@@ -4,11 +4,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_RADIUS_GATEWAY } from "@earendil-works/pi-ai/providers/radius-config";
-import { type Container, type EditorComponent, hyperlink, type TUI } from "@earendil-works/pi-tui";
+import type { Container, EditorComponent, TUI } from "@earendil-works/pi-tui";
 import { getAuthCredential } from "../../cli/auth-command.ts";
 import { getShareViewerUrl } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { exportSessionToJsonl } from "../../core/session-export.ts";
+import { browserLink } from "../../utils/browser-link.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { theme } from "./theme/theme.ts";
 
@@ -150,7 +151,7 @@ async function tryShareViaRadius(tmpFile: string, context: SessionShareContext):
 			return true;
 		}
 		const shareUrl = json.artifact.canonical_url;
-		context.showStatus(`Share URL: ${hyperlink(shareUrl, shareUrl)}`);
+		context.showStatus(`Share URL: ${browserLink(shareUrl, shareUrl)}`);
 		return true;
 	} catch (error: unknown) {
 		if (!loader.signal.aborted) {
@@ -207,7 +208,7 @@ async function shareViaGist(tmpFile: string, context: SessionShareContext): Prom
 		}
 
 		const previewUrl = getShareViewerUrl(gistId);
-		context.showStatus(`Share URL: ${hyperlink(previewUrl, previewUrl)}\nGist: ${hyperlink(gistUrl, gistUrl)}`);
+		context.showStatus(`Share URL: ${browserLink(previewUrl, previewUrl)}\nGist: ${browserLink(gistUrl, gistUrl)}`);
 	} catch (error: unknown) {
 		if (!loader.signal.aborted) {
 			restoreEditor(loader, context);
