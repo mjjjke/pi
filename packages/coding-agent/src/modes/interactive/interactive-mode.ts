@@ -31,12 +31,12 @@ import type {
 } from "@earendil-works/pi-tui";
 import * as TuiLayouts from "@earendil-works/pi-tui";
 import {
+	allocateLinkId,
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
 	fuzzyFilter,
 	getCapabilities,
-	hyperlink,
 	Markdown,
 	matchesKey,
 	Spacer,
@@ -141,11 +141,13 @@ import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
+import { browserLink } from "../../utils/browser-link.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { ensurePngTranscoder } from "../../utils/image-convert.ts";
+import { configureLinkRendering } from "../../utils/link-rendering.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -673,6 +675,9 @@ export class InteractiveMode {
 		});
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
+			cwd: this.sessionManager.getCwd(),
+			editorLinks: this.settingsManager.getEditorLinks(),
+			linkOpenModifier: this.settingsManager.getLinkOpenModifier(),
 			tuiMode,
 			showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 			logDirectory: getAgentDir(),
@@ -961,6 +966,9 @@ export class InteractiveMode {
 		if (TuiLayouts.isViewportTUI(previousUi)) previousUi.setLayoutRoot(undefined);
 
 		const nextUi = createInteractiveTui({
+			cwd: this.sessionManager.getCwd(),
+			editorLinks: this.settingsManager.getEditorLinks(),
+			linkOpenModifier: this.settingsManager.getLinkOpenModifier(),
 			tuiMode: mode,
 			showHardwareCursor,
 			logDirectory: getAgentDir(),
@@ -2169,6 +2177,12 @@ export class InteractiveMode {
 	}
 
 	private applyRuntimeSettings(): void {
+		configureLinkRendering(
+			this.ui,
+			this.sessionManager.getCwd(),
+			this.settingsManager.getEditorLinks(),
+			this.settingsManager.getLinkOpenModifier(),
+		);
 		setCapabilityOverrides(this.settingsManager.getTerminalCapabilityOverrides());
 		this.ensurePngTranscoder();
 		configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
@@ -4979,9 +4993,10 @@ export class InteractiveMode {
 			theme.fg("muted", `New version ${release.version} is available. Run `) +
 			theme.fg("accent", `${APP_NAME} update`);
 		const changelogUrl = "https://pi.dev/changelog";
+		const changelogLinkId = allocateLinkId();
 		const changelogLine = () => {
 			const changelogLink = getCapabilities().hyperlinks
-				? hyperlink(theme.fg("accent", changelogUrl), changelogUrl)
+				? theme.fg("accent", browserLink(changelogUrl, changelogUrl, changelogLinkId))
 				: theme.fg("accent", changelogUrl);
 			return theme.fg("muted", "Changelog: ") + changelogLink;
 		};

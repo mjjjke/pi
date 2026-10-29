@@ -417,6 +417,19 @@ export const SettingsSchema = Type.Object(
 				description: 'WebSocket connect or open handshake timeout in milliseconds; 0 or "disabled" disables it.',
 			}),
 		),
+		editorLinks: Type.Optional(
+			Type.Union([Type.Literal("file"), Type.Literal("zed"), Type.Literal("vscode")], {
+				default: SETTINGS_DEFAULTS.editorLinks,
+				description:
+					"Editor protocol for clickable transcript file paths. file disables file links except image fallbacks.",
+			}),
+		),
+		linkOpenModifier: Type.Optional(
+			Type.Union([Type.Literal("ctrl"), Type.Literal("none")], {
+				default: SETTINGS_DEFAULTS.linkOpenModifier,
+				description: "Modifier required for fullscreen link activation.",
+			}),
+		),
 		tuiMode: Type.Optional(
 			Type.Union([Type.Literal("regular"), Type.Literal("fullscreen")], {
 				default: SETTINGS_DEFAULTS.tuiMode,

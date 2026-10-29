@@ -1288,6 +1288,15 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getEditorLinks(): "file" | "zed" | "vscode" {
+		const value = this.settings.editorLinks;
+		return value === "zed" || value === "vscode" ? value : SETTINGS_DEFAULTS.editorLinks;
+	}
+
+	getLinkOpenModifier(): "ctrl" | "none" {
+		return this.settings.linkOpenModifier === "none" ? "none" : SETTINGS_DEFAULTS.linkOpenModifier;
+	}
+
 	getTuiMode(): TuiMode {
 		return this.settings.tuiMode === "regular" ? "regular" : SETTINGS_DEFAULTS.tuiMode;
 	}

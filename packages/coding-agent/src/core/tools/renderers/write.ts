@@ -10,7 +10,7 @@ import { Container, Text } from "@earendil-works/pi-tui";
 import { keyHint } from "../../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
-import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "../render-utils.ts";
+import { normalizeDisplayText, renderToolPath, replaceTabs, str, toolLinkId } from "../render-utils.ts";
 
 type WriteHighlightCache = {
 	rawPath: string | null;
@@ -99,10 +99,11 @@ function formatWriteCall(
 	theme: Theme,
 	cache: WriteHighlightCache | undefined,
 	cwd: string,
+	id: string,
 ): string {
 	const rawPath = str(args?.file_path ?? args?.path);
 	const fileContent = str(args?.content);
-	const pathDisplay = renderToolPath(rawPath, theme, cwd);
+	const pathDisplay = renderToolPath(rawPath, theme, cwd, { id, line: 1 });
 	let text = `${theme.fg("toolTitle", theme.bold("write"))} ${pathDisplay}`;
 
 	if (fileContent === null) {
@@ -163,6 +164,7 @@ export const writeRenderers: Pick<ToolDefinition<any, any>, "renderCall" | "rend
 				theme,
 				component.cache,
 				context.cwd,
+				toolLinkId(context.state),
 			),
 		);
 		return component;

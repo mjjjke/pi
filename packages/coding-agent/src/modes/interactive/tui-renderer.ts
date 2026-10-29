@@ -1,13 +1,17 @@
 import type { Terminal, WheelScrollLines } from "@earendil-works/pi-tui";
-import { ProcessTerminal, setImageLinkPolicy, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
+import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
-import { authorizeLinkTarget, openTranscriptLink, transcriptSinkPolicy } from "../../utils/link-policy.ts";
+import { type EditorLinks, openTranscriptLink } from "../../utils/link-policy.ts";
+import { configureLinkRendering, getEditorLinks } from "../../utils/link-rendering.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { keyDisplayText } from "./components/keybinding-hints.ts";
 import { theme } from "./theme/theme.ts";
 
 export interface InteractiveTuiOptions {
 	readonly tuiMode: "regular" | "fullscreen";
+	readonly cwd?: string;
+	readonly editorLinks?: EditorLinks;
+	readonly linkOpenModifier?: "ctrl" | "none";
 	readonly showHardwareCursor: boolean;
 	readonly logDirectory: string;
 	readonly terminal?: Terminal;
@@ -22,7 +26,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions & { readonly
 export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen;
 export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScreen | TuiAltScreen {
 	const terminal = options.terminal ?? new ProcessTerminal();
-	setImageLinkPolicy((target) => authorizeLinkTarget(target, { origin: "imageFallback" }));
+
 	if (options.tuiMode === "fullscreen") {
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
 		const tui = new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
@@ -35,7 +39,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				return theme.bg("selectedBg", theme.fg("text", label));
 			},
 			openUrl: (target) => {
-				const reason = openTranscriptLink(target, {}, openBrowser);
+				const reason = openTranscriptLink(target, { editorLinks: getEditorLinks() }, openBrowser);
 				if (reason) tui.flash(reason);
 			},
 			onRightClickPaste: options.onRightClickPaste,
@@ -50,11 +54,21 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 				}
 			},
 		});
-		tui.setLinkPolicy(transcriptSinkPolicy());
+		configureLinkRendering(
+			tui,
+			options.cwd ?? process.cwd(),
+			options.editorLinks ?? "file",
+			options.linkOpenModifier ?? "ctrl",
+		);
 		return tui;
 	}
 	const tui = new TuiMainScreen(terminal, options.showHardwareCursor, options.logDirectory);
-	tui.setLinkPolicy(transcriptSinkPolicy());
+	configureLinkRendering(
+		tui,
+		options.cwd ?? process.cwd(),
+		options.editorLinks ?? "file",
+		options.linkOpenModifier ?? "ctrl",
+	);
 	return tui;
 }
 

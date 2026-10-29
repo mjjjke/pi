@@ -1,4 +1,4 @@
-import { Container, Text, type TUI } from "@earendil-works/pi-tui";
+import { allocateLinkId, Container, Text, type TUI } from "@earendil-works/pi-tui";
 import { browserLink } from "../../../utils/browser-link.ts";
 import { copyToClipboard } from "../../../utils/clipboard.ts";
 import { theme } from "../theme/theme.ts";
@@ -10,6 +10,7 @@ import { keyHint } from "./keybinding-hints.ts";
  */
 export class AuthUrlComponent extends Container {
 	readonly url: string;
+	private readonly linkId = allocateLinkId();
 	private readonly tui: TUI;
 	private readonly hint: Text;
 
@@ -17,7 +18,7 @@ export class AuthUrlComponent extends Container {
 		super();
 		this.tui = tui;
 		this.url = url;
-		this.addChild(new Text(theme.fg("accent", browserLink(url, url)), 1, 0));
+		this.addChild(new Text(theme.fg("accent", browserLink(url, url, `${this.linkId}-url`)), 1, 0));
 		this.hint = new Text("", 1, 0);
 		this.addChild(this.hint);
 		this.setHint(keyHint("app.message.copy", "to copy"));
@@ -25,7 +26,9 @@ export class AuthUrlComponent extends Container {
 
 	private setHint(suffix: string): void {
 		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
-		this.hint.setText(`${theme.fg("dim", browserLink(clickHint, this.url))} ${theme.fg("dim", "•")} ${suffix}`);
+		this.hint.setText(
+			`${theme.fg("dim", browserLink(clickHint, this.url, `${this.linkId}-hint`))} ${theme.fg("dim", "•")} ${suffix}`,
+		);
 		this.tui.requestRender();
 	}
 

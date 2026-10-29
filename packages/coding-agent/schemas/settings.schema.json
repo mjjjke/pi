@@ -697,6 +697,38 @@
       ],
       "description": "WebSocket connect or open handshake timeout in milliseconds; 0 or \"disabled\" disables it."
     },
+    "editorLinks": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "file"
+        },
+        {
+          "type": "string",
+          "const": "zed"
+        },
+        {
+          "type": "string",
+          "const": "vscode"
+        }
+      ],
+      "default": "file",
+      "description": "Editor protocol for clickable transcript file paths. file disables file links except image fallbacks."
+    },
+    "linkOpenModifier": {
+      "anyOf": [
+        {
+          "type": "string",
+          "const": "ctrl"
+        },
+        {
+          "type": "string",
+          "const": "none"
+        }
+      ],
+      "default": "ctrl",
+      "description": "Modifier required for fullscreen link activation."
+    },
     "tuiMode": {
       "anyOf": [
         {

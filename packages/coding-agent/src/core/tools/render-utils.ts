@@ -2,15 +2,17 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import {
+	allocateLinkId,
 	getCapabilities,
 	getImageDimensions,
-	hyperlink,
 	imageFallback,
+	linkTo,
 	sanitizeTerminalText,
 } from "@earendil-works/pi-tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { authorizeLinkTarget } from "../../utils/link-policy.ts";
+import { getEditorLinks } from "../../utils/link-rendering.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 import type { ToolRenderContext } from "../extensions/types.ts";
@@ -24,17 +26,30 @@ export function shortenPath(path: unknown): string {
 	return path;
 }
 
+const toolLinkIds = new WeakMap<object, string>();
+export function toolLinkId(state: object): string {
+	let id = toolLinkIds.get(state);
+	if (!id) {
+		id = allocateLinkId();
+		toolLinkIds.set(state, id);
+	}
+	return id;
+}
+
 export function linkPath(
 	rawLabel: string,
 	rawPath: string,
 	cwd: string,
-	options: { line?: number; col?: number; style?: (text: string) => string } = {},
+	options: { line?: number; col?: number; id?: string; style?: (text: string) => string } = {},
 ): string {
 	const label = sanitizeTerminalText(rawLabel);
 	const styled = options.style?.(label) ?? label;
 	if (!getCapabilities().hyperlinks) return styled;
-	const target = authorizeLinkTarget(pathToFileURL(resolvePath(rawPath, cwd)).href, options);
-	return target ? hyperlink(styled, target) : styled;
+	const target = authorizeLinkTarget(pathToFileURL(resolvePath(rawPath, cwd)).href, {
+		...options,
+		editorLinks: getEditorLinks(),
+	});
+	return target ? linkTo(styled, target, { id: options.id }) : styled;
 }
 
 export function str(value: unknown): string | null {
@@ -190,10 +205,11 @@ export function renderToolPath(
 	rawPath: string | null,
 	theme: Theme,
 	cwd: string,
-	options?: { emptyFallback?: string },
+	options?: { emptyFallback?: string; line?: number; col?: number; id?: string; link?: boolean },
 ): string {
 	if (rawPath === null) return invalidArgText(theme);
 	const value = rawPath || options?.emptyFallback;
 	if (!value) return theme.fg("toolOutput", "...");
-	return linkPath(shortenPath(value), value, cwd, { style: (text) => theme.fg("accent", text) });
+	if (options?.link === false) return theme.fg("accent", sanitizeTerminalText(shortenPath(value)));
+	return linkPath(shortenPath(value), value, cwd, { ...options, style: (text) => theme.fg("accent", text) });
 }

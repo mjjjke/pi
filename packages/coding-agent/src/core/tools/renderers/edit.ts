@@ -12,7 +12,7 @@ import type { Theme } from "../../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition } from "../../extensions/types.ts";
 import type { EditToolDetails } from "../edit.ts";
 import { computeEditsDiff, type Edit, type EditDiffError, type EditDiffResult } from "../edit-diff.ts";
-import { renderToolPath, str } from "../render-utils.ts";
+import { renderToolPath, str, toolLinkId } from "../render-utils.ts";
 
 type EditPreview = EditDiffResult | EditDiffError;
 export type EditRenderState = {
@@ -34,6 +34,7 @@ type EditCallRenderComponent = Box & {
 	previewArgsKey?: string;
 	previewPending?: boolean;
 	settledError?: boolean;
+	linkLine?: number;
 };
 function createEditCallRenderComponent(): EditCallRenderComponent {
 	return Object.assign(new Box(1, 1, (text: string) => text), {
@@ -80,8 +81,14 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 
 	return null;
 }
-function formatEditCall(args: RenderableEditArgs | undefined, theme: Theme, cwd: string): string {
-	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
+function formatEditCall(
+	args: RenderableEditArgs | undefined,
+	theme: Theme,
+	cwd: string,
+	line: number,
+	id: string,
+): string {
+	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd, { line, id });
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 function formatEditResult(
@@ -138,7 +145,7 @@ function buildEditCallComponent(
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.setPaddingX(outputPad);
 	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
+	component.addChild(new Text(formatEditCall(args, theme, cwd, component.linkLine ?? 1, toolLinkId(component)), 0, 0));
 
 	if (!component.preview) {
 		return component;
@@ -181,6 +188,7 @@ export const editRenderers: Pick<ToolDefinition<any, any>, "renderCall" | "rende
 			component.previewArgsKey = argsKey;
 			component.previewPending = false;
 			component.settledError = false;
+			component.linkLine = undefined;
 		}
 
 		if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
@@ -210,6 +218,11 @@ export const editRenderers: Pick<ToolDefinition<any, any>, "renderCall" | "rende
 		const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
 		let changed = false;
 		if (callComponent) {
+			const line = !context.isError ? typedResult.details?.firstChangedLine : undefined;
+			if (line !== undefined && callComponent.linkLine !== line) {
+				callComponent.linkLine = line;
+				changed = true;
+			}
 			if (typeof resultDiff === "string") {
 				changed =
 					setEditPreview(

@@ -61,6 +61,8 @@ export const SETTINGS_DEFAULTS = {
 	},
 	cacheWarming: "streaming",
 	tuiMode: "fullscreen",
+	editorLinks: "file",
+	linkOpenModifier: "ctrl",
 	fullscreenExitOutput: "transcript",
 	fullscreenScrollbar: "auto",
 	fullscreenCopyOnSelect: true,

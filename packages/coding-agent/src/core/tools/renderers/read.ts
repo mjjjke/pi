@@ -16,7 +16,16 @@ import { formatPathRelativeToCwdOrAbsolute } from "../../../utils/paths.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import { resolveToCwd } from "../path-utils.ts";
 import type { ReadToolDetails } from "../read.ts";
-import { formatReadLineRange, getTextOutput, renderToolPath, replaceTabs, str } from "../render-utils.ts";
+import {
+	formatReadLineRange,
+	getTextOutput,
+	linkPath,
+	renderToolPath,
+	replaceTabs,
+	shortenPath,
+	str,
+	toolLinkId,
+} from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../truncate.ts";
 
 interface CompactReadClassification {
@@ -25,13 +34,30 @@ interface CompactReadClassification {
 }
 const COMPACT_RESOURCE_FILE_NAMES = new Set(["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: unknown; limit?: unknown };
-function styledReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): string {
+function readPathLabel(
+	label: string,
+	args: ReadRenderArgs | undefined,
+	theme: Theme,
+	cwd: string,
+	id: string,
+	skill = false,
+): string {
 	const range = formatReadLineRange(args?.offset, args?.limit);
-	return range ? theme.fg("warning", range) : "";
+	const raw = str(args?.file_path ?? args?.path);
+	if (raw === null || !raw) return renderToolPath(raw, theme, cwd);
+	return linkPath(label + range, raw, cwd, {
+		id,
+		line: Number(args?.offset ?? 1),
+		style: (clean) => {
+			const path = range ? clean.slice(0, -range.length) : clean;
+			return theme.fg(skill ? "customMessageText" : "accent", path) + (range ? theme.fg("warning", range) : "");
+		},
+	});
 }
-function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd: string): string {
-	const pathDisplay = renderToolPath(str(args?.file_path ?? args?.path), theme, cwd);
-	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${styledReadLineRange(args, theme)}`;
+function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd: string, id: string): string {
+	const raw = str(args?.file_path ?? args?.path);
+	const pathDisplay = readPathLabel(shortenPath(raw), args, theme, cwd, id);
+	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}`;
 }
 function trimTrailingEmptyLines(lines: string[]): string[] {
 	let end = lines.length;
@@ -87,13 +113,14 @@ function formatCompactReadCall(
 	classification: CompactReadClassification,
 	args: ReadRenderArgs | undefined,
 	theme: Theme,
+	cwd: string,
+	id: string,
 ): string {
 	const expandHint = theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
 	if (classification.kind === "skill") {
 		return (
 			theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
-			theme.fg("customMessageText", classification.label) +
-			styledReadLineRange(args, theme) +
+			readPathLabel(classification.label, args, theme, cwd, id, true) +
 			expandHint
 		);
 	}
@@ -101,8 +128,7 @@ function formatCompactReadCall(
 	return (
 		theme.fg("toolTitle", theme.bold(`read ${classification.kind}`)) +
 		" " +
-		theme.fg("accent", classification.label) +
-		styledReadLineRange(args, theme) +
+		readPathLabel(classification.label, args, theme, cwd, id) +
 		expandHint
 	);
 }
@@ -151,7 +177,9 @@ export const readRenderers: Pick<ToolDefinition<any, ReadToolDetails | undefined
 		const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 		const classification = !context.expanded ? getCompactReadClassification(args, context.cwd) : undefined;
 		text.setText(
-			classification ? formatCompactReadCall(classification, args, theme) : formatReadCall(args, theme, context.cwd),
+			classification
+				? formatCompactReadCall(classification, args, theme, context.cwd, toolLinkId(context.state))
+				: formatReadCall(args, theme, context.cwd, toolLinkId(context.state)),
 		);
 		return text;
 	},
