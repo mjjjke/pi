@@ -237,6 +237,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private linkScreen: string[] = [];
 	private linkOpenModifier: "ctrl" | "none";
 	private selectionDragged = false;
+	private readonly pressedMouseButtons = new Set<TuiMouseButton>();
 	private mouseCapture?: TuiMouseDispatchTarget;
 	private mouseHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent; hit?: TuiMouseDispatchTarget };
 	private mousePressTarget?: TuiMouseDispatchTarget;
@@ -364,6 +365,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStart(): void {
+		this.pressedMouseButtons.clear();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
 		this.stopScrollbarHover();
@@ -406,6 +408,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.pressedMouseButtons.clear();
 		this.hoveredLink = undefined;
 		this.linkScreen = [];
 		this.clearMouseHover();
@@ -765,6 +768,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (!this.parseSgrMouseEvent(data) || this.parseWheelEvent(data)) this.clearLinkHover();
 		if (data === FOCUS_OUT) {
+			this.pressedMouseButtons.clear();
 			if (this.clearMouseHover()) this.requestRender();
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
@@ -1048,6 +1052,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleMouseEvent(raw: SgrMouseEvent): void {
 		const isMotion = (raw.button & 32) !== 0;
+		const button = this.decodeMouseButton(raw.button);
+		if (raw.release) {
+			if (button === "none") this.pressedMouseButtons.clear();
+			else this.pressedMouseButtons.delete(button);
+		} else if (isMotion) {
+			// Native menus can swallow a press/release and leave the terminal reporting
+			// a held button. Normalize before every consumer, not just hover dispatch.
+			if (!this.pressedMouseButtons.has(button)) raw = { ...raw, button: raw.button | 3 };
+		} else if (button !== "none") {
+			this.pressedMouseButtons.add(button);
+		}
 		const type: TuiMouseEvent["type"] = raw.release
 			? "release"
 			: isMotion
@@ -1061,7 +1076,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		try {
 			// Authorized modified links win over a row's press/click handler.
 			if (
-				this.pressedUrl ||
+				(this.pressedUrl && type !== "move") ||
 				(type === "press" &&
 					(raw.button & 3) === 0 &&
 					(this.linkOpenModifier === "none" || event.ctrl) &&
@@ -1070,7 +1085,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				this.handleSelectionMouseEvent(raw);
 				return;
 			}
-			if (this.mouseCapture || this.mousePressTarget) {
+			if (type !== "move" && (this.mouseCapture || this.mousePressTarget)) {
 				const target = this.mouseCapture ?? this.mousePressTarget!;
 				if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
 					this.mousePressMoved = true;
@@ -1277,6 +1292,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleScrollbarMouseEvent(event: SgrMouseEvent): boolean {
 		if (this.scrollbarDrag) {
+			if (!event.release && (event.button & 32) !== 0 && (event.button & 3) === 3) return false;
 			if (event.release) {
 				this.stopScrollbarDrag();
 				return true;
