@@ -432,9 +432,13 @@ function hasClosedToolCalls(messages: AgentMessage[]): boolean {
 	const results = new Set(
 		messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
 	);
+	// Aborted/errored assistant messages never reach a provider (transformMessages drops them),
+	// so their unexecuted tool calls are not open; counting them blocked compaction for good.
 	return messages.every(
 		(message) =>
 			message.role !== "assistant" ||
+			message.stopReason === "aborted" ||
+			message.stopReason === "error" ||
 			message.content.every((block) => block.type !== "toolCall" || results.has(block.id)),
 	);
 }

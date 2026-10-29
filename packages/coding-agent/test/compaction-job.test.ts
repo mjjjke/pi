@@ -401,6 +401,35 @@ describe("unexposed background compaction jobs", () => {
 		expect(h.start()).toMatchObject({ status: "unavailable", reason: "open-tool-call" });
 		expect(h.summarize).not.toHaveBeenCalled();
 	});
+	it.each(["aborted", "error"] as const)("ignores unexecuted tool calls of %s assistant messages", (stopReason) => {
+		const h = fixture();
+		h.branch.splice(1, 0, {
+			type: "message",
+			id: "call",
+			parentId: "old",
+			timestamp: "now",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool", name: "read", arguments: {} }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test",
+				stopReason,
+				timestamp: 1,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			} satisfies AssistantMessage,
+		});
+		h.branch[2].parentId = "call";
+		expect(h.start().status).toBe("started");
+		expect(h.summarize).toHaveBeenCalled();
+	});
 	it("inspection candidates cannot mutate the frozen ready result", async () => {
 		const f = fixture();
 		f.start();
