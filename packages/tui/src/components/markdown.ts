@@ -233,6 +233,8 @@ export function setMarkdownLinkOptions(options: Pick<MarkdownOptions, "linkPolic
 }
 
 export interface MarkdownOptions {
+	/** Defer bare links touching the source end while more text may arrive. */
+	streaming?: boolean;
 	/** Return authorized display-only links in text/codespans, not explicit links or fenced code. */
 	linkify?: MarkdownLinkify;
 	/** Trusted callers may deliberately embed terminal sequences. Default: false. */
@@ -266,6 +268,8 @@ export class Markdown implements Component {
 	private linkIndex = 0;
 	private renderedLinkOptionsVersion = -1;
 	private insideLink = false;
+	private pendingBareLink?: Token;
+	private pendingDiscovery?: Token;
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -339,6 +343,30 @@ export class Markdown implements Component {
 			tokens = markdownParser.lexer(normalizedText);
 			trimPartialClosingFences(tokens);
 			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
+		}
+
+		this.pendingBareLink = undefined;
+		this.pendingDiscovery = undefined;
+		if (this.options.streaming) {
+			// Marked has no source offsets. Only the last leaf in source order can still grow;
+			// checking its raw suffix excludes closing Markdown delimiters and trailing whitespace.
+			let lastToken: Token | undefined;
+			let lastLink: Tokens.Link | undefined;
+			markdownParser.walkTokens(tokens, (token) => {
+				lastToken = token;
+				if (token.type === "link") lastLink = token as Tokens.Link;
+			});
+			if (lastToken?.type === "text" && normalizedText.endsWith(lastToken.raw)) {
+				this.pendingDiscovery = lastToken;
+			}
+			if (
+				lastToken &&
+				lastLink?.tokens.includes(lastToken) &&
+				!/^[[<]/.test(lastLink.raw) &&
+				normalizedText.endsWith(lastLink.raw)
+			) {
+				this.pendingBareLink = lastLink;
+			}
 		}
 
 		// Convert tokens to styled terminal output
@@ -672,13 +700,19 @@ export class Markdown implements Component {
 		return lines;
 	}
 
-	private linkifyText(text: string, kind: "text" | "codespan", style: (text: string) => string): string {
+	private linkifyText(
+		text: string,
+		kind: "text" | "codespan",
+		style: (text: string) => string,
+		pending = false,
+	): string {
 		const linkify = this.options.linkify ?? defaultLinkOptions.linkify;
 		if (this.insideLink || !linkify || !getCapabilities().hyperlinks) return style(text);
 		let result = "";
 		let offset = 0;
 		for (const span of linkify(text, kind)) {
 			if (span.start < offset || span.end <= span.start || span.end > text.length) continue;
+			if (pending && span.end === text.length) continue;
 			result += style(text.slice(offset, span.start));
 			const target = span.target; // linkify authorizes discoveries; the output sink still checks every emitted target.
 			const label = style(text.slice(span.start, span.end));
@@ -718,7 +752,12 @@ export class Markdown implements Component {
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						result += this.linkifyText(token.text, "text", applyTextWithNewlines);
+						result += this.linkifyText(
+							token.text,
+							"text",
+							applyTextWithNewlines,
+							token === this.pendingDiscovery,
+						);
 					}
 					break;
 
@@ -747,6 +786,10 @@ export class Markdown implements Component {
 					this.insideLink = true;
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					this.insideLink = false;
+					if (token === this.pendingBareLink) {
+						result += linkText;
+						break;
+					}
 					const target = (this.options.linkPolicy ?? defaultLinkOptions.linkPolicy ?? webLinkPolicy)(token.href);
 					if (!target) {
 						result += linkText;

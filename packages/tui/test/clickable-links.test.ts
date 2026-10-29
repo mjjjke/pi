@@ -106,6 +106,58 @@ test("Markdown sanitizes every token sink and transformed source, with an explic
 	);
 });
 
+test("streaming only defers discoveries and bare autolinks at the source end", () => {
+	setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+	const linkify = (text: string) =>
+		[...text.matchAll(/a\.ts/g)].map((match) => ({
+			start: match.index,
+			end: match.index + match[0].length,
+			target: "https://files.test/a.ts",
+		}));
+	for (const prefix of ["", "- ", "> ", "# "]) {
+		for (const tail of ["https://pi/", "a.ts"]) {
+			const source = `${prefix}${tail} and ${tail}`;
+			const markdown = new Markdown(source, 0, 0, theme, undefined, { streaming: true, linkify });
+			assert.equal(
+				(
+					markdown
+						.render(120)
+						.join("")
+						.match(/\x1b\]8;id=/g) ?? []
+				).length,
+				1,
+			);
+			markdown.setText(`${source} `);
+			assert.equal(
+				(
+					markdown
+						.render(120)
+						.join("")
+						.match(/\x1b\]8;id=/g) ?? []
+				).length,
+				2,
+			);
+			assert.match(
+				new Markdown(`${prefix}${tail}`, 0, 0, theme, undefined, { linkify }).render(120).join(""),
+				/\x1b\]8;/,
+			);
+		}
+	}
+	for (const source of [
+		"[label](https://pi/)",
+		"<https://pi/>",
+		"`a.ts`",
+		"**a.ts**",
+		"https://pi/\n\n```\nhttps://pi/",
+		"a.ts\n\n```\na.ts",
+	]) {
+		assert.match(
+			new Markdown(source, 0, 0, theme, undefined, { streaming: true, linkify }).render(120).join(""),
+			/\x1b\]8;/,
+		);
+	}
+});
+
 test("plain click selects; ctrl click opens before enclosing row handlers; dragging cancels", async () => {
 	const terminal = new VirtualTerminal(80, 10);
 	const opened: string[] = [];
