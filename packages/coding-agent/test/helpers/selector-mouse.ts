@@ -103,8 +103,18 @@ export function mouseContract(
 	it("ignores fallback clicks, other buttons, drag/release and inert lines", () => {
 		const f = create(3);
 		try {
-			for (const type of ["release", "drag", "move", "leave"] as const)
-				expect(mouse(f.selector, row, { type })).toBeUndefined();
+			for (const type of ["release", "drag"] as const) expect(mouse(f.selector, row, { type })).toBeUndefined();
+			const beforeHover = f.selector.render(80);
+			for (const type of ["move", "leave"] as const) {
+				const result = mouse(f.selector, row, { type });
+				expect(result?.handled).toBe(true);
+				expect(result?.focus).not.toBe(true);
+				expect(result?.focusTarget).toBeUndefined();
+				expect(result?.capture).not.toBe(true);
+				expect(f.selector.render(80)).toEqual(beforeHover);
+				expect(f.selected()).toBe(0);
+				expect(f.cancelled()).toBe(0);
+			}
 			for (const button of ["right", "middle"] as const) expect(mouse(f.selector, row, { button })).toBeUndefined();
 			expect(mouse(f.selector, row, { clickSource: "fallback" })).toBeUndefined();
 			expect(mouse(f.selector, inert)).toBeUndefined();

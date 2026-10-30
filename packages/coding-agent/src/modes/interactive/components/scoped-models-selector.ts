@@ -119,6 +119,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	private isDirty = false;
 	private refreshStatusText?: Text;
 	private readonly mouse = new ListMouse<string>({
+		isSelected: (key) => this.filteredItems[this.selectedIndex]?.fullId === key,
 		select: (key) => {
 			const index = this.filteredItems.findIndex((item) => item.fullId === key);
 			if (index < 0) return;
@@ -256,6 +257,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 		if (this.filteredItems.length === 0) {
 			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+			this.mouse.commitRows();
 			return;
 		}
 
@@ -296,6 +298,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 				),
 			);
 		}
+		this.mouse.commitRows();
 	}
 
 	private toggleItem(fullId: string): boolean {
@@ -308,6 +311,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	}
 
 	handleInput(data: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 
 		// Navigation

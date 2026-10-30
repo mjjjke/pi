@@ -37,6 +37,7 @@ export class TrustSelectorComponent extends Container {
 	private readonly onSelectCallback: (selection: TrustSelection) => void;
 	private readonly onCancelCallback: () => void;
 	private readonly mouse = new ListMouse<number>({
+		isSelected: (index) => index === this.selectedIndex,
 		select: (index) => {
 			if (!this.trustOptions[index]) return;
 			this.selectedIndex = index;
@@ -125,9 +126,11 @@ export class TrustSelectorComponent extends Container {
 			const label = isSelected ? theme.fg("accent", option.label) : theme.fg("text", option.label);
 			this.listContainer.addChild(this.mouse.row(i, new Text(`${prefix}${currentMarker}${label}`, 1, 0)));
 		}
+		this.mouse.commitRows();
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);

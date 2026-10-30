@@ -49,6 +49,7 @@ export class ExtensionSelectorComponent extends Container {
 		this.baseTitle = title;
 		this.mouseReadyAt = Date.now() + (opts?.mouseDelayMs ?? 0);
 		this.mouse = new ListMouse<number>({
+			isSelected: (index) => index === this.selectedIndex,
 			select: (i) => {
 				this.selectedIndex = i;
 				this.updateList();
@@ -129,9 +130,11 @@ export class ExtensionSelectorComponent extends Container {
 				new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.options.length})`), 1, 0),
 			);
 		}
+		this.mouse.commitRows();
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "app.tools.expand")) {
 			this.onToggleToolsExpanded?.();

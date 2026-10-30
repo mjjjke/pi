@@ -48,7 +48,15 @@ describe("extension selector mouse", () => {
 		const selected = vi.fn();
 		const cancelled = vi.fn();
 		const selector = new ExtensionSelectorComponent("Approve?", ["Yes", "No"], selected, cancelled);
-		expect(mouse(selector, "No", { type: "move", button: "none" })).toBeUndefined();
+		const beforeHover = selector.render(80);
+		const move = mouse(selector, "No", { type: "move", button: "none" });
+		expect(move?.handled).toBe(true);
+		expect(move?.focus).not.toBe(true);
+		expect(move?.focusTarget).toBeUndefined();
+		expect(move?.capture).not.toBe(true);
+		expect(selector.render(80)).toEqual(beforeHover);
+		expect(selected).not.toHaveBeenCalled();
+		expect(cancelled).not.toHaveBeenCalled();
 		expect(mouse(selector, "No", { type: "wheel", button: "none", wheelDelta: 1 })).toBeUndefined();
 		expect(mouse(selector, "Approve?")).toBeUndefined();
 		expect(mouse(selector, "navigate")).toBeUndefined();

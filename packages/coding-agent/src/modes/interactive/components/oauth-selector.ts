@@ -82,6 +82,10 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	private onCancelCallback: () => void;
 	private showAuthTypeLabels: boolean;
 	private readonly mouse = new ListMouse<string>({
+		isSelected: (key) => {
+			const provider = this.filteredProviders[this.selectedIndex];
+			return provider !== undefined && `${provider.id}\0${provider.authType}` === key;
+		},
 		select: (key) => {
 			const index = this.filteredProviders.findIndex((provider) => `${provider.id}\0${provider.authType}` === key);
 			if (index < 0) return;
@@ -217,9 +221,11 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 					: "No matching providers";
 			this.listContainer.addChild(new TruncatedText(theme.fg("muted", `  ${message}`), 1, 0));
 		}
+		this.mouse.commitRows();
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		// Up arrow
 		if (kb.matches(keyData, "tui.select.up")) {

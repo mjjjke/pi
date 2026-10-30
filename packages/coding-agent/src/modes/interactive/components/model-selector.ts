@@ -74,6 +74,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private refreshTimeout?: ReturnType<typeof setTimeout>;
 	private closed = false;
 	private readonly mouse = new ListMouse<string>({
+		isSelected: (key) => {
+			const item = this.filteredModels[this.selectedIndex];
+			return item !== undefined && `${item.provider}\0${item.id}` === key;
+		},
 		select: (key) => {
 			const index = this.filteredModels.findIndex((item) => `${item.provider}\0${item.id}` === key);
 			if (index < 0) return;
@@ -381,9 +385,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				new Text(theme.fg(this.refreshStatusSuccess ? "success" : "muted", `  ${this.refreshStatusMessage}`), 0, 0),
 			);
 		}
+		this.mouse.commitRows();
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.input.tab")) {
 			if (this.scopedModelItems.length > 0) {
