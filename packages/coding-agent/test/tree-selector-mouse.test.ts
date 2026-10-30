@@ -1,10 +1,12 @@
 import {
+	type ListMouse,
 	ScrollView,
 	setKeybindings,
 	stripTerminalSequences,
 	Text,
 	type TuiMouseEvent,
 	VStack,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TuiAltScreen } from "../../tui/src/tui-alt-screen.ts";
@@ -156,6 +158,48 @@ describe("tree selector mouse", () => {
 		click(f.selector, "D12", glyph(f.selector, "D12", 40), 40);
 		expect(plain(f.selector, 160).join("\n")).toContain("user: D13");
 	});
+	it.each([1, 3, 12, 40, 80, 160])("keeps Unicode fold geometry within width %i before and after pan", (width) => {
+		const tree = [...deepTree(), node("second", null, [node("second-child", "second")])];
+		const decorate = (nodes: SessionTreeNode[]) => {
+			for (const item of nodes) {
+				if (item.entry.type === "message" && item.entry.message.role === "user")
+					item.entry.message.content = `${item.entry.id} ${"界🙂e\u0301".repeat(50)}`;
+				item.label = "広い🙂e\u0301ラベル";
+				decorate(item.children);
+			}
+		};
+		decorate(tree);
+		const f = fixture(tree, 200);
+		const hits = Reflect.get(f.list, "mouse") as ListMouse<string>;
+		const full = f.list.render(160).map(stripTerminalSequences);
+		for (const id of ["D0", "second"]) {
+			const row = full.find((line) => line.includes(`user: ${id} `))!;
+			expect(row).toContain("⊟");
+			expect(visibleWidth(row.slice(0, row.indexOf("⊟")))).toBe(2);
+		}
+		for (const selection of [0, 12]) {
+			if (selection > 0) for (let i = 0; i < selection; i++) f.selector.handleInput("\x1b[B");
+			const rows = f.list.render(width).map(stripTerminalSequences);
+			for (const [y, line] of rows.entries()) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+				const index = line.search(/[⊟⊞]/);
+				const x = index < 0 ? -1 : visibleWidth(line.slice(0, index));
+				for (let cell = 0; cell < width; cell++)
+					expect(hits.hitTest(cell, y)?.zone).toBe(cell === x ? "fold" : undefined);
+			}
+			if (width < 160) expect(rows.join("\n")).not.toContain("界🙂e\u0301".repeat(50));
+			if (selection > 0 && width >= 40) {
+				const row = rows.find((line) => line.startsWith("› "))!;
+				expect(row).toContain("user: D12");
+				if (width === 40) {
+					const unpanned = full.find((line) => line.includes("user: D12 "))!;
+					expect(visibleWidth(row.slice(0, row.indexOf("⊟")))).toBeLessThan(
+						visibleWidth(unpanned.slice(0, unpanned.indexOf("⊟"))),
+					);
+				}
+			}
+		}
+	});
 	it("a glyph scrolled out of the body does not leave a zone in the fixed gutter", () => {
 		const f = fixture(deepTree(), 200);
 		for (let i = 0; i < 12; i++) f.selector.handleInput("\x1b[B");
@@ -226,7 +270,7 @@ describe("tree selector mouse", () => {
 		const short = fixture();
 		expect(mouse(short.selector, "user: root", { type: "wheel", wheelDelta: 1 })).toBeUndefined();
 	});
-	for (const mode of ["label", "search"] as const)
+	for (const mode of ["label-save", "label-cancel", "search"] as const)
 		it(`real renderer cancels a held gesture for ${mode}, retains focus and restores usable rows`, () => {
 			const f = fixture();
 			const terminal = new VirtualTerminal(80, 40);
@@ -242,13 +286,14 @@ describe("tree selector mouse", () => {
 						.map(stripTerminalSequences)
 						.findIndex((line) => line.includes("user: branch")) + 1;
 				terminal.sendInput(`\x1b[<0;4;${y}M`);
-				terminal.sendInput(mode === "label" ? "L" : "other");
+				terminal.sendInput(mode === "search" ? "other" : "L");
 				tui.renderNow();
-				if (mode === "label") {
+				if (mode !== "search") {
 					expect(tui.getScreenLines().map(stripTerminalSequences).join("\n")).not.toContain("user: root");
 					terminal.sendInput("saved");
-					terminal.sendInput("\r");
-					expect(f.labeled).toHaveBeenCalledExactlyOnceWith("branch", "saved");
+					terminal.sendInput(mode === "label-save" ? "\r" : "\x1b");
+					if (mode === "label-save") expect(f.labeled).toHaveBeenCalledExactlyOnceWith("branch", "saved");
+					else expect(f.labeled).not.toHaveBeenCalled();
 				} else terminal.sendInput("\x1b");
 				terminal.sendInput(`\x1b[<0;4;${y}m`);
 				expect(f.selected).not.toHaveBeenCalled();
