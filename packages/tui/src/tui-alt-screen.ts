@@ -255,6 +255,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private linkScreen: string[] = [];
 	private lastMouseCtrl = false;
 	private rendererControlHover?: RendererControlHover;
+	private mouseLifecycleGeneration = 0;
 	private pointerShapesEnabled = false;
 	private pointerShape: "pointer" | "default" = "default";
 	private linkOpenModifier: "ctrl" | "none";
@@ -398,6 +399,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStart(): void {
+		this.mouseLifecycleGeneration++;
 		this.pointerShape = "default";
 		this.lastMouseCtrl = false;
 		this.clearRendererControlHover();
@@ -440,6 +442,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.mouseLifecycleGeneration++;
 		this.pressedMouseButtons.clear();
 		this.mouseGestureId = undefined;
 		this.hoveredLink = undefined;
@@ -897,8 +900,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const event = this.createMouseEvent("wheel", wheelEvent.button, wheelEvent.x, wheelEvent.y, { wheelDelta });
 			if (this.reconcileMouseHover(event)) this.requestRender();
 			if (this.reconcileRendererControlHover(event)) this.requestRender();
+			const generation = this.mouseLifecycleGeneration;
 			const overlay = this.dispatchMouseToOverlay(event);
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
+			if (generation !== this.mouseLifecycleGeneration) return { consume: true };
 			if (result) {
 				if (this.applyMouseDispatchResult(event, result)) this.requestRender();
 				if (this.reconcileMouseHover(event)) this.requestRender();
@@ -1154,9 +1159,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private reconcileMouseHoverOwnership(event = this.mouseHover?.event): boolean {
 		const previous = this.mouseHover;
-		return previous && (previous.epoch !== this.interactionEpoch || previous.hoverValid?.() === false)
-			? this.clearMouseHover(event)
-			: false;
+		if (!previous) return false;
+		const invalid = previous.hoverValid?.() === false;
+		if (previous.epoch !== this.interactionEpoch || invalid) {
+			// The helper may already have removed its paint before leave arrives.
+			// Repaint an expired episode without making its pointer report handled.
+			return this.clearMouseHover(event) || invalid;
+		}
+		return false;
 	}
 
 	/** Validate ownership and geometry without synthetic moves or gesture capture changes. */
@@ -1182,6 +1192,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// Vertical wheels are routed separately. Unsupported wheel/extended codes
 		// must not alias left/middle/right through their low two bits.
 		if (raw.button >= 64) return;
+		const generation = this.mouseLifecycleGeneration;
 		const isMotion = (raw.button & 32) !== 0;
 		const button = this.decodeMouseButton(raw.button);
 		if (raw.release) {
@@ -1257,6 +1268,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				}
 				let render = false;
 				const targetResult = this.dispatchMouseToTarget(event, target);
+				if (generation !== this.mouseLifecycleGeneration) return;
 				if (targetResult) {
 					moveTarget = targetResult.target;
 					render = this.applyMouseDispatchResult(event, targetResult);
@@ -1277,6 +1289,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 							gestureId: event.gestureId,
 						});
 						const clickResult = this.dispatchMouseToTarget(clickEvent, target);
+						if (generation !== this.mouseLifecycleGeneration) return;
 						if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
 					}
 					this.clearComponentMouseGesture();
@@ -1298,6 +1311,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
+			if (generation !== this.mouseLifecycleGeneration) return;
 			if (result) {
 				moveTarget = result.target;
 				hoverValid = result.hoverValid;
@@ -1317,40 +1331,42 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(raw)) return;
 			this.handleSelectionMouseEvent(raw);
 		} finally {
-			if (raw.release) this.mouseGestureId = undefined;
-			// A move may already have replaced the helper's episode inside the same
-			// dispatch target. Do not send that new episode the old one's leave.
-			if (type !== "move" && this.reconcileMouseHover(event)) this.requestRender();
-			if (type === "move") {
-				// Modified link activation wins over component handlers, so hover must too.
-				// Keep dispatching moves above for component feedback and leave tracking.
-				this.updateLinkHover(raw.x, raw.y);
-				// Captured targets may receive out-of-bounds moves; those end hover too.
-				if (
-					moveTarget &&
-					(event.screenX < moveTarget.originX ||
-						event.screenX >= moveTarget.originX + moveTarget.width ||
-						event.screenY < moveTarget.originY ||
-						event.screenY >= moveTarget.originY + moveTarget.height)
-				)
-					moveTarget = undefined;
-				if (this.mouseHover?.target.component !== moveTarget?.component && this.clearMouseHover(event))
-					this.requestRender();
-				this.mouseHover = moveTarget
-					? {
-							target: moveTarget,
-							event,
-							hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
-							epoch: this.interactionEpoch,
-							hoverValid,
-							pointerShape,
-						}
-					: undefined;
-				const hit = this.getRendererControlHit(event);
-				this.rendererControlHover = hit ? { ...hit, event, epoch: this.interactionEpoch } : undefined;
-				if (this.activeSearch?.component.setHoveredNavigationDirection(hit?.direction)) this.requestRender();
-			} else if (this.reconcileRendererControlHover(event)) this.requestRender();
-			this.syncPointerShape();
+			if (generation === this.mouseLifecycleGeneration) {
+				if (raw.release) this.mouseGestureId = undefined;
+				// A move may already have replaced the helper's episode inside the same
+				// dispatch target. Do not send that new episode the old one's leave.
+				if (type !== "move" && this.reconcileMouseHover(event)) this.requestRender();
+				if (type === "move") {
+					// Modified link activation wins over component handlers, so hover must too.
+					// Keep dispatching moves above for component feedback and leave tracking.
+					this.updateLinkHover(raw.x, raw.y);
+					// Captured targets may receive out-of-bounds moves; those end hover too.
+					if (
+						moveTarget &&
+						(event.screenX < moveTarget.originX ||
+							event.screenX >= moveTarget.originX + moveTarget.width ||
+							event.screenY < moveTarget.originY ||
+							event.screenY >= moveTarget.originY + moveTarget.height)
+					)
+						moveTarget = undefined;
+					if (this.mouseHover?.target.component !== moveTarget?.component && this.clearMouseHover(event))
+						this.requestRender();
+					this.mouseHover = moveTarget
+						? {
+								target: moveTarget,
+								event,
+								hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
+								epoch: this.interactionEpoch,
+								hoverValid,
+								pointerShape,
+							}
+						: undefined;
+					const hit = this.getRendererControlHit(event);
+					this.rendererControlHover = hit ? { ...hit, event, epoch: this.interactionEpoch } : undefined;
+					if (this.activeSearch?.component.setHoveredNavigationDirection(hit?.direction)) this.requestRender();
+				} else if (this.reconcileRendererControlHover(event)) this.requestRender();
+				this.syncPointerShape();
+			}
 		}
 	}
 

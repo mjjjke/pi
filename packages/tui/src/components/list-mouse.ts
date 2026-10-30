@@ -276,6 +276,14 @@ export class ListMouse<K> {
 			const cleared = this.clearHover();
 			return { handled: true, render: this.options.step(event.wheelDelta < 0 ? -1 : 1) || cleared };
 		}
+		// Reports other than passive motion may end an episode, but never discover one.
+		// Keep this independent of press/click admission and press-time identity.
+		if (
+			(event.type === "press" || event.type === "drag" || event.type === "release") &&
+			this.hover &&
+			(!hit || this.hover.key !== hit.key || this.hover.zone !== hit.zone || this.hover.region !== region)
+		)
+			this.clearHover();
 		if (event.button !== "left") return undefined;
 		if (event.type === "press") {
 			this.pressed = hit ? { ...hit, gestureId: event.gestureId } : undefined;

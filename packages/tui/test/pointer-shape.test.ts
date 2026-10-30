@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it, type TestContext } from "node:test";
-import { ListMouse } from "../src/components/list-mouse.ts";
-import { linkTo, resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
+import { ListMouse, setPointerHoverBackground } from "../src/components/list-mouse.ts";
+import {
+	getCapabilities,
+	linkTo,
+	resetCapabilitiesCache,
+	setCapabilities,
+	setCapabilityOverrides,
+} from "../src/terminal-image.ts";
 import {
 	type Component,
 	Container,
@@ -27,6 +33,8 @@ afterEach(() => {
 		if (saved[key] === undefined) delete process.env[key];
 		else process.env[key] = saved[key];
 	}
+	setPointerHoverBackground(undefined);
+	setCapabilityOverrides({});
 	resetCapabilitiesCache();
 });
 
@@ -166,6 +174,91 @@ describe("renderer-owned pointer shape", () => {
 			assert.deepEqual(terminal.shapes(), [pointer, arrow]);
 			send(move());
 			assert.deepEqual(terminal.shapes(), [pointer, arrow, pointer]);
+		});
+	}
+	it("ends manual row hover on drag into an inert line without activating", async (t) => {
+		const bg = "\x1b[48;5;235m";
+		setPointerHoverBackground(() => bg);
+		let clicks = 0;
+		const mouse = new ListMouse<string>({
+			select() {},
+			activate: () => {
+				clicks++;
+				return true;
+			},
+		});
+		const component: Component = {
+			render(width) {
+				mouse.beginRows();
+				mouse.addRow("row", 0);
+				return mouse.paintHover(["row", "inert"], width);
+			},
+			invalidate() {},
+			handleMouse: (event) => mouse.handle(event),
+		};
+		const { terminal, send, tui } = setup(t, component);
+		send(move());
+		tui.renderNow();
+		assert.ok(tui.getScreenLines()[0].includes(bg));
+		send(press);
+		send("\x1b[<32;2;2M");
+		assert.deepEqual(terminal.shapes(), [pointer, arrow]);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.ok(!tui.getScreenLines()[0].includes(bg), "unhandled drag still schedules hover repaint");
+		send("\x1b[<0;2;2m");
+		tui.renderNow();
+		assert.ok(!tui.getScreenLines()[0].includes(bg));
+		assert.equal(clicks, 0);
+	});
+	it("samples pointer capability overrides only at start", (t) => {
+		const { terminal, send, tui } = setup(t);
+		setCapabilityOverrides({ pointerShapes: false });
+		assert.equal(getCapabilities().pointerShapes, false);
+		send(move());
+		assert.deepEqual(terminal.shapes(), [pointer]);
+		tui.stop();
+		tui.start();
+		tui.renderNow();
+		send(move());
+		assert.deepEqual(terminal.shapes(), [pointer, arrow]);
+		setCapabilityOverrides({ pointerShapes: true });
+		send(move());
+		assert.deepEqual(terminal.shapes(), [pointer, arrow]);
+		tui.stop();
+		tui.start();
+		tui.renderNow();
+		send(move());
+		assert.deepEqual(terminal.shapes(), [pointer, arrow, pointer]);
+	});
+	for (const type of ["move", "wheel"] as const) {
+		it(`discards ${type} results from a synchronous stop/start without reusing gesture IDs`, (t) => {
+			let restart = true;
+			const ids: number[] = [];
+			const component: Component = {
+				render: () => ["row"],
+				invalidate() {},
+				handleMouse(event) {
+					if (event.type === "press") ids.push(event.gestureId!);
+					if (event.type === type && restart) {
+						restart = false;
+						tui.stop();
+						tui.start();
+					}
+					return { handled: true, pointerShape: "pointer" };
+				},
+			};
+			const { terminal, send, tui } = setup(t, component);
+			send(press);
+			send(release);
+			send(type === "move" ? move() : "\x1b[<65;2;1M");
+			assert.deepEqual(terminal.shapes(), [], "old dispatch cannot record a hand in the new lifecycle");
+			tui.renderNow();
+			assert.deepEqual(terminal.shapes(), []);
+			send(press);
+			send(release);
+			assert.ok(ids[1] > ids[0]);
+			send(move());
+			assert.deepEqual(terminal.shapes(), [pointer]);
 		});
 	}
 	it("never emits a default when no hand was sent", (t) => {

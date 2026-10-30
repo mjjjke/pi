@@ -114,6 +114,47 @@ describe("ListMouse hover", () => {
 		assert.ok(painted[0].includes(bg));
 		assert.equal(painted[2], "ijk");
 	});
+	for (const mode of ["manual", "region"] as const) {
+		for (const type of ["press", "drag", "release"] as const) {
+			it(`${mode} ${type} ends hover only on a different row/zone or inert cell`, () => {
+				setPointerHoverBackground(() => bg);
+				for (const target of [{ x: 2 }, { x: 3 }, { y: 2 }, { y: 3 }, { x: -1 }]) {
+					const { mouse } = fixture();
+					const row = mouse.row("A", new Text("row", 0, 0), [{ name: "fold", x: 3, width: 1 }]);
+					const other = mouse.row("B", new Text("other", 0, 0));
+					mouse.commitRows();
+					const dispatch = (input: TuiMouseEvent) =>
+						mode === "manual"
+							? mouse.handle(input)
+							: input.y === 2
+								? other.handleMouse({ ...input, y: 0, height: 1 })
+								: row.handleMouse({ ...input, height: 1 });
+					const move = dispatch(event("move"))!;
+					const result = dispatch(event(type, { button: "left", ...target }));
+					if (type !== "press" || target.y === 3 || target.x === -1) assert.equal(result, undefined);
+					else assert.deepEqual(result, { handled: true, focus: true });
+					const same = target.x === 2;
+					assert.equal(move.hoverValid?.(), same);
+					const painted = mode === "manual" ? mouse.paintHover(["row", "row", "other"], 10) : row.render(10);
+					assert.equal(painted[0].includes(bg), same);
+					dispatch(event(type, { button: "left" }));
+					assert.equal(move.hoverValid?.(), same, "non-moves cannot recreate an episode");
+				}
+			});
+		}
+	}
+	it("ends zone hover without changing press-time key, zone or gesture routing", () => {
+		const zones: string[] = [];
+		const { mouse, activated } = fixture({ zoneClick: (key, zone) => zones.push(`${key}:${zone}`) });
+		const move = mouse.handle(event("move", { x: 3 }))!;
+		mouse.handle(event("press", { button: "left", x: 3, gestureId: 7 }));
+		assert.equal(move.hoverValid?.(), true);
+		mouse.handle(event("release", { button: "left", x: 1, gestureId: 7 }));
+		assert.equal(move.hoverValid?.(), false);
+		mouse.handle(event("click", { button: "left", x: 1, gestureId: 7, clickSource: "captured" }));
+		assert.deepEqual(zones, ["A:fold"]);
+		assert.deepEqual(activated, []);
+	});
 	it("validates every render before provider/selection suppression, including empty and zero-width renders", () => {
 		for (const suppressed of [false, true]) {
 			const { mouse } = fixture({ isSelected: () => suppressed });
