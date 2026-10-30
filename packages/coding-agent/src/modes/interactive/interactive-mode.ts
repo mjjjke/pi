@@ -6392,7 +6392,7 @@ export class InteractiveMode {
 		return result === "Yes";
 	}
 
-	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
+	private async showOAuthSelector(mode: "login" | "logout", reopen = false): Promise<void> {
 		if (mode === "login") {
 			this.showLoginAuthTypeSelector();
 			return;
@@ -6405,6 +6405,8 @@ export class InteractiveMode {
 			this.showError(`Could not read stored credentials: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
+		// Automatic reopens must not replace a dialog opened during credential enumeration.
+		if (reopen && !this.editorContainer.children.includes(this.editor)) return;
 		if (providerOptions.length === 0) {
 			this.showStatus(
 				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
@@ -6427,7 +6429,7 @@ export class InteractiveMode {
 					done();
 					if (!providerOption) return;
 					if (source === "mouse" && !(await this.showLogoutConfirm(providerOption.name, detail))) {
-						if (this.editorContainer.children.includes(this.editor)) void this.showOAuthSelector("logout");
+						if (this.editorContainer.children.includes(this.editor)) void this.showOAuthSelector("logout", true);
 						return;
 					}
 

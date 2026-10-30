@@ -88,7 +88,8 @@ OAuth's public `onSelect` gains a trailing `"keyboard" | "mouse"` source (both
 Enter paths report keyboard). Mouse logout mounts a provider-named confirmation
 immediately: mouse input is ignored for its first 500 ms, including an early press
 released after the deadline; keyboard confirmation is immediate. No/Esc reopens
-the logout chooser only if the editor slot is free. A displaced confirmation stays
+the logout chooser only if the editor slot is free at mount time, after credential
+enumeration completes. A displaced confirmation stays
 unresolved, so it neither logs out nor reopens the chooser. Keyboard logout stays
 direct. No real credentials are used by regression tests. Fork, resume and tree
 remain unmigrated.
