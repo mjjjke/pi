@@ -64,8 +64,13 @@ describe("resume selector mouse", () => {
 	});
 	it("ignores non-primary events, fallback clicks, header and blanks", async () => {
 		const f = await fixture();
-		for (const type of ["release", "drag", "move", "leave"] as const)
-			expect(mouse(f.selector, "session-1", { type })).toBeUndefined();
+		for (const type of ["release", "drag"] as const) expect(mouse(f.selector, "session-1", { type })).toBeUndefined();
+		const beforeHover = f.list.getSelectedSessionPath();
+		for (const type of ["move", "leave"] as const) {
+			expect(mouse(f.selector, "session-1", { type })?.handled).toBe(true);
+			expect(f.list.getSelectedSessionPath()).toBe(beforeHover);
+			expect(f.selected).not.toHaveBeenCalled();
+		}
 		for (const button of ["middle", "right"] as const)
 			expect(mouse(f.selector, "session-1", { type: "press", button })).toBeUndefined();
 		expect(mouse(f.selector, "session-1", { clickSource: "fallback" })).toBeUndefined();

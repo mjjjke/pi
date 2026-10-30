@@ -37,8 +37,13 @@ describe("fork selector mouse", () => {
 		});
 	it("ignores non-primary events, fallback clicks, headers and blank separators", () => {
 		const f = fixture();
-		for (const type of ["release", "drag", "move", "leave"] as const)
-			expect(mouse(f.selector, "prompt-1", { type })).toBeUndefined();
+		for (const type of ["release", "drag"] as const) expect(mouse(f.selector, "prompt-1", { type })).toBeUndefined();
+		const beforeHover = f.selector.render(80).map(stripTerminalSequences);
+		for (const type of ["move", "leave"] as const) {
+			expect(mouse(f.selector, "prompt-1", { type })?.handled).toBe(true);
+			expect(f.selector.render(80).map(stripTerminalSequences)).toEqual(beforeHover);
+			expect(f.selected).not.toHaveBeenCalled();
+		}
 		for (const button of ["middle", "right"] as const)
 			expect(mouse(f.selector, "prompt-1", { type: "press", button })).toBeUndefined();
 		expect(mouse(f.selector, "prompt-1", { clickSource: "fallback" })).toBeUndefined();

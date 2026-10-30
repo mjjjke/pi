@@ -28,6 +28,7 @@ class UserMessageList implements Component {
 	public onCancel?: () => void;
 	private maxVisible: number = 10; // Max messages visible
 	private readonly mouse = new ListMouse<string>({
+		isSelected: (key) => this.messages[this.selectedIndex]?.id === key,
 		select: (key) => {
 			const index = this.messages.findIndex((message) => message.id === key);
 			if (index >= 0) this.selectedIndex = index;
@@ -68,7 +69,7 @@ class UserMessageList implements Component {
 
 		if (this.messages.length === 0) {
 			lines.push(theme.fg("muted", "  No user messages found"));
-			return lines;
+			return this.mouse.paintHover(lines, width);
 		}
 
 		// Calculate visible range with scrolling
@@ -109,10 +110,11 @@ class UserMessageList implements Component {
 			lines.push(scrollInfo);
 		}
 
-		return lines;
+		return this.mouse.paintHover(lines, width);
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		// Up arrow - go to previous (older) message, wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {

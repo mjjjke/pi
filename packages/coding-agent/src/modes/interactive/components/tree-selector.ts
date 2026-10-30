@@ -128,6 +128,7 @@ class TreeList implements Component {
 	private lastSelectedId: string | null = null;
 	private foldedNodes: Set<string> = new Set();
 	private readonly mouse = new ListMouse<string>({
+		isSelected: (key) => this.filteredNodes[this.selectedIndex]?.node.entry.id === key,
 		select: (key) => {
 			const index = this.filteredNodes.findIndex((node) => node.node.entry.id === key);
 			if (index >= 0) this.selectedIndex = index;
@@ -712,7 +713,7 @@ class TreeList implements Component {
 		if (this.filteredNodes.length === 0) {
 			lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
 			lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.getStatusLabels()}`), width));
-			return lines;
+			return this.mouse.paintHover(lines, width);
 		}
 
 		const startIndex = Math.max(
@@ -823,7 +824,7 @@ class TreeList implements Component {
 			),
 		);
 
-		return lines;
+		return this.mouse.paintHover(lines, width);
 	}
 
 	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean): string {
@@ -1053,6 +1054,7 @@ class TreeList implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredNodes.length - 1 : this.selectedIndex - 1;

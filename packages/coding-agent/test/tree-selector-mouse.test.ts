@@ -75,8 +75,14 @@ describe("tree selector mouse", () => {
 	});
 	it("ignores non-primary events, fallback and mismatched gestures, and inert lines", () => {
 		const f = fixture();
-		for (const type of ["release", "drag", "move", "leave"] as const)
+		for (const type of ["release", "drag"] as const)
 			expect(mouse(f.selector, "user: other", { type })).toBeUndefined();
+		const beforeHover = f.list.getSelectedNode();
+		for (const type of ["move", "leave"] as const) {
+			expect(mouse(f.selector, "user: other", { type })?.handled).toBe(true);
+			expect(f.list.getSelectedNode()).toBe(beforeHover);
+			expect(f.selected).not.toHaveBeenCalled();
+		}
 		for (const button of ["middle", "right"] as const)
 			expect(mouse(f.selector, "user: other", { type: "press", button })).toBeUndefined();
 		mouse(f.selector, "user: root", { type: "press", gestureId: 1, x: glyph(f.selector, "root") });

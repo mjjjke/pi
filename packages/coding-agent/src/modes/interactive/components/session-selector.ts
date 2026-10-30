@@ -313,6 +313,7 @@ class SessionList implements Component, Focusable {
 	public onError?: (message: string) => void;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
 	private readonly mouse = new ListMouse<string>({
+		isSelected: (key) => this.filteredSessions[this.selectedIndex]?.session.path === key,
 		select: (key) => {
 			const index = this.filteredSessions.findIndex((node) => node.session.path === key);
 			if (index < 0) return;
@@ -476,7 +477,7 @@ class SessionList implements Component, Focusable {
 				emptyMessage = "  No sessions in current folder. Press Tab to view all.";
 			}
 			lines.push(theme.fg("muted", truncateToWidth(emptyMessage, width, "…")));
-			return lines;
+			return this.mouse.paintHover(lines, width);
 		}
 
 		// Calculate visible range with scrolling
@@ -558,7 +559,7 @@ class SessionList implements Component, Focusable {
 			lines.push(scrollInfo);
 		}
 
-		return lines;
+		return this.mouse.paintHover(lines, width);
 	}
 
 	private buildTreePrefix(node: FlatSessionNode): string {
@@ -572,6 +573,7 @@ class SessionList implements Component, Focusable {
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 
 		// Handle delete confirmation state first - intercept all keys
