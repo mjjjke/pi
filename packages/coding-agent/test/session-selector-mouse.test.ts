@@ -246,6 +246,62 @@ describe("resume selector mouse", () => {
 				tui.stop();
 			}
 		});
+	for (const cancel of ["drag", "key", "rename"] as const)
+		it(`search gesture ownership after a ${cancel}-cancelled row press; typing and a fresh row click still work`, async () => {
+			const f = await fixture();
+			const terminal = new VirtualTerminal(80, 40);
+			const tui = new TuiAltScreen(terminal);
+			tui.addChild(f.selector);
+			tui.setFocus(f.selector);
+			tui.start();
+			tui.renderNow();
+			const row = (label: string) => {
+				const y =
+					tui
+						.getScreenLines()
+						.map(stripTerminalSequences)
+						.findIndex((line) => line.includes(label)) + 1;
+				expect(y).toBeGreaterThan(0);
+				return y;
+			};
+			try {
+				const y = row("session-1");
+				terminal.sendInput(`\x1b[<0;4;${y}M`);
+				if (cancel === "drag") {
+					terminal.sendInput(`\x1b[<32;8;${y}M`);
+					terminal.sendInput(`\x1b[<0;8;${y}m`);
+				} else {
+					if (cancel === "rename") {
+						terminal.sendInput(CTRL_R);
+						terminal.sendInput("\x1b");
+					} else terminal.sendInput("\x1b[B");
+					terminal.sendInput(`\x1b[<0;4;${y}m`);
+				}
+				expect(f.selected).not.toHaveBeenCalled();
+				tui.renderNow();
+				// Search is two rows above the first session in the rendered layout.
+				const searchY = row("session-0") - 2;
+				expect(searchY).toBeGreaterThan(0);
+				terminal.sendInput(`\x1b[<0;4;${searchY}M`);
+				terminal.sendInput(`\x1b[<0;4;${searchY}m`);
+				expect(f.selected).not.toHaveBeenCalled();
+				terminal.sendInput("session-2");
+				tui.renderNow();
+				expect(tui.getScreenLines().map(stripTerminalSequences).join("\n")).not.toContain("session-0");
+				const freshY =
+					tui
+						.getScreenLines()
+						.map(stripTerminalSequences)
+						.findIndex((line) => line.startsWith("› ") && line.includes("session-2")) + 1;
+				expect(freshY).toBeGreaterThan(0);
+				terminal.sendInput(`\x1b[<0;4;${freshY}M`);
+				terminal.sendInput(`\x1b[<0;4;${freshY}m`);
+				expect(f.selected).toHaveBeenCalledExactlyOnceWith(f.sessions[2].path);
+				expect(f.cancelled).not.toHaveBeenCalled();
+			} finally {
+				tui.stop();
+			}
+		});
 	for (const [count, width] of [
 		[3, 80],
 		[15, 80],

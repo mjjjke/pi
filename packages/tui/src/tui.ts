@@ -47,6 +47,8 @@ export interface TuiMouseEvent {
 	clickCount?: number;
 	/** Renderer click provenance. Undefined for directly constructed events. */
 	clickSource?: "captured" | "fallback";
+	/** Renderer-local press identity, shared by its drag/release/click. Undefined for direct events. */
+	gestureId?: number;
 }
 
 export interface TuiMouseEventResult {

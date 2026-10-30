@@ -1,5 +1,7 @@
-import { setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { setKeybindings, stripTerminalSequences, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { TuiAltScreen } from "../../tui/src/tui-alt-screen.ts";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { ModelRuntime } from "../src/core/model-runtime.ts";
 import { ModelSelectorComponent } from "../src/modes/interactive/components/model-selector.ts";
@@ -82,6 +84,47 @@ describe("model selector mouse", () => {
 			expect(callback).toHaveBeenCalledExactlyOnceWith(item);
 		} finally {
 			selector.dispose();
+		}
+	});
+	it("real renderer search click after a voided row press does not select; typing and a fresh row click work", () => {
+		const f = createModelSelector(3);
+		const terminal = new VirtualTerminal(80, 40);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(f.selector);
+		tui.setFocus(f.selector);
+		tui.start();
+		tui.renderNow();
+		const row = (label: string) => {
+			const y =
+				tui
+					.getScreenLines()
+					.map(stripTerminalSequences)
+					.findIndex((line) => line.includes(label) && line.includes("[fake]")) + 1;
+			expect(y).toBeGreaterThan(0);
+			return y;
+		};
+		try {
+			const y = row("model-01");
+			terminal.sendInput(`\x1b[<0;6;${y}M`);
+			terminal.sendInput("\x1b[B");
+			terminal.sendInput(`\x1b[<0;6;${y}m`);
+			tui.renderNow();
+			const searchY = row("model-00") - 2;
+			expect(searchY).toBeGreaterThan(0);
+			terminal.sendInput(`\x1b[<0;2;${searchY}M`);
+			terminal.sendInput(`\x1b[<0;2;${searchY}m`);
+			expect(f.callback).not.toHaveBeenCalled();
+			terminal.sendInput("model-02");
+			tui.renderNow();
+			expect(f.selector.getSearchInput().getValue()).toBe("model-02");
+			expect(tui.getScreenLines().map(stripTerminalSequences).join("\n")).not.toContain("model-00");
+			const freshY = row("model-02");
+			terminal.sendInput(`\x1b[<0;6;${freshY}M`);
+			terminal.sendInput(`\x1b[<0;6;${freshY}m`);
+			expect(f.callback).toHaveBeenCalledExactlyOnceWith(f.items[2]);
+		} finally {
+			tui.stop();
+			f.dispose();
 		}
 	});
 	it("keyboard selection disposes mouse while still mounted", () => {

@@ -33,7 +33,7 @@ export interface ListMouseOptions<K> {
 export class ListMouse<K> {
 	private readonly options: ListMouseOptions<K>;
 	private isClosed = false;
-	private pressed?: ListMouseHit<K>;
+	private pressed?: ListMouseHit<K> & { readonly gestureId?: number };
 	private rows: Array<{ key: K; y: number; height: number; zones: readonly ListMouseZone[] }> = [];
 	private itemTop = Infinity;
 	private itemBottom = -Infinity;
@@ -96,9 +96,14 @@ export class ListMouse<K> {
 		hit: ListMouseHit<K> | undefined,
 		inItemArea: boolean,
 	): TuiMouseEventResult | undefined {
-		// Fallback clicks follow an unhandled press, not a press accepted by this helper.
+		// Capture identifies the dispatch target, not which nested control accepted the press.
+		// Reject another gesture's click even if its press bypassed this helper (e.g. search).
 		// Clear stale identity even when disabled or closed, before all other gates.
-		if (event.type === "click" && event.clickSource === "fallback") {
+		if (
+			event.type === "click" &&
+			(event.clickSource === "fallback" ||
+				(event.gestureId !== undefined && event.gestureId !== this.pressed?.gestureId))
+		) {
 			this.pressed = undefined;
 			return undefined;
 		}
@@ -110,7 +115,7 @@ export class ListMouse<K> {
 		}
 		if (event.button !== "left") return undefined;
 		if (event.type === "press") {
-			this.pressed = hit;
+			this.pressed = hit ? { ...hit, gestureId: event.gestureId } : undefined;
 			if (!hit) return undefined;
 			this.options.select(hit.key);
 			return { handled: true, focus: true };

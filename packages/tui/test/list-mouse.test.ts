@@ -104,6 +104,39 @@ describe("ListMouse", () => {
 		assert.deepEqual(activated, ["A", "A"]);
 		assert.equal(list.closed, false);
 	});
+	it("renderer gesture ids cannot use the trusted direct-event idle-click exception", () => {
+		const { list, selected, activated } = fixture();
+		assert.equal(list.handle(mouse("click", { gestureId: 1 })), undefined);
+		list.handle(mouse("press"));
+		assert.equal(list.handle(mouse("click", { gestureId: 2, clickSource: "captured" })), undefined);
+		assert.deepEqual(selected, ["A"]);
+		assert.deepEqual(activated, []);
+		// Omitting gestureId preserves trusted direct-event behavior.
+		list.handle(mouse("click"));
+		assert.deepEqual(activated, ["A"]);
+	});
+	for (const enabled of [true, false]) {
+		it(`mismatched gesture ids clear stale keys/zones even when enabled=${enabled}`, () => {
+			let ready = true;
+			const zones: string[] = [];
+			const { list, selected, activated } = fixture({
+				enabled: () => ready,
+				zoneClick: (key) => zones.push(key),
+			});
+			list.beginRows();
+			list.addRow("A", 1, 1, [{ name: "fold", x: 0, width: 3 }]);
+			list.handle(mouse("press", { gestureId: 1 }));
+			ready = enabled;
+			assert.equal(list.handle(mouse("click", { gestureId: 2, clickSource: "captured" })), undefined);
+			ready = true;
+			assert.equal(list.handle(mouse("click", { gestureId: 1, clickSource: "captured" })), undefined);
+			assert.deepEqual(selected, ["A"]);
+			assert.deepEqual([activated, zones], [[], []]);
+			list.handle(mouse("press", { gestureId: 3 }));
+			list.handle(mouse("click", { gestureId: 3, clickSource: "captured" }));
+			assert.deepEqual(zones, ["A"]);
+		});
+	}
 	it("keeps press-time zones and never closes for zone clicks", () => {
 		const zones: string[] = [];
 		const { list, activated } = fixture({ zoneClick: (key, zone) => zones.push(`${key}:${zone}`) });
@@ -334,6 +367,38 @@ describe("ListMouse through real fullscreen dispatch", () => {
 		send(release);
 		assert.deepEqual(list.activated, ["A"]);
 	});
+	for (const cancel of ["key", "drag"] as const) {
+		it(`a ${cancel}-cancelled press cannot activate on a later captured click whose press bypassed ListMouse`, (t) => {
+			class SplitList extends ManualList {
+				override handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+					// An input/zone inside this same dispatch target accepts its own presses.
+					if (event.type === "press" && event.x >= 10) {
+						this.events.push(event);
+						return { handled: true, focus: true };
+					}
+					return super.handleMouse(event);
+				}
+			}
+			const list = new SplitList();
+			const { send } = renderer(t, list);
+			send(press);
+			if (cancel === "key") send("x");
+			else send("\x1b[<32;3;1M");
+			send(release);
+			assert.deepEqual(list.activated, []);
+			send("\x1b[<0;12;1M");
+			send("\x1b[<0;12;1m");
+			assert.equal(list.events.find((e) => e.type === "click")?.clickSource, "captured");
+			assert.deepEqual(list.activated, []);
+			assert.equal(list.mouse.closed, false);
+			// Mismatch must discard the stale key even for trusted direct-event callers.
+			assert.equal(list.mouse.handle(mouse("click", { clickSource: "captured", y: 0 })), undefined);
+			send(press);
+			send(release);
+			send(release);
+			assert.deepEqual(list.activated, ["A"]);
+		});
+	}
 	it("reordering during a held press activates the original key", (t) => {
 		const list = new ManualList();
 		const { tui, send } = renderer(t, list);

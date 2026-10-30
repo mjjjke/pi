@@ -54,6 +54,52 @@ const settingsTheme: SettingsListTheme = {
 };
 
 describe("captured component gesture lifetime", () => {
+	it("stamps captured press/release/click with one gesture id and increments on the next press", (t) => {
+		const target = new GestureTarget();
+		const { send } = setup(t, target);
+		for (let i = 0; i < 2; i++) {
+			send(press);
+			send(release);
+		}
+		const firstId = target.events[0].gestureId;
+		assert.equal(typeof firstId, "number");
+		assert.deepEqual(
+			target.events.map((event) => event.gestureId),
+			[firstId, firstId, firstId, firstId! + 1, firstId! + 1, firstId! + 1],
+		);
+	});
+	it("stamps fallback clicks with their unhandled press's id", (t) => {
+		const target = new GestureTarget();
+		target.handleMouse = (event) => {
+			target.events.push(event);
+			return undefined;
+		};
+		const { send } = setup(t, target);
+		send(press);
+		send(release);
+		const click = target.events.find((event) => event.type === "click");
+		assert.equal(click?.clickSource, "fallback");
+		assert.equal(typeof target.events[0].gestureId, "number");
+		assert.equal(click?.gestureId, target.events[0].gestureId);
+	});
+	it("does not reuse gesture ids after a lost release, focus loss or renderer restart", (t) => {
+		const target = new GestureTarget();
+		const { tui, send } = setup(t, target);
+		send(press);
+		send("x");
+		send(press);
+		send("\x1b[O");
+		send(press);
+		tui.stop();
+		tui.start();
+		tui.renderNow();
+		send(press);
+		send(release);
+		const ids = target.events.filter((event) => event.type === "press").map((event) => event.gestureId);
+		assert.equal(ids.length, 4);
+		assert.equal(typeof ids[0], "number");
+		assert.deepEqual(ids, [ids[0], ids[0]! + 1, ids[0]! + 2, ids[0]! + 3]);
+	});
 	for (const key of ["x", "\r", "\x1b"]) {
 		it(`swallows release and click after delivered key ${JSON.stringify(key)}`, (t) => {
 			const target = new GestureTarget();

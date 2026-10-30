@@ -247,6 +247,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private mousePressMoved = false;
 	private mousePressEpoch = 0;
 	private mouseGestureVoided = false;
+	private nextMouseGestureId = 0;
+	private mouseGestureId?: number;
 	private lastComponentClick?: {
 		timestamp: number;
 		count: number;
@@ -370,6 +372,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override beforeTerminalStart(): void {
 		this.pressedMouseButtons.clear();
+		this.mouseGestureId = undefined;
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
 		this.stopScrollbarHover();
@@ -413,6 +416,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
 		this.pressedMouseButtons.clear();
+		this.mouseGestureId = undefined;
 		this.hoveredLink = undefined;
 		this.linkScreen = [];
 		this.clearMouseHover();
@@ -761,6 +765,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (!this.parseSgrMouseEvent(data) || this.parseWheelEvent(data)) this.clearLinkHover();
 		if (data === FOCUS_OUT) {
 			this.pressedMouseButtons.clear();
+			this.mouseGestureId = undefined;
 			if (this.clearMouseHover()) this.requestRender();
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
@@ -898,8 +903,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		button: number,
 		x: number,
 		y: number,
-		extra: Partial<Pick<TuiMouseEvent, "wheelDelta" | "clickCount" | "clickSource">> = {},
+		extra: Partial<Pick<TuiMouseEvent, "wheelDelta" | "clickCount" | "clickSource" | "gestureId">> = {},
 	): TuiMouseEvent {
+		const gestureId =
+			type === "press" || type === "drag" || type === "release" || type === "click"
+				? (extra.gestureId ?? this.mouseGestureId)
+				: undefined;
 		return {
 			type,
 			button: type === "wheel" ? "none" : this.decodeMouseButton(button),
@@ -915,6 +924,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			...(extra.wheelDelta === undefined ? {} : { wheelDelta: extra.wheelDelta }),
 			...(extra.clickCount === undefined ? {} : { clickCount: extra.clickCount }),
 			...(extra.clickSource === undefined ? {} : { clickSource: extra.clickSource }),
+			...(gestureId === undefined ? {} : { gestureId }),
 		};
 	}
 
@@ -1068,6 +1078,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					? "move"
 					: "drag"
 				: "press";
+		// Stamp every press before routing, including presses handled outside list helpers.
+		// Keep the counter across cancellation, focus loss and renderer restarts.
+		if (type === "press") this.mouseGestureId = ++this.nextMouseGestureId;
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
 		if (type !== "move") this.clearLinkHover();
 		let moveTarget: TuiMouseDispatchTarget | undefined;
@@ -1117,6 +1130,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 						const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
 							clickCount: this.getComponentClickCount(target, raw.x, raw.y),
 							clickSource: "captured",
+							gestureId: event.gestureId,
 						});
 						const clickResult = this.dispatchMouseToTarget(clickEvent, target);
 						if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
@@ -1157,6 +1171,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(raw)) return;
 			this.handleSelectionMouseEvent(raw);
 		} finally {
+			if (raw.release) this.mouseGestureId = undefined;
 			if (this.reconcileMouseHover(event)) this.requestRender();
 			if (type === "move") {
 				// Modified link activation wins over component handlers, so hover must too.
