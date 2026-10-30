@@ -5,6 +5,7 @@ import {
 	fuzzyFilter,
 	getKeybindings,
 	Input,
+	ListMouse,
 	Spacer,
 	TruncatedText,
 } from "@earendil-works/pi-tui";
@@ -73,14 +74,40 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	private filteredProviders: AuthSelectorProvider[];
 	private selectedIndex: number = 0;
 	private mode: "login" | "logout";
-	private onSelectCallback: (providerId: string, authType: AuthSelectorProvider["authType"]) => void;
+	private onSelectCallback: (
+		providerId: string,
+		authType: AuthSelectorProvider["authType"],
+		source: "keyboard" | "mouse",
+	) => void;
 	private onCancelCallback: () => void;
 	private showAuthTypeLabels: boolean;
+	private readonly mouse = new ListMouse<string>({
+		select: (key) => {
+			const index = this.filteredProviders.findIndex((provider) => `${provider.id}\0${provider.authType}` === key);
+			if (index < 0) return;
+			this.selectedIndex = index;
+			this.updateList();
+		},
+		activate: (key) => {
+			const provider = this.filteredProviders.find((provider) => `${provider.id}\0${provider.authType}` === key);
+			if (!provider) return false;
+			this.onSelectCallback(provider.id, provider.authType, "mouse");
+			return true;
+		},
+		step: (direction) => {
+			const index = Math.max(0, Math.min(this.filteredProviders.length - 1, this.selectedIndex + direction));
+			if (index === this.selectedIndex) return false;
+			this.selectedIndex = index;
+			this.updateList();
+			return true;
+		},
+		ownsWheel: () => this.filteredProviders.length > 8,
+	});
 
 	constructor(
 		mode: "login" | "logout",
 		providers: AuthSelectorProvider[],
-		onSelect: (providerId: string, authType: AuthSelectorProvider["authType"]) => void,
+		onSelect: (providerId: string, authType: AuthSelectorProvider["authType"], source: "keyboard" | "mouse") => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
 	) {
@@ -109,7 +136,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.searchInput.onSubmit = () => {
 			const selectedProvider = this.filteredProviders[this.selectedIndex];
 			if (selectedProvider) {
-				this.onSelectCallback(selectedProvider.id, selectedProvider.authType);
+				this.onSelectCallback(selectedProvider.id, selectedProvider.authType, "keyboard");
 			}
 		};
 		this.addChild(this.searchInput);
@@ -170,7 +197,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 				line = text + authTypeLabel + statusIndicator;
 			}
 
-			this.listContainer.addChild(new TruncatedText(line, 1, 0));
+			this.listContainer.addChild(
+				this.mouse.row(`${provider.id}\0${provider.authType}`, new TruncatedText(line, 1, 0)),
+			);
 		}
 
 		if (startIndex > 0 || endIndex < this.filteredProviders.length) {
@@ -208,7 +237,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedProvider = this.filteredProviders[this.selectedIndex];
 			if (selectedProvider) {
-				this.onSelectCallback(selectedProvider.id, selectedProvider.authType);
+				this.onSelectCallback(selectedProvider.id, selectedProvider.authType, "keyboard");
 			}
 		}
 		// Escape or Ctrl+C

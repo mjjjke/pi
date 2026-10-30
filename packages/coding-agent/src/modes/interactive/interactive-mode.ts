@@ -406,6 +406,8 @@ type LoginProviderCompletionOption = {
 
 const RADIUS_LOGIN_INTRO = "Radius is a service crafted for Pi by the builders of Pi, Earendil Works";
 
+const LOGOUT_CONFIRM_MOUSE_DELAY_MS = 500;
+
 const AUTH_TYPE_ORDER = { oauth: 0, api_key: 1 } satisfies Record<AuthSelectorProvider["authType"], number>;
 
 function createFuzzyAutocompleteItems<T>(
@@ -2897,6 +2899,7 @@ export class InteractiveMode {
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
 		blocked: BlockedStatus = { kind: "question", message: title },
+		selectorOptions?: { mouseDelayMs?: number },
 	): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
@@ -2923,7 +2926,12 @@ export class InteractiveMode {
 					this.hideExtensionSelector();
 					resolve(undefined);
 				},
-				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
+				{
+					tui: this.ui,
+					timeout: opts?.timeout,
+					onToggleToolsExpanded: () => this.toggleToolOutputExpansion(),
+					mouseDelayMs: selectorOptions?.mouseDelayMs,
+				},
 			);
 
 			this.disposeActiveSelector();
@@ -6373,6 +6381,17 @@ export class InteractiveMode {
 		});
 	}
 
+	private async showLogoutConfirm(name: string, detail: string): Promise<boolean> {
+		const result = await this.showExtensionSelector(
+			`Log out of ${name}?\n${detail}`,
+			["Yes", "No"],
+			undefined,
+			{ kind: "permission", message: `Log out of ${name}?` },
+			{ mouseDelayMs: LOGOUT_CONFIRM_MOUSE_DELAY_MS },
+		);
+		return result === "Yes";
+	}
+
 	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
 		if (mode === "login") {
 			this.showLoginAuthTypeSelector();
@@ -6397,11 +6416,18 @@ export class InteractiveMode {
 			const selector = new OAuthSelectorComponent(
 				mode,
 				providerOptions,
-				async (providerId: string) => {
+				async (providerId, authType, source) => {
+					const providerOption = providerOptions.find(
+						(provider) => provider.id === providerId && provider.authType === authType,
+					);
+					const detail =
+						providerOption?.authType === "oauth"
+							? "Stored sign-in credentials will be deleted."
+							: "The stored API key will be deleted. Environment variables and models.json config are unchanged.";
 					done();
-
-					const providerOption = providerOptions.find((provider) => provider.id === providerId);
-					if (!providerOption) {
+					if (!providerOption) return;
+					if (source === "mouse" && !(await this.showLogoutConfirm(providerOption.name, detail))) {
+						if (this.editorContainer.children.includes(this.editor)) void this.showOAuthSelector("logout");
 						return;
 					}
 

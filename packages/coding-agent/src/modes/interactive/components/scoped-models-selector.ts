@@ -6,6 +6,7 @@ import {
 	getKeybindings,
 	Input,
 	Key,
+	ListMouse,
 	matchesKey,
 	Spacer,
 	Text,
@@ -117,6 +118,24 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	private maxVisible = 8;
 	private isDirty = false;
 	private refreshStatusText?: Text;
+	private readonly mouse = new ListMouse<string>({
+		select: (key) => {
+			const index = this.filteredItems.findIndex((item) => item.fullId === key);
+			if (index < 0) return;
+			this.selectedIndex = index;
+			this.updateList();
+		},
+		activate: (key) => this.toggleItem(key),
+		closeOnActivate: false,
+		step: (direction) => {
+			const index = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + direction));
+			if (index === this.selectedIndex) return false;
+			this.selectedIndex = index;
+			this.updateList();
+			return true;
+		},
+		ownsWheel: () => this.filteredItems.length > this.maxVisible,
+	});
 
 	constructor(config: ModelsConfig, callbacks: ModelsCallbacks) {
 		super();
@@ -254,7 +273,9 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			const modelText = isSelected ? theme.fg("accent", styledId) : styledId;
 			const providerBadge = theme.fg("muted", item.model ? ` [${item.model.provider}]` : " [unavailable]");
 			const status = item.model && item.enabled ? theme.fg("accent", "✓ ") : "  ";
-			this.listContainer.addChild(new Text(`${prefix}${status}${modelText}${providerBadge}`, 0, 0));
+			this.listContainer.addChild(
+				this.mouse.row(item.fullId, new Text(`${prefix}${status}${modelText}${providerBadge}`, 0, 0)),
+			);
 		}
 
 		// Add scroll indicator if needed
@@ -275,6 +296,15 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 				),
 			);
 		}
+	}
+
+	private toggleItem(fullId: string): boolean {
+		if (!this.filteredItems.some((item) => item.fullId === fullId)) return false;
+		this.enabledIds = toggle(this.enabledIds, this.allIds, fullId);
+		this.isDirty = true;
+		this.refresh();
+		this.notifyChange();
+		return true;
 	}
 
 	handleInput(data: string): void {
@@ -320,10 +350,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		if (kb.matches(data, "tui.select.confirm")) {
 			const item = this.filteredItems[this.selectedIndex];
 			if (item) {
-				this.enabledIds = toggle(this.enabledIds, this.allIds, item.fullId);
-				this.isDirty = true;
-				this.refresh();
-				this.notifyChange();
+				this.toggleItem(item.fullId);
 			}
 			return;
 		}

@@ -1,4 +1,4 @@
-import { Container, getKeybindings, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, getKeybindings, ListMouse, Spacer, Text } from "@earendil-works/pi-tui";
 import {
 	getProjectTrustOptions,
 	type ProjectTrustOption,
@@ -36,6 +36,19 @@ export class TrustSelectorComponent extends Container {
 	private readonly savedDecision: ProjectTrustStoreEntry | null;
 	private readonly onSelectCallback: (selection: TrustSelection) => void;
 	private readonly onCancelCallback: () => void;
+	private readonly mouse = new ListMouse<number>({
+		select: (index) => {
+			if (!this.trustOptions[index]) return;
+			this.selectedIndex = index;
+			this.updateList();
+		},
+		activate: (index) => {
+			const selected = this.trustOptions[index];
+			if (!selected) return false;
+			this.onSelectCallback({ trusted: selected.trusted, updates: selected.updates });
+			return true;
+		},
+	});
 
 	constructor(options: TrustSelectorOptions) {
 		super();
@@ -110,7 +123,7 @@ export class TrustSelectorComponent extends Container {
 			const currentMarker = isCurrent ? theme.fg("accent", "✓ ") : "  ";
 			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
 			const label = isSelected ? theme.fg("accent", option.label) : theme.fg("text", option.label);
-			this.listContainer.addChild(new Text(`${prefix}${currentMarker}${label}`, 1, 0));
+			this.listContainer.addChild(this.mouse.row(i, new Text(`${prefix}${currentMarker}${label}`, 1, 0)));
 		}
 	}
 

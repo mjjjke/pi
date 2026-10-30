@@ -5,6 +5,7 @@ import {
 	fuzzyFilter,
 	getKeybindings,
 	Input,
+	ListMouse,
 	Spacer,
 	Text,
 	type TUI,
@@ -72,6 +73,28 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private readonly refreshAbortController = new AbortController();
 	private refreshTimeout?: ReturnType<typeof setTimeout>;
 	private closed = false;
+	private readonly mouse = new ListMouse<string>({
+		select: (key) => {
+			const index = this.filteredModels.findIndex((item) => `${item.provider}\0${item.id}` === key);
+			if (index < 0) return;
+			this.selectedIndex = index;
+			this.updateList();
+		},
+		activate: (key) => {
+			const item = this.filteredModels.find((item) => `${item.provider}\0${item.id}` === key);
+			if (!item) return false;
+			this.handleSelect(item.model);
+			return true;
+		},
+		step: (direction) => {
+			const index = Math.max(0, Math.min(this.filteredModels.length - 1, this.selectedIndex + direction));
+			if (index === this.selectedIndex) return false;
+			this.selectedIndex = index;
+			this.updateList();
+			return true;
+		},
+		ownsWheel: () => this.filteredModels.length > 10,
+	});
 
 	constructor(
 		tui: TUI,
@@ -224,6 +247,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	dispose(): void {
 		if (this.closed) return;
 		this.closed = true;
+		this.mouse.close();
 		if (this.refreshTimeout) clearTimeout(this.refreshTimeout);
 		this.refreshAbortController.abort();
 	}
@@ -328,7 +352,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const providerBadge = theme.fg("muted", `[${item.provider}]`);
 			const line = `${cursor}${currentMarker}${modelText} ${providerBadge}${defaultBadge}`;
 
-			this.listContainer.addChild(new Text(line, 0, 0));
+			this.listContainer.addChild(this.mouse.row(`${item.provider}\0${item.id}`, new Text(line, 0, 0)));
 		}
 
 		// Add scroll indicator if needed
