@@ -5,9 +5,12 @@ import {
 	getKeybindings,
 	Input,
 	type Keybinding,
+	ListMouse,
 	Spacer,
 	sliceByColumn,
 	Text,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -60,7 +63,10 @@ const MAX_ANCHOR_CONTEXT_WIDTH = 12;
  * when the selected row's anchor (the start of its entry text after tree
  * indentation/markers) would otherwise be too far right to see useful content.
  */
-function renderHorizontalViewport(rows: HorizontalViewportRow[], width: number): string[] {
+function renderHorizontalViewport(
+	rows: HorizontalViewportRow[],
+	width: number,
+): { lines: string[]; horizontalScroll: number } {
 	const viewportWidth = Math.max(0, width - TREE_GUTTER_WIDTH);
 	const maxBodyWidth = rows.reduce((max, row) => Math.max(max, row.bodyWidth), 0);
 	const maxHorizontalScroll = Math.max(0, maxBodyWidth - viewportWidth);
@@ -83,13 +89,14 @@ function renderHorizontalViewport(rows: HorizontalViewportRow[], width: number):
 	}
 
 	// Clip only the body; the fixed-width gutter remains visible as navigation context.
-	return rows.map((row) => {
+	const lines = rows.map((row) => {
 		const line =
 			horizontalScroll > 0
 				? `${row.gutter}${sliceByColumn(row.body, horizontalScroll, viewportWidth, true)}\x1b[0m`
 				: row.gutter + row.body;
 		return truncateToWidth(line, width, "");
 	});
+	return { lines, horizontalScroll };
 }
 
 /** Filter mode for tree display */
@@ -120,6 +127,29 @@ class TreeList implements Component {
 	private visibleChildrenMap: Map<string | null, string[]> = new Map();
 	private lastSelectedId: string | null = null;
 	private foldedNodes: Set<string> = new Set();
+	private readonly mouse = new ListMouse<string>({
+		select: (key) => {
+			const index = this.filteredNodes.findIndex((node) => node.node.entry.id === key);
+			if (index >= 0) this.selectedIndex = index;
+		},
+		activate: (key) => {
+			if (!this.filteredNodes.some((node) => node.node.entry.id === key)) return false;
+			this.onSelect?.(key);
+			return true;
+		},
+		zoneClick: (key, zone) => {
+			if (zone !== "fold" || !this.filteredNodes.some((node) => node.node.entry.id === key)) return;
+			if (this.foldedNodes.has(key)) this.unfold(key);
+			else if (this.isFoldable(key)) this.fold(key);
+		},
+		step: (direction) => {
+			const index = Math.max(0, Math.min(this.filteredNodes.length - 1, this.selectedIndex + direction));
+			if (index === this.selectedIndex) return false;
+			this.selectedIndex = index;
+			return true;
+		},
+		ownsWheel: () => this.filteredNodes.length > this.maxVisibleLines,
+	});
 
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
@@ -671,7 +701,12 @@ class TreeList implements Component {
 		return labels;
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		return this.mouse.handle(event);
+	}
+
 	render(width: number): string[] {
+		this.mouse.beginRows();
 		const lines: string[] = [];
 
 		if (this.filteredNodes.length === 0) {
@@ -690,6 +725,7 @@ class TreeList implements Component {
 		const endIndex = Math.min(startIndex + this.maxVisibleLines, this.filteredNodes.length);
 
 		const renderedRows: HorizontalViewportRow[] = [];
+		const foldColumns: (number | undefined)[] = [];
 		for (let i = startIndex; i < endIndex; i++) {
 			const flatNode = this.filteredNodes[i];
 			const entry = flatNode.node.entry;
@@ -711,6 +747,8 @@ class TreeList implements Component {
 			const totalChars = displayIndent * 3;
 			const prefixChars: string[] = [];
 			const isFolded = this.foldedNodes.has(entry.id);
+			const foldable = isFolded || this.isFoldable(entry.id);
+			let foldColumn: number | undefined;
 			for (let i = 0; i < totalChars; i++) {
 				const level = Math.floor(i / 3);
 				const posInLevel = i % 3;
@@ -728,8 +766,8 @@ class TreeList implements Component {
 					if (posInLevel === 0) {
 						prefixChars.push(flatNode.isLast ? "└" : "├");
 					} else if (posInLevel === 1) {
-						const foldable = this.isFoldable(entry.id);
 						prefixChars.push(isFolded ? "⊞" : foldable ? "⊟" : "─");
+						if (foldable) foldColumn = i;
 					} else {
 						prefixChars.push(" ");
 					}
@@ -741,7 +779,9 @@ class TreeList implements Component {
 
 			// Fold marker for nodes without connectors (roots)
 			const showsFoldInConnector = flatNode.showConnector && !flatNode.isVirtualRootChild;
-			const foldMarker = isFolded && !showsFoldInConnector ? theme.fg("accent", "⊞ ") : "";
+			const foldMarker = foldable && !showsFoldInConnector ? theme.fg("accent", isFolded ? "⊞ " : "⊟ ") : "";
+			if (foldMarker) foldColumn = totalChars;
+			foldColumns.push(foldColumn);
 
 			// Active path marker - shown right before the entry text
 			const isOnActivePath = this.activePathIds.has(entry.id);
@@ -764,7 +804,18 @@ class TreeList implements Component {
 			renderedRows.push({ gutter, body, anchorCol, bodyWidth: visibleWidth(body), isSelected });
 		}
 
-		lines.push(...renderHorizontalViewport(renderedRows, width));
+		const viewport = renderHorizontalViewport(renderedRows, width);
+		for (let row = 0; row < renderedRows.length; row++) {
+			const column = foldColumns[row];
+			const x = column === undefined ? -1 : TREE_GUTTER_WIDTH + column - viewport.horizontalScroll;
+			this.mouse.addRow(
+				this.filteredNodes[startIndex + row].node.entry.id,
+				row,
+				1,
+				x >= TREE_GUTTER_WIDTH && x < width ? [{ name: "fold", x, width: 1 }] : undefined,
+			);
+		}
+		lines.push(...viewport.lines);
 		lines.push(
 			truncateToWidth(
 				theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredNodes.length})${this.getStatusLabels()}`),
@@ -1010,16 +1061,14 @@ class TreeList implements Component {
 		} else if (kb.matches(keyData, "app.tree.foldOrUp")) {
 			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
 			if (currentId && this.isFoldable(currentId) && !this.foldedNodes.has(currentId)) {
-				this.foldedNodes.add(currentId);
-				this.applyFilter();
+				this.fold(currentId);
 			} else {
 				this.selectedIndex = this.findBranchSegmentStart("up");
 			}
 		} else if (kb.matches(keyData, "app.tree.unfoldOrDown")) {
 			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
 			if (currentId && this.foldedNodes.has(currentId)) {
-				this.foldedNodes.delete(currentId);
-				this.applyFilter();
+				this.unfold(currentId);
 			} else {
 				this.selectedIndex = this.findBranchSegmentStart("down");
 			}
@@ -1107,6 +1156,16 @@ class TreeList implements Component {
 				this.applyFilter();
 			}
 		}
+	}
+
+	private fold(entryId: string): void {
+		this.foldedNodes.add(entryId);
+		this.applyFilter();
+	}
+
+	private unfold(entryId: string): void {
+		this.foldedNodes.delete(entryId);
+		this.applyFilter();
 	}
 
 	/**
