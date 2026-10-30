@@ -3,7 +3,7 @@
  * Displays a list of string options with keyboard and fullscreen mouse navigation.
  */
 
-import { Container, getKeybindings, MouseRegion, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, getKeybindings, ListMouse, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -16,6 +16,8 @@ export interface ExtensionSelectorOptions {
 	timeout?: number;
 	onToggleToolsExpanded?: () => void;
 	description?: string;
+	/** Internal mouse arming delay; keyboard input remains immediate. */
+	mouseDelayMs?: number;
 }
 
 export class ExtensionSelectorComponent extends Container {
@@ -28,6 +30,8 @@ export class ExtensionSelectorComponent extends Container {
 	private baseTitle: string;
 	private countdown: CountdownTimer | undefined;
 	private onToggleToolsExpanded: (() => void) | undefined;
+	private mouse: ListMouse<number>;
+	private mouseReadyAt: number;
 
 	constructor(
 		title: string,
@@ -43,6 +47,27 @@ export class ExtensionSelectorComponent extends Container {
 		this.onCancelCallback = onCancel;
 		this.onToggleToolsExpanded = opts?.onToggleToolsExpanded;
 		this.baseTitle = title;
+		this.mouseReadyAt = Date.now() + (opts?.mouseDelayMs ?? 0);
+		this.mouse = new ListMouse<number>({
+			select: (i) => {
+				this.selectedIndex = i;
+				this.updateList();
+			},
+			activate: (i) => {
+				const option = this.options[i];
+				if (!option) return false;
+				this.onSelectCallback(option);
+				return true;
+			},
+			step: (direction) => {
+				const previousIndex = this.selectedIndex;
+				this.selectedIndex = Math.max(0, Math.min(this.options.length - 1, this.selectedIndex + direction));
+				if (this.selectedIndex !== previousIndex) this.updateList();
+				return this.selectedIndex !== previousIndex;
+			},
+			ownsWheel: () => this.options.length > MAX_VISIBLE_OPTIONS,
+			enabled: () => Date.now() >= this.mouseReadyAt,
+		});
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -65,21 +90,7 @@ export class ExtensionSelectorComponent extends Container {
 		}
 
 		this.listContainer = new Container();
-		this.addChild(
-			new MouseRegion(this.listContainer, (event) => {
-				// Short lists leave the wheel to the surrounding chat viewport.
-				if (event.type !== "wheel" || !event.wheelDelta || this.options.length <= MAX_VISIBLE_OPTIONS) {
-					return undefined;
-				}
-				const previousIndex = this.selectedIndex;
-				this.selectedIndex = Math.max(
-					0,
-					Math.min(this.options.length - 1, this.selectedIndex + (event.wheelDelta < 0 ? -1 : 1)),
-				);
-				if (this.selectedIndex !== previousIndex) this.updateList();
-				return { handled: true, render: this.selectedIndex !== previousIndex };
-			}),
-		);
+		this.addChild(this.listContainer);
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
@@ -111,19 +122,7 @@ export class ExtensionSelectorComponent extends Container {
 				? theme.fg("accent", "→ ") + theme.fg("accent", this.options[i])
 				: `  ${theme.fg("text", this.options[i])}`;
 			// Each region covers the entire wrapped option, not just its first row.
-			this.listContainer.addChild(
-				new MouseRegion(new Text(text, 1, 0), (event) => {
-					// Like SelectList, hover does not move the centered visible range.
-					if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
-					this.selectedIndex = i;
-					this.updateList();
-					if (event.type === "click") {
-						const selected = this.options[i];
-						if (selected) this.onSelectCallback(selected);
-					}
-					return { handled: true, focus: event.type === "press" };
-				}),
-			);
+			this.listContainer.addChild(this.mouse.row(i, new Text(text, 1, 0)));
 		}
 		if (this.options.length > MAX_VISIBLE_OPTIONS) {
 			this.listContainer.addChild(
