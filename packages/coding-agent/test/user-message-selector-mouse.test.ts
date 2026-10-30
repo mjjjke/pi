@@ -106,3 +106,36 @@ describe("fork selector mouse", () => {
 			}
 		});
 });
+
+describe("review: orphan click ownership on fork", () => {
+	it("lost row release then modified link cannot let an orphan release fork", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+		const f = fixture();
+		f.messages[1].text = "\x1b]8;;https://example.com\x07prompt-1\x1b]8;;\x07";
+		const opened = vi.fn();
+		const terminal = new VirtualTerminal(80, 40),
+			tui = new TuiAltScreen(terminal, undefined, undefined, { openUrl: opened });
+		tui.addChild(f.selector);
+		tui.setFocus(f.selector.getMessageList());
+		tui.start();
+		tui.renderNow();
+		try {
+			const y =
+				tui
+					.getScreenLines()
+					.map(stripTerminalSequences)
+					.findIndex((line) => line.includes("prompt-1")) + 1;
+			expect(y).toBeGreaterThan(0);
+			terminal.sendInput(`\x1b[<0;4;${y}M`); // release lost
+			terminal.sendInput(`\x1b[<16;4;${y}M`);
+			terminal.sendInput(`\x1b[<16;4;${y}m`);
+			expect(opened).toHaveBeenCalledExactlyOnceWith("https://example.com");
+			expect(f.selected).not.toHaveBeenCalled();
+			terminal.sendInput(`\x1b[<0;4;${y}m`); // orphan/duplicate release
+			expect(f.selected).not.toHaveBeenCalled();
+		} finally {
+			tui.stop();
+		}
+	});
+});

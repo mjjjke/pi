@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it, type TestContext } from "node:test";
 import type { AutocompleteSuggestions } from "../src/autocomplete.ts";
 import { Editor } from "../src/components/editor.ts";
+import { ListMouse } from "../src/components/list-mouse.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { SelectList } from "../src/components/select-list.ts";
 import { SettingsList, type SettingsListTheme } from "../src/components/settings-list.ts";
@@ -506,3 +507,95 @@ it("scrollbar drag survives delivered key and focus change", (t) => {
 	assert.ok(scroll.scrollTop > before);
 	assert.deepEqual(target.keys, ["x"]);
 });
+
+it("review: modified link after lost release cannot leave an unstamped captured click", () => {
+	const actions: string[] = [],
+		opened: string[] = [],
+		events: TuiMouseEvent[] = [];
+	const mouse = new ListMouse<string>({
+		select() {},
+		activate(key) {
+			actions.push(key);
+			return true;
+		},
+	});
+	const component: Component = {
+		render() {
+			mouse.beginRows();
+			mouse.addRow("A", 0);
+			return ["\x1b]8;;https://example.com\x07row A\x1b]8;;\x07"];
+		},
+		invalidate() {},
+		handleInput() {},
+		handleMouse(event) {
+			events.push(event);
+			return mouse.handle(event);
+		},
+	};
+	const terminal = new VirtualTerminal(30, 8),
+		tui = new TuiAltScreen(terminal, undefined, undefined, { openUrl: (url) => opened.push(url) });
+	tui.addChild(component);
+	tui.setFocus(component);
+	tui.start();
+	tui.renderNow();
+	try {
+		terminal.sendInput("\x1b[<0;2;1M"); // row press; terminal loses its release
+		terminal.sendInput("\x1b[<16;2;1M"); // fresh ctrl-link press bypasses the helper
+		terminal.sendInput("\x1b[<16;2;1m"); // opens link, clears current gesture id
+		assert.deepEqual(opened, ["https://example.com"]);
+		assert.deepEqual(actions, []);
+		terminal.sendInput("\x1b[<0;2;1m"); // orphan/duplicate release, no new press
+		assert.deepEqual(actions, []);
+		assert.equal(
+			events.some((event) => event.type === "click"),
+			false,
+		);
+		terminal.sendInput(press);
+		terminal.sendInput(release);
+		assert.deepEqual(actions, ["A"]);
+	} finally {
+		tui.stop();
+	}
+});
+
+for (const [path, x, y] of [
+	["selection/fallback", 2, 2],
+	["scrollbar", 30, 7],
+] as const) {
+	it(`fresh ${path} press ends old component capture after a lost release`, (t) => {
+		const target = new GestureTarget();
+		target.render = () => ["target", ...Array.from({ length: 49 }, () => "inert")];
+		target.handleMouse = (event) => {
+			target.events.push(event);
+			if (event.y !== 0) return undefined;
+			return event.type === "press" ? { handled: true, capture: true } : undefined;
+		};
+		const { tui, send } = setup(t, target);
+		const scroll = new ScrollView(target, { scrollbar: "always", primary: true });
+		tui.setLayoutRoot(scroll);
+		tui.renderNow();
+		send(press); // lost release
+		send(`\x1b[<0;${x};${y}M`);
+		send(`\x1b[<0;${x};${y}m`);
+		send(release); // duplicate release at the old captured point
+		assert.equal(
+			target.events.some((event) => event.clickSource === "captured"),
+			false,
+		);
+		if (path === "scrollbar") assert.ok(scroll.scrollTop > 0);
+		else
+			assert.equal(
+				target.events.some((event) => event.clickSource === "fallback"),
+				true,
+			);
+		target.events = [];
+		scroll.scrollToStart();
+		tui.renderNow();
+		send(press);
+		send(release);
+		assert.deepEqual(
+			target.events.map((event) => event.type),
+			["press", "release", "click"],
+		);
+	});
+}

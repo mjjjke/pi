@@ -1080,7 +1080,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				: "press";
 		// Stamp every press before routing, including presses handled outside list helpers.
 		// Keep the counter across cancellation, focus loss and renderer restarts.
-		if (type === "press") this.mouseGestureId = ++this.nextMouseGestureId;
+		// Identity is unique for at most Number.MAX_SAFE_INTEGER presses per renderer
+		// lifetime; do not wrap/reset it while helpers may retain an earlier ID.
+		if (type === "press") {
+			this.mouseGestureId = ++this.nextMouseGestureId;
+			// A fresh press replaces old ownership, even when routed to a modified link,
+			// search navigation, scrollbar, selection, paste or another fallback path.
+			this.clearComponentMouseGesture();
+		}
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
 		if (type !== "move") this.clearLinkHover();
 		let moveTarget: TuiMouseDispatchTarget | undefined;
@@ -1126,7 +1133,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					this.mousePressEpoch = this.interactionEpoch;
 				}
 				if (raw.release) {
-					if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
+					// Orphan releases must not enter helpers' undefined-ID direct-event path.
+					if (
+						event.gestureId !== undefined &&
+						!this.mousePressMoved &&
+						this.mousePressPoint?.x === raw.x &&
+						this.mousePressPoint.y === raw.y
+					) {
 						const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
 							clickCount: this.getComponentClickCount(target, raw.x, raw.y),
 							clickSource: "captured",
