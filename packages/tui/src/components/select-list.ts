@@ -1,6 +1,7 @@
 import { getKeybindings } from "../keybindings.ts";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
+import { ListMouse } from "./list-mouse.ts";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const PRIMARY_COLUMN_GAP = 2;
@@ -45,6 +46,12 @@ export class SelectList implements Component {
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
+	// Hover only: click identity and wheel ownership retain their existing semantics.
+	private readonly mouse = new ListMouse<string>({
+		select() {},
+		activate: () => false,
+		isSelected: (value) => this.getSelectedItem()?.value === value,
+	});
 
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
@@ -73,12 +80,13 @@ export class SelectList implements Component {
 	}
 
 	render(width: number): string[] {
+		this.mouse.beginRows();
 		const lines: string[] = [];
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
 			lines.push(this.theme.noMatch("  No matching commands"));
-			return lines;
+			return this.mouse.paintHover(lines, width);
 		}
 
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
@@ -91,6 +99,7 @@ export class SelectList implements Component {
 			const item = this.filteredItems[i];
 			if (!item) continue;
 
+			this.mouse.addRow(item.value, lines.length);
 			const isSelected = i === this.selectedIndex;
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
@@ -103,19 +112,20 @@ export class SelectList implements Component {
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
 
-		return lines;
+		return this.mouse.paintHover(lines, width);
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "move" || event.type === "leave") return this.mouse.handle(event);
 		if (this.filteredItems.length === 0) return undefined;
 		if (event.type === "wheel" && event.wheelDelta) {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
 			this.selectedIndex = Math.max(0, Math.min(this.filteredItems.length - 1, this.selectedIndex + delta));
+			const cleared = this.mouse.clearHover();
 			if (this.selectedIndex !== previousIndex) this.notifySelectionChange();
-			return { handled: true, render: this.selectedIndex !== previousIndex };
+			return { handled: true, render: this.selectedIndex !== previousIndex || cleared };
 		}
-		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 		const { startIndex, endIndex } = this.getVisibleRange();
 		const itemIndex = startIndex + event.y;
@@ -143,6 +153,7 @@ export class SelectList implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		this.mouse.clearHover();
 		const kb = getKeybindings();
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {

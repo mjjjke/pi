@@ -312,6 +312,8 @@ export class Editor implements Component, Focusable {
 	private lastWidth: number = 80;
 	private renderedVisibleLineCount = 1;
 	private renderedAutocompleteHeight = 0;
+	private renderedAutocompleteOrigin?: { x: number; y: number };
+	private autocompleteMouseEvent?: TuiMouseEvent;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -617,6 +619,15 @@ export class Editor implements Component, Focusable {
 
 		// Add autocomplete list if active
 		this.renderedAutocompleteHeight = 0;
+		const autocompleteOrigin = { x: paddingX, y: result.length };
+		if (
+			this.renderedAutocompleteOrigin?.x !== autocompleteOrigin.x ||
+			this.renderedAutocompleteOrigin?.y !== autocompleteOrigin.y
+		) {
+			// The renderer sees the Editor rectangle, not this child's local origin.
+			this.clearAutocompleteHover();
+		}
+		this.renderedAutocompleteOrigin = autocompleteOrigin;
 		if (this.autocompleteState && this.autocompleteList) {
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
 			this.renderedAutocompleteHeight = autocompleteResult.length;
@@ -630,7 +641,18 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
+	private clearAutocompleteHover(): TuiMouseEventResult | undefined {
+		const event = this.autocompleteMouseEvent;
+		this.autocompleteMouseEvent = undefined;
+		return event ? this.autocompleteList?.handleMouse({ ...event, type: "leave" }) : undefined;
+	}
+
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// Leave is a notification for the previous child, independent of the current y.
+		if (event.type === "leave") {
+			this.autocompleteMouseEvent = undefined;
+			return this.autocompleteList?.handleMouse(event);
+		}
 		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
 		if (
 			this.autocompleteState &&
@@ -641,14 +663,21 @@ export class Editor implements Component, Focusable {
 			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
 			const paddingX = Math.min(this.paddingX, maxPadding);
 			const contentWidth = Math.max(1, event.width - paddingX * 2);
-			const result = this.autocompleteList.handleMouse?.({
+			const childEvent = {
 				...event,
 				x: event.x - paddingX,
 				y: event.y - autocompleteStartRow,
 				width: contentWidth,
 				height: this.renderedAutocompleteHeight,
-			});
+			};
+			if (event.type === "move") this.autocompleteMouseEvent = childEvent;
+			const result = this.autocompleteList.handleMouse(childEvent);
 			return result ? { ...result, focus: true } : undefined;
+		}
+
+		if (event.type === "move") {
+			const result = this.clearAutocompleteHover();
+			return result?.render ? result : undefined;
 		}
 
 		// Leave press/drag/release unhandled so the renderer's screen-level text
@@ -694,6 +723,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		this.clearAutocompleteHover();
 		const kb = getKeybindings();
 
 		// Handle character jump mode (awaiting next character to jump to)
@@ -2430,6 +2460,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private applyAutocompleteSuggestions(suggestions: AutocompleteSuggestions, state: "regular" | "force"): void {
+		this.clearAutocompleteHover();
 		this.autocompletePrefix = suggestions.prefix;
 		this.autocompleteList = this.createAutocompleteList(suggestions.prefix, suggestions.items);
 
@@ -2452,6 +2483,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private clearAutocompleteUi(): void {
+		this.clearAutocompleteHover();
 		this.autocompleteState = null;
 		this.autocompleteList = undefined;
 		this.autocompletePrefix = "";

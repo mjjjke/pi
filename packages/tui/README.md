@@ -518,6 +518,7 @@ editor.getPaddingX();  // Get current padding
 
 **Features:**
 - Click-to-position cursor and clickable autocomplete rows in alternate-screen mode
+- Autocomplete row hover without changing selection; the editor text area has no hover
 - Multi-line editing with word wrap
 - Slash command autocomplete (type `/`)
 - File path autocomplete (press `Tab`)
@@ -658,7 +659,8 @@ list.setFilter("opt"); // Filter items
 ```
 
 **Controls:**
-- Mouse wheel: Move selection in alternate-screen mode
+- Mouse move: Hover item rows without changing selection; selected rows keep their selection style
+- Mouse wheel: Move selection in alternate-screen mode (also clears hover at clamped ends)
 - Click: Select a row
 - Arrow keys: Navigate
 - Enter: Select
@@ -700,7 +702,8 @@ settings.updateValue("theme", "light");
 ```
 
 **Controls:**
-- Mouse wheel: Move selection in alternate-screen mode
+- Mouse move: Hover setting rows without changing selection; search, descriptions and hints stay inert
+- Mouse wheel: Move selection in alternate-screen mode (also clears hover at clamped ends)
 - Click: Activate a row
 - Arrow keys: Navigate
 - Enter/Space: Activate (cycle value or open submenu)

@@ -5,6 +5,7 @@ import { allocateLinkId } from "../terminal-image.ts";
 import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
+import { ListMouse } from "./list-mouse.ts";
 
 export interface SettingItem {
 	/** Unique identifier for this setting */
@@ -49,6 +50,13 @@ export class SettingsList implements Component {
 	private searchInput?: Input;
 	private searchEnabled: boolean;
 	private readonly wrapLinkId = allocateLinkId();
+	// Hover only: keep the existing click and wheel handlers below.
+	private readonly mouse = new ListMouse<string>({
+		select() {},
+		activate: () => false,
+		isSelected: (id) => this.getDisplayItems()[this.selectedIndex]?.id === id,
+	});
+	private submenuMouseEvent?: TuiMouseEvent;
 
 	// Submenu state
 	private submenuComponent: Component | null = null;
@@ -97,8 +105,10 @@ export class SettingsList implements Component {
 	}
 
 	render(width: number): string[] {
-		// If submenu is active, render it instead
+		this.mouse.beginRows();
+		// If submenu is active, render it instead, validating the replaced main rows too.
 		if (this.submenuComponent) {
+			this.mouse.paintHover([], width);
 			return renderComponent(this.submenuComponent, width);
 		}
 
@@ -118,14 +128,14 @@ export class SettingsList implements Component {
 			if (this.searchEnabled) {
 				this.addHintLine(lines, width);
 			}
-			return lines;
+			return this.mouse.paintHover(lines, width);
 		}
 
 		const displayItems = this.getDisplayItems();
 		if (displayItems.length === 0) {
 			lines.push(truncateToWidth(this.theme.hint("  No matching settings"), width));
 			this.addHintLine(lines, width);
-			return lines;
+			return this.mouse.paintHover(lines, width);
 		}
 
 		// Calculate visible range with scrolling
@@ -139,6 +149,7 @@ export class SettingsList implements Component {
 			const item = displayItems[i];
 			if (!item) continue;
 
+			this.mouse.addRow(item.id, lines.length);
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? this.theme.cursor : "  ";
 			const prefixWidth = visibleWidth(prefix);
@@ -180,14 +191,19 @@ export class SettingsList implements Component {
 		// Add hint
 		this.addHintLine(lines, width);
 
-		return lines;
+		return this.mouse.paintHover(lines, width);
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.submenuComponent) {
+			if (event.type === "move") this.submenuMouseEvent = event;
+			if (event.type === "leave") this.submenuMouseEvent = undefined;
 			const result = this.submenuComponent.handleMouse?.(event);
 			return result ? { ...result, focus: true } : undefined;
 		}
+
+		// Handle these before search/blank-row early returns so moving off a row clears it.
+		if (event.type === "move" || event.type === "leave") return this.mouse.handle(event);
 
 		if (this.searchEnabled && this.searchInput) {
 			if (event.y === 0) {
@@ -203,9 +219,9 @@ export class SettingsList implements Component {
 			const delta = event.wheelDelta < 0 ? -1 : 1;
 			const previousIndex = this.selectedIndex;
 			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
-			return { handled: true, render: this.selectedIndex !== previousIndex };
+			const cleared = this.mouse.clearHover();
+			return { handled: true, render: this.selectedIndex !== previousIndex || cleared };
 		}
-		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 
 		const rowOffset = this.searchEnabled ? 2 : 0;
@@ -227,6 +243,8 @@ export class SettingsList implements Component {
 	}
 
 	handleInput(data: string): void {
+		this.mouse.clearHover();
+		this.clearSubmenuHover();
 		// If submenu is active, delegate all input to it
 		// The submenu's onCancel (triggered by escape) will call done() which closes it
 		if (this.submenuComponent) {
@@ -273,6 +291,7 @@ export class SettingsList implements Component {
 		if (!item) return;
 
 		if (item.submenu) {
+			this.mouse.clearHover();
 			// Open submenu, passing current value so it can pre-select correctly
 			this.submenuItemIndex = this.selectedIndex;
 			this.submenuComponent = item.submenu(
@@ -298,7 +317,14 @@ export class SettingsList implements Component {
 		}
 	}
 
+	private clearSubmenuHover(): void {
+		const event = this.submenuMouseEvent;
+		this.submenuMouseEvent = undefined;
+		if (event) this.submenuComponent?.handleMouse?.({ ...event, type: "leave" });
+	}
+
 	private closeSubmenu(): void {
+		this.clearSubmenuHover();
 		this.submenuComponent = null;
 		if (this.navigateAfterClose !== null) {
 			const id = this.navigateAfterClose;
