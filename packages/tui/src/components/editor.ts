@@ -2,12 +2,16 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
+import { recordMouseLayout } from "../mouse-layout.ts";
 import {
 	type Component,
 	CURSOR_MARKER,
+	dispatchMouseEvent,
 	type Focusable,
 	renderFakeCursor,
+	retargetMouseEvent,
 	type TUI,
+	type TuiMouseDispatchTarget,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
 } from "../tui.ts";
@@ -313,7 +317,7 @@ export class Editor implements Component, Focusable {
 	private renderedVisibleLineCount = 1;
 	private renderedAutocompleteHeight = 0;
 	private renderedAutocompleteOrigin?: { x: number; y: number };
-	private autocompleteMouseEvent?: TuiMouseEvent;
+	private autocompleteHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent };
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -618,19 +622,29 @@ export class Editor implements Component, Focusable {
 		result.push(this.renderBottomBorder(width, linesBelow));
 
 		// Add autocomplete list if active
+		recordMouseLayout(this, []);
 		this.renderedAutocompleteHeight = 0;
 		const autocompleteOrigin = { x: paddingX, y: result.length };
 		if (
 			this.renderedAutocompleteOrigin?.x !== autocompleteOrigin.x ||
 			this.renderedAutocompleteOrigin?.y !== autocompleteOrigin.y
 		) {
-			// The renderer sees the Editor rectangle, not this child's local origin.
+			// Also validate locally for hosts that do not expose the Editor's child geometry.
 			this.clearAutocompleteHover();
 		}
 		this.renderedAutocompleteOrigin = autocompleteOrigin;
 		if (this.autocompleteState && this.autocompleteList) {
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
 			this.renderedAutocompleteHeight = autocompleteResult.length;
+			recordMouseLayout(this, [
+				{
+					component: this.autocompleteList,
+					originX: paddingX,
+					originY: autocompleteOrigin.y,
+					width: contentWidth,
+					height: autocompleteResult.length,
+				},
+			]);
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
@@ -642,17 +656,14 @@ export class Editor implements Component, Focusable {
 	}
 
 	private clearAutocompleteHover(): TuiMouseEventResult | undefined {
-		const event = this.autocompleteMouseEvent;
-		this.autocompleteMouseEvent = undefined;
-		return event ? this.autocompleteList?.handleMouse({ ...event, type: "leave" }) : undefined;
+		const hover = this.autocompleteHover;
+		this.autocompleteHover = undefined;
+		return hover?.target.component.handleMouse?.({ ...hover.event, type: "leave" });
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		// Leave is a notification for the previous child, independent of the current y.
-		if (event.type === "leave") {
-			this.autocompleteMouseEvent = undefined;
-			return this.autocompleteList?.handleMouse(event);
-		}
+		if (event.type === "leave") return this.clearAutocompleteHover();
 		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
 		if (
 			this.autocompleteState &&
@@ -670,7 +681,17 @@ export class Editor implements Component, Focusable {
 				width: contentWidth,
 				height: this.renderedAutocompleteHeight,
 			};
-			if (event.type === "move") this.autocompleteMouseEvent = childEvent;
+			if (event.type === "move") {
+				const result = dispatchMouseEvent(this.autocompleteList, childEvent);
+				const cleared =
+					this.autocompleteHover?.target.component !== result?.target.component
+						? this.clearAutocompleteHover()
+						: undefined;
+				this.autocompleteHover = result
+					? { target: result.target, event: retargetMouseEvent(childEvent, result.target) }
+					: undefined;
+				return result ? { ...result, focus: true, render: cleared?.render || result.render } : cleared;
+			}
 			const result = this.autocompleteList.handleMouse(childEvent);
 			return result ? { ...result, focus: true } : undefined;
 		}

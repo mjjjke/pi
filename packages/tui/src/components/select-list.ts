@@ -46,11 +46,12 @@ export class SelectList implements Component {
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
+	// Filtering retains item objects, so duplicate values have distinct hover identities.
 	// Hover only: click identity and wheel ownership retain their existing semantics.
-	private readonly mouse = new ListMouse<string>({
+	private readonly mouse = new ListMouse<SelectItem>({
 		select() {},
 		activate: () => false,
-		isSelected: (value) => this.getSelectedItem()?.value === value,
+		isSelected: (item) => this.getSelectedItem() === item,
 	});
 
 	public onSelect?: (item: SelectItem) => void;
@@ -99,7 +100,7 @@ export class SelectList implements Component {
 			const item = this.filteredItems[i];
 			if (!item) continue;
 
-			this.mouse.addRow(item.value, lines.length);
+			this.mouse.addRow(item, lines.length);
 			const isSelected = i === this.selectedIndex;
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));

@@ -4,8 +4,11 @@ import xterm from "@xterm/headless";
 import { setPointerHoverBackground } from "../src/components/list-mouse.ts";
 import { SelectList, type SelectListTheme } from "../src/components/select-list.ts";
 import { type SettingItem, SettingsList, type SettingsListTheme } from "../src/components/settings-list.ts";
-import type { TuiMouseEvent } from "../src/tui.ts";
+import { Spacer } from "../src/components/spacer.ts";
+import { Container, type TuiMouseEvent } from "../src/tui.ts";
+import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { visibleWidth } from "../src/utils.ts";
+import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const bg = "\x1b[48;5;235m";
 const theme: SettingsListTheme = {
@@ -60,7 +63,86 @@ function fixture(count = 4, maxVisible = 5, search = true) {
 }
 afterEach(() => setPointerHoverBackground(undefined));
 
+function nestedFixture(depth: number) {
+	const child = new SelectList(
+		[
+			{ value: "a", label: "A" },
+			{ value: "b", label: "B" },
+		],
+		5,
+		selectTheme,
+	);
+	const top = new Spacer(1);
+	const bottom = new Spacer(2);
+	const menu = new Container();
+	menu.addChild(top);
+	menu.addChild(child);
+	menu.addChild(bottom);
+	let component = menu as Container | SettingsList;
+	for (let i = 0; i < depth; i++) {
+		const submenu = component;
+		component = new SettingsList(
+			[{ id: "sub", label: "Sub", currentValue: "", submenu: () => submenu }],
+			5,
+			theme,
+			() => {},
+			() => {},
+		);
+		component.handleInput("\r");
+	}
+	component.render(40);
+	return { parent: component, menu, child, top, bottom };
+}
+
 describe("SettingsList hover-only adoption", () => {
+	for (const depth of [1, 2]) {
+		for (const change of ["move", "replace"] as const) {
+			it(`clears stationary hover when a nested child changes (${change}, depth ${depth})`, () => {
+				setPointerHoverBackground(() => bg);
+				const { parent, menu, top, bottom } = nestedFixture(depth);
+				const terminal = new VirtualTerminal(40, 20);
+				const tui = new TuiAltScreen(terminal);
+				tui.addChild(parent);
+				tui.start();
+				try {
+					tui.renderNow();
+					terminal.sendInput("\x1b[<35;3;3M");
+					tui.renderNow();
+					assert.ok(tui.getScreenLines()[2].includes(bg));
+					const move = parent.handleMouse(event("move", 2, { width: 40, height: 5 }))!;
+					assert.equal(move.hoverValid?.(), true);
+					if (change === "move") {
+						top.setLines(2);
+						bottom.setLines(1);
+					} else {
+						menu.children[1] = new SelectList(
+							[
+								{ value: "a", label: "A" },
+								{ value: "b", label: "B" },
+							],
+							5,
+							selectTheme,
+						);
+					}
+					tui.renderNow();
+					assert.equal(move.hoverValid?.(), false);
+					assert.ok(tui.getScreenLines().every((line) => !line.includes(bg)));
+				} finally {
+					tui.stop();
+				}
+			});
+		}
+		for (const replace of [false, true]) {
+			it(`delivers out-of-bounds leave to the original nested owner (depth ${depth}, replacement ${replace})`, () => {
+				const { parent, menu } = nestedFixture(depth);
+				const move = parent.handleMouse(event("move", 2, { width: 40, height: 5 }))!;
+				assert.equal(move.hoverValid?.(), true);
+				if (replace) menu.clear();
+				parent.handleMouse(event("leave", -100));
+				assert.equal(move.hoverValid?.(), false);
+			});
+		}
+	}
 	it("tracks without color and leaves selection, values and focus unchanged", () => {
 		const { list, changes } = fixture();
 		const before = list.render(80);

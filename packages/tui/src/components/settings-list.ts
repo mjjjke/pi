@@ -1,8 +1,16 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { renderComponent } from "../link-identity.ts";
+import { recordMouseLayout } from "../mouse-layout.ts";
 import { allocateLinkId } from "../terminal-image.ts";
-import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../tui.ts";
+import {
+	type Component,
+	dispatchMouseEvent,
+	retargetMouseEvent,
+	type TuiMouseDispatchTarget,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
 import { ListMouse } from "./list-mouse.ts";
@@ -56,7 +64,7 @@ export class SettingsList implements Component {
 		activate: () => false,
 		isSelected: (id) => this.getDisplayItems()[this.selectedIndex]?.id === id,
 	});
-	private submenuMouseEvent?: TuiMouseEvent;
+	private submenuHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent };
 
 	// Submenu state
 	private submenuComponent: Component | null = null;
@@ -109,9 +117,14 @@ export class SettingsList implements Component {
 		// If submenu is active, render it instead, validating the replaced main rows too.
 		if (this.submenuComponent) {
 			this.mouse.paintHover([], width);
-			return renderComponent(this.submenuComponent, width);
+			const lines = renderComponent(this.submenuComponent, width);
+			recordMouseLayout(this, [
+				{ component: this.submenuComponent, originX: 0, originY: 0, width, height: lines.length },
+			]);
+			return lines;
 		}
 
+		recordMouseLayout(this, []);
 		return this.renderMainList(width);
 	}
 
@@ -196,8 +209,16 @@ export class SettingsList implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.submenuComponent) {
-			if (event.type === "move") this.submenuMouseEvent = event;
-			if (event.type === "leave") this.submenuMouseEvent = undefined;
+			if (event.type === "leave") return this.clearSubmenuHover();
+			if (event.type === "move") {
+				const result = dispatchMouseEvent(this.submenuComponent, event);
+				const cleared =
+					this.submenuHover?.target.component !== result?.target.component ? this.clearSubmenuHover() : undefined;
+				this.submenuHover = result
+					? { target: result.target, event: retargetMouseEvent(event, result.target) }
+					: undefined;
+				return result ? { ...result, focus: true, render: cleared?.render || result.render } : cleared;
+			}
 			const result = this.submenuComponent.handleMouse?.(event);
 			return result ? { ...result, focus: true } : undefined;
 		}
@@ -317,10 +338,11 @@ export class SettingsList implements Component {
 		}
 	}
 
-	private clearSubmenuHover(): void {
-		const event = this.submenuMouseEvent;
-		this.submenuMouseEvent = undefined;
-		if (event) this.submenuComponent?.handleMouse?.({ ...event, type: "leave" });
+	private clearSubmenuHover(): TuiMouseEventResult | undefined {
+		const hover = this.submenuHover;
+		this.submenuHover = undefined;
+		// Notify the exact previous owner, even if its container has moved or replaced it.
+		return hover?.target.component.handleMouse?.({ ...hover.event, type: "leave" });
 	}
 
 	private closeSubmenu(): void {

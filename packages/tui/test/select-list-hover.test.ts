@@ -47,6 +47,25 @@ function fixture(count = 4, maxVisible = 5) {
 afterEach(() => setPointerHoverBackground(undefined));
 
 describe("SelectList hover-only adoption", () => {
+	it("distinguishes duplicate values by stable item identity across filters", () => {
+		setPointerHoverBackground(() => bg);
+		const items = [
+			{ value: "x", label: "First" },
+			{ value: "x", label: "Second" },
+		];
+		const list = new SelectList(items, 5, theme);
+		list.render(80);
+		const move = list.handleMouse(event("move"))!;
+		assert.ok(list.render(80)[1].includes(bg));
+		list.setFilter("x");
+		assert.equal(list.getSelectedItem(), items[0]);
+		assert.ok(list.render(80)[1].includes(bg));
+		assert.equal(move.hoverValid?.(), true);
+		[items[0], items[1]] = [items[1], items[0]];
+		list.setFilter("");
+		assert.ok(list.render(80).every((line) => !line.includes(bg)));
+		assert.equal(move.hoverValid?.(), false);
+	});
 	it("handles row motion without color, selection, activation or focus changes", () => {
 		const { list, changes, activations } = fixture();
 		const before = list.render(80);

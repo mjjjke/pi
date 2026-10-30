@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it, type TestContext } from "node:test";
 import { Editor, type EditorTheme } from "../src/components/editor.ts";
 import { setPointerHoverBackground } from "../src/components/list-mouse.ts";
-import type { Component, TuiMouseEvent, TuiMouseEventResult } from "../src/tui.ts";
+import { SelectList } from "../src/components/select-list.ts";
+import { Spacer } from "../src/components/spacer.ts";
+import { recordMouseLayout } from "../src/mouse-layout.ts";
+import { type Component, Container, type TuiMouseEvent, type TuiMouseEventResult } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -61,6 +64,69 @@ async function fixture(t: TestContext) {
 afterEach(() => setPointerHoverBackground(undefined));
 
 describe("Editor autocomplete hover forwarding", () => {
+	for (const change of ["move", "content", "replace"] as const) {
+		it(`clears a nested autocomplete owner on ${change} without pointer motion`, async (t) => {
+			setPointerHoverBackground(() => bg);
+			const { editor, tui, terminal } = await fixture(t);
+			const child = new SelectList(
+				[
+					{ value: "a", label: "A" },
+					{ value: "b", label: "B" },
+				],
+				5,
+				theme.selectList,
+			);
+			const top = new Spacer(1);
+			const bottom = new Spacer(2);
+			const menu = new Container();
+			menu.addChild(top);
+			menu.addChild(child);
+			menu.addChild(bottom);
+			// Exercise the forwarding contract with a composite suggestion list.
+			class CompositeList extends SelectList {
+				override render(width: number) {
+					const lines = menu.render(width);
+					recordMouseLayout(this, [{ component: menu, originX: 0, originY: 0, width, height: lines.length }]);
+					return lines;
+				}
+				override handleMouse(input: TuiMouseEvent) {
+					return menu.handleMouse(input);
+				}
+			}
+			const list = new CompositeList([], 5, theme.selectList);
+			(editor as unknown as { autocompleteList: SelectList }).autocompleteList = list;
+			terminal.resize(40, 20);
+			tui.addChild(editor);
+			tui.start();
+			tui.renderNow();
+			terminal.sendInput("\x1b[<35;4;6M");
+			tui.renderNow();
+			assert.ok(tui.getScreenLines()[5].includes(bg));
+			const move = editor.handleMouse(event("move", 5))!;
+			assert.equal(move.hoverValid?.(), true);
+			if (change === "move") {
+				top.setLines(2);
+				bottom.setLines(1);
+			} else if (change === "content") {
+				menu.children[1] = new SelectList(
+					[
+						{ value: "a", label: "A" },
+						{ value: "b", label: "B" },
+					],
+					5,
+					theme.selectList,
+				);
+			} else menu.clear();
+			if (change !== "replace") {
+				tui.renderNow();
+				assert.equal(move.hoverValid?.(), false);
+				assert.ok(tui.getScreenLines().every((line) => !line.includes(bg)));
+			} else {
+				editor.handleMouse(event("leave", -100));
+				assert.equal(move.hoverValid?.(), false);
+			}
+		});
+	}
 	it("forwards suggestion moves, but never hovers the body or changes text/cursor/selection", async (t) => {
 		setPointerHoverBackground(() => bg);
 		const { editor, activations } = await fixture(t);
