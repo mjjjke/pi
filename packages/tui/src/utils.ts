@@ -1277,6 +1277,21 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 export function applyBackgroundSpan(line: string, start: number, end: number, bgAnsi: string): string {
 	if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || isImageLine(line))
 		return line;
+	// Segment the visible stream, not individual ANSI-delimited fragments. Map
+	// UTF-16 offsets back to the original string so escapes inside a cluster stay
+	// in order without becoming grapheme boundaries.
+	let visible = "";
+	const originalOffsets: number[] = [];
+	for (let offset = 0; offset < line.length; ) {
+		const length = ansiCodeLength(line, offset);
+		if (length) offset += length;
+		else {
+			visible += line[offset];
+			originalOffsets.push(offset++);
+		}
+	}
+	const graphemes = graphemeSegmenter.segment(visible)[Symbol.iterator]();
+	let graphemeEnd = 0;
 	const tracker = new AnsiCodeTracker();
 	let result = "";
 	let column = 0;
@@ -1296,9 +1311,9 @@ export function applyBackgroundSpan(line: string, start: number, end: number, bg
 			i += ansi.length;
 			continue;
 		}
-		let textEnd = i + 1;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
-		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+		if (i >= graphemeEnd) {
+			const { segment, index } = graphemes.next().value!;
+			graphemeEnd = originalOffsets[index + segment.length - 1] + 1;
 			const width = graphemeWidth(segment);
 			const inside = column >= start && column < end && column + width <= end;
 			if (inside && !painted) {
@@ -1309,10 +1324,9 @@ export function applyBackgroundSpan(line: string, start: number, end: number, bg
 				result += tracker.getActiveBackgroundCode() || "\x1b[49m";
 				painted = false;
 			}
-			result += segment;
 			column += width;
 		}
-		i = textEnd;
+		result += line[i++];
 	}
 	if (column < end) {
 		if (column < start) {

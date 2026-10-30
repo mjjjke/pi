@@ -92,6 +92,48 @@ describe("applyBackgroundSpan", () => {
 			[undefined, 235, 235, 235, undefined],
 		);
 	});
+	for (const [name, marker] of [
+		["SGR", "\x1b[31m"],
+		["APC", "\x1b_pi:c\x07"],
+	] as const) {
+		it(`pads a joined emoji with embedded ${name} using its complete visible width`, async () => {
+			const line = `👩${marker}\u200d💻`;
+			const out = applyBackgroundSpan(line, 0, 4, hover);
+			assert.equal(visibleWidth(line), 2);
+			assert.equal(visibleWidth(out), 4);
+			assert.equal(out.replaceAll(hover, "").replaceAll("\x1b[49m", ""), `${line}  `);
+			// Headless xterm does not support BEL-terminated APC; byte preservation
+			// is checked above, and its zero-width payload is omitted for the cell oracle.
+			const row = await cells(`${out.replaceAll("\x1b_pi:c\x07", "")}z`);
+			// Headless xterm does not join this emoji; check attributes by content.
+			for (const cell of row.filter((cell) => cell.text && cell.text !== "z")) assert.equal(cell.bg, 235);
+			assert.equal(row.find((cell) => cell.text === "z")?.bg, undefined);
+		});
+	}
+	it("leaves an SGR-split variation-selector grapheme entirely unpainted when straddling", async () => {
+		const line = "♥\x1b[31m\uFE0F";
+		assert.equal(visibleWidth(line), 2);
+		for (const [start, end] of [
+			[0, 1],
+			[1, 2],
+		]) {
+			const out = applyBackgroundSpan(line, start, end, hover);
+			assert.equal(out, line);
+			assert.ok((await cells(`${out}z`)).every((cell) => cell.bg === undefined));
+		}
+	});
+	it("keeps an SGR-split combining mark with its base and restores the outer background", async () => {
+		const line = "\x1b[44me\x1b[31m\u0301x";
+		const out = applyBackgroundSpan(line, 0, 1, hover);
+		assert.equal(visibleWidth(out), 2);
+		assert.equal(stripTerminalSequences(out), "éx");
+		assert.equal(out, `\x1b[44m${hover}e\x1b[31m${hover}\u0301\x1b[44mx`);
+		const row = await cells(out);
+		// Headless xterm does not combine a mark across SGR; test attributes by content.
+		assert.equal(row.find((cell) => cell.text === "e")?.bg, 235);
+		assert.equal(row.find((cell) => cell.text === "x")?.bg, 4);
+		assert.equal(row.find((cell) => cell.text === "x")?.fg, 1);
+	});
 	it("preserves OSC 8 and APC/cursor marker bytes, without adding a hyperlink reset", () => {
 		const open = "\x1b]8;id=one;https://example.com\x07";
 		const close = "\x1b]8;;\x07";
