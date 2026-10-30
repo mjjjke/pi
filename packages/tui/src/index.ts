@@ -49,7 +49,14 @@ export {
 	setImageTranscoder,
 } from "./components/image.ts";
 export { Input } from "./components/input.ts";
-export { ListMouse, type ListMouseHit, type ListMouseOptions, type ListMouseZone } from "./components/list-mouse.ts";
+export {
+	getPointerHoverBackground,
+	ListMouse,
+	type ListMouseHit,
+	type ListMouseOptions,
+	type ListMouseZone,
+	setPointerHoverBackground,
+} from "./components/list-mouse.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
 export {
 	type DefaultTextStyle,
@@ -198,6 +205,7 @@ export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.ts";
 export { TuiMainScreen, type TuiMainScreenRenderState } from "./tui-main-screen.ts";
 // Utilities
 export {
+	applyBackgroundSpan,
 	getOsc8LinkAtColumn,
 	sliceByColumn,
 	stripTerminalSequences,

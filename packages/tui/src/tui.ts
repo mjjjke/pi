@@ -63,6 +63,8 @@ export interface TuiMouseEventResult {
 	 * press, click, drag, and wheel default to true.
 	 */
 	render?: boolean;
+	/** Side-effect-free validity of this handled move's hover episode; once false, never true again. */
+	hoverValid?(): boolean;
 }
 
 /** Internal target metadata used by containers and alternate-screen dispatch. */

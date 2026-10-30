@@ -241,7 +241,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private selectionDragged = false;
 	private readonly pressedMouseButtons = new Set<TuiMouseButton>();
 	private mouseCapture?: TuiMouseDispatchTarget;
-	private mouseHover?: { target: TuiMouseDispatchTarget; event: TuiMouseEvent; hit?: TuiMouseDispatchTarget };
+	private mouseHover?: {
+		target: TuiMouseDispatchTarget;
+		event: TuiMouseEvent;
+		hit?: TuiMouseDispatchTarget;
+		epoch: number;
+		hoverValid?: () => boolean;
+	};
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
 	private mousePressMoved = false;
@@ -802,9 +808,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
 			if (result) {
 				if (this.applyMouseDispatchResult(event, result)) this.requestRender();
+				if (this.reconcileMouseHover(event)) this.requestRender();
 				return { consume: true };
 			}
 			this.routeWheel(wheelEvent, wheelDelta);
+			if (this.reconcileMouseHover(event)) this.requestRender();
 			return { consume: true };
 		}
 		const mouseEvent = this.parseSgrMouseEvent(data);
@@ -950,9 +958,19 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private applyMouseDispatchResult(event: TuiMouseEvent, result: TuiMouseDispatchResult): boolean {
 		const focusTarget = this.resolveMouseFocusTarget(result.focusTarget ?? result.target.component);
-		const focusChanged = result.focus === true && this.getFocusedComponent() !== focusTarget;
-		if (result.focus) this.setFocus(focusTarget);
-		if (result.capture) this.mouseCapture = result.target;
+		const passive = event.type === "move" || event.type === "leave";
+		const focusChanged = !passive && result.focus === true && this.getFocusedComponent() !== focusTarget;
+		if (!passive && result.focus) this.setFocus(focusTarget);
+		if (!passive && result.capture) this.mouseCapture = result.target;
+		// Only the current target's own deliberate focus request may preserve an existing
+		// episode. The pre-dispatch check already rejected asynchronous epoch changes.
+		if (
+			(event.type === "press" || event.type === "wheel") &&
+			result.focus &&
+			this.mouseHover?.target.component === result.target.component &&
+			this.mouseHover.hoverValid?.() !== false
+		)
+			this.mouseHover.epoch = this.interactionEpoch;
 		return (
 			result.render ??
 			(focusChanged ||
@@ -1035,10 +1053,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		);
 	}
 
-	/** Validate geometry only: never synthesize moves or disturb gesture capture. */
-	private reconcileMouseHover(event = this.mouseHover?.event, layout = this.currentLayout): boolean {
+	private reconcileMouseHoverOwnership(event = this.mouseHover?.event): boolean {
 		const previous = this.mouseHover;
-		if (!previous || !event) return false;
+		return previous && (previous.epoch !== this.interactionEpoch || previous.hoverValid?.() === false)
+			? this.clearMouseHover(event)
+			: false;
+	}
+
+	/** Validate ownership and geometry without synthetic moves or gesture capture changes. */
+	private reconcileMouseHover(event = this.mouseHover?.event, layout = this.currentLayout): boolean {
+		const repaint = this.reconcileMouseHoverOwnership(event);
+		const previous = this.mouseHover;
+		if (!previous || !event) return repaint;
 		const hit = this.getMouseHitTarget(event, layout);
 		const oldHit = previous.hit;
 		if (
@@ -1089,8 +1115,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.clearComponentMouseGesture();
 		}
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
+		// Do not let this dispatch's focus request hide an earlier A→B→A displacement.
+		if (this.reconcileMouseHoverOwnership(event)) this.requestRender();
 		if (type !== "move") this.clearLinkHover();
 		let moveTarget: TuiMouseDispatchTarget | undefined;
+		let hoverValid: (() => boolean) | undefined;
 		try {
 			// Authorized modified links win over a row's press/click handler.
 			if (
@@ -1169,6 +1198,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
 			if (result) {
 				moveTarget = result.target;
+				hoverValid = result.hoverValid;
 				const render = this.applyMouseDispatchResult(event, result);
 				if (type === "press") {
 					this.clearTextSelection();
@@ -1185,7 +1215,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.handleSelectionMouseEvent(raw);
 		} finally {
 			if (raw.release) this.mouseGestureId = undefined;
-			if (this.reconcileMouseHover(event)) this.requestRender();
+			// A move may already have replaced the helper's episode inside the same
+			// dispatch target. Do not send that new episode the old one's leave.
+			if (type !== "move" && this.reconcileMouseHover(event)) this.requestRender();
 			if (type === "move") {
 				// Modified link activation wins over component handlers, so hover must too.
 				// Keep dispatching moves above for component feedback and leave tracking.
@@ -1206,6 +1238,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 							target: moveTarget,
 							event,
 							hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
+							epoch: this.interactionEpoch,
+							hoverValid,
 						}
 					: undefined;
 			}

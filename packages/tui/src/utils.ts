@@ -1,4 +1,5 @@
 import { eastAsianWidth } from "get-east-asian-width";
+import { isImageLine } from "./terminal-image.ts";
 
 // segmenters (shared instance)
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -1266,6 +1267,63 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 	}
 
 	return lines.length > 0 ? lines : [""];
+}
+
+/**
+ * Paint complete graphemes in [start, end), padding short lines only through end.
+ * The background at entry is the outer surface; explicit inner backgrounds win.
+ * Track original sequences only, never our injected paint or restoration codes.
+ */
+export function applyBackgroundSpan(line: string, start: number, end: number, bgAnsi: string): string {
+	if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || isImageLine(line))
+		return line;
+	const tracker = new AnsiCodeTracker();
+	let result = "";
+	let column = 0;
+	let painted = false;
+	let innerBackground = false;
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			tracker.process(ansi.code);
+			result += ansi.code;
+			if (painted && ansi.code.startsWith("\x1b[") && ansi.code.endsWith("m")) {
+				if (getActiveBackgroundAnsi(ansi.code)) innerBackground = true;
+				else if (!tracker.getActiveBackgroundCode()) innerBackground = false;
+				if (!innerBackground) result += bgAnsi;
+			}
+			i += ansi.length;
+			continue;
+		}
+		let textEnd = i + 1;
+		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+			const width = graphemeWidth(segment);
+			const inside = column >= start && column < end && column + width <= end;
+			if (inside && !painted) {
+				result += bgAnsi;
+				painted = true;
+				innerBackground = false;
+			} else if (!inside && painted) {
+				result += tracker.getActiveBackgroundCode() || "\x1b[49m";
+				painted = false;
+			}
+			result += segment;
+			column += width;
+		}
+		i = textEnd;
+	}
+	if (column < end) {
+		if (column < start) {
+			result += " ".repeat(start - column);
+			column = start;
+		}
+		if (!painted) result += bgAnsi;
+		result += " ".repeat(end - column);
+		painted = true;
+	}
+	return result + (painted ? tracker.getActiveBackgroundCode() || "\x1b[49m" : "");
 }
 
 /**

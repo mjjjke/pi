@@ -222,12 +222,16 @@ describe("ListMouse", () => {
 		assert.deepEqual([selected, activated, zones], [[], [], []]);
 		assert.equal(list.closed, false);
 	});
-	it("ignores non-left buttons, release, drag, move, leave and missing rows", () => {
-		const { list, activated } = fixture();
+	it("ignores non-left buttons, release, drag and missing rows; hover never selects or activates", () => {
+		const { list, selected, activated } = fixture();
 		for (const button of ["right", "middle", "none"] as const)
 			for (const type of ["press", "click"] as const) assert.equal(list.handle(mouse(type, { button })), undefined);
-		for (const type of ["release", "drag", "move", "leave"] as const)
-			assert.equal(list.handle(mouse(type)), undefined);
+		for (const type of ["release", "drag"] as const) assert.equal(list.handle(mouse(type)), undefined);
+		const move = list.handle(mouse("move"));
+		assert.equal(move?.handled, true);
+		assert.equal(move?.focus, undefined);
+		assert.deepEqual(list.handle(mouse("leave")), { handled: true, render: true });
+		assert.deepEqual(selected, []);
 		assert.equal(list.handle(mouse("press", { y: 0 })), undefined);
 		assert.equal(list.handle(mouse("click", { y: 0 })), undefined);
 		assert.equal(list.hitTest(1, 3), undefined);
