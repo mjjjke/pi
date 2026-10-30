@@ -536,6 +536,8 @@ export abstract class TuiBase extends Container implements TUI {
 	private focusedComponent: Component | null = null;
 	/** Changes when keyboard focus moves or a non-release key reaches the focused component. */
 	protected interactionEpoch = 0;
+	/** Invalidates synchronous continuations when application callbacks stop or restart the renderer. */
+	protected lifecycleGeneration = 0;
 	private inputListeners = new Set<TuiInputListener>();
 	private terminalFocus: boolean | undefined;
 	private terminalFocusListeners = new Set<(focused: boolean) => void>();
@@ -637,6 +639,7 @@ export abstract class TuiBase extends Container implements TUI {
 		component: Component | null;
 		overlayFocusRestore: OverlayFocusRestorePolicy;
 	}): void {
+		const generation = this.lifecycleGeneration;
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
 		const previousFocusedOverlay = previousFocus
@@ -677,9 +680,12 @@ export abstract class TuiBase extends Container implements TUI {
 			}
 		}
 
+		if (generation !== this.lifecycleGeneration) return;
 		if (isFocusable(this.focusedComponent)) {
 			this.focusedComponent.focused = false;
 		}
+		// Focus setters run application code, including screen replacement.
+		if (generation !== this.lifecycleGeneration) return;
 
 		if (nextFocus !== previousFocus) this.interactionEpoch++;
 		this.focusedComponent = nextFocus;
@@ -687,6 +693,7 @@ export abstract class TuiBase extends Container implements TUI {
 		if (isFocusable(nextFocus)) {
 			nextFocus.focused = true;
 		}
+		if (generation !== this.lifecycleGeneration) return;
 
 		const focusedOverlay = nextFocus
 			? this.overlayStack.find((entry) => entry.component === nextFocus && this.isOverlayVisible(entry))
@@ -961,8 +968,10 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	start(): void {
+		const generation = ++this.lifecycleGeneration;
 		this.stopped = false;
 		this.beforeTerminalStart();
+		if (generation !== this.lifecycleGeneration) return;
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
 			() => this.requestRender(),
@@ -1027,6 +1036,7 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	stop(options: TuiStopOptions = {}): void {
+		const generation = ++this.lifecycleGeneration;
 		this.stopped = true;
 		this.cancelRenderTimer();
 		if (this.terminalColorSchemeNotificationsEnabled) {
@@ -1035,6 +1045,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.terminal.write("\x1b[?1004l");
 		this.terminalFocus = undefined;
 		this.beforeTerminalStop(options);
+		if (generation !== this.lifecycleGeneration) return;
 		this.terminal.showCursor();
 		this.terminal.stop();
 		this.afterTerminalStop(options);

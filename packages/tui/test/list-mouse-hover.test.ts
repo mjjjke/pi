@@ -143,6 +143,31 @@ describe("ListMouse hover", () => {
 			});
 		}
 	}
+	for (const mode of ["manual", "region"] as const) {
+		for (const type of ["wheel", "click"] as const) {
+			it(`${mode} ${type} invalidates mismatched hover before ownership/provenance admission`, () => {
+				for (const target of [{ x: 2 }, { x: 3 }, { y: 2 }, { y: 3 }, { x: -1 }]) {
+					const { mouse, selected, activated } = fixture({ step: () => false, ownsWheel: () => false });
+					const row = mouse.row("A", new Text("row", 0, 0), [{ name: "fold", x: 3, width: 1 }]);
+					const other = mouse.row("B", new Text("other", 0, 0));
+					mouse.commitRows();
+					const dispatch = (input: TuiMouseEvent) =>
+						mode === "manual"
+							? mouse.handle(input)
+							: input.y === 2
+								? other.handleMouse({ ...input, y: 0, height: 1 })
+								: row.handleMouse({ ...input, height: 1 });
+					const move = dispatch(event("move"))!;
+					assert.equal(
+						dispatch(event(type, { button: "left", wheelDelta: 1, clickSource: "fallback", ...target })),
+						undefined,
+					);
+					assert.equal(move.hoverValid?.(), target.x === 2);
+					assert.deepEqual([selected, activated], [[], []]);
+				}
+			});
+		}
+	}
 	it("ends zone hover without changing press-time key, zone or gesture routing", () => {
 		const zones: string[] = [];
 		const { mouse, activated } = fixture({ zoneClick: (key, zone) => zones.push(`${key}:${zone}`) });

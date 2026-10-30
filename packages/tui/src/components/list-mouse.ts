@@ -240,6 +240,14 @@ export class ListMouse<K> {
 		inItemArea: boolean,
 		region = false,
 	): TuiMouseEventResult | undefined {
+		// Any non-move report can end an episode, before wheel ownership or click
+		// provenance admission. It must never discover hover or alter held identity.
+		const mismatchedHover =
+			event.type !== "move" &&
+			event.type !== "leave" &&
+			this.hover &&
+			(!hit || this.hover.key !== hit.key || this.hover.zone !== hit.zone || this.hover.region !== region);
+		const clearedMismatch = mismatchedHover ? this.clearHover() : false;
 		// Capture identifies the dispatch target, not which nested control accepted the press.
 		// Reject another gesture's click even if its press bypassed this helper (e.g. search).
 		// Clear stale identity even when disabled or closed, before all other gates.
@@ -273,17 +281,9 @@ export class ListMouse<K> {
 		if (event.type === "wheel") {
 			if (!event.wheelDelta || !this.options.step || this.options.ownsWheel?.() === false || !inItemArea)
 				return undefined;
-			const cleared = this.clearHover();
+			const cleared = this.clearHover() || clearedMismatch;
 			return { handled: true, render: this.options.step(event.wheelDelta < 0 ? -1 : 1) || cleared };
 		}
-		// Reports other than passive motion may end an episode, but never discover one.
-		// Keep this independent of press/click admission and press-time identity.
-		if (
-			(event.type === "press" || event.type === "drag" || event.type === "release") &&
-			this.hover &&
-			(!hit || this.hover.key !== hit.key || this.hover.zone !== hit.zone || this.hover.region !== region)
-		)
-			this.clearHover();
 		if (event.button !== "left") return undefined;
 		if (event.type === "press") {
 			this.pressed = hit ? { ...hit, gestureId: event.gestureId } : undefined;

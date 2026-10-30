@@ -210,6 +210,102 @@ describe("renderer-owned pointer shape", () => {
 		assert.ok(!tui.getScreenLines()[0].includes(bg));
 		assert.equal(clicks, 0);
 	});
+	for (const region of [false, true]) {
+		for (const target of ["same", "row", "zone", "inert"] as const) {
+			it(`invalidates ${region ? "region" : "manual"} hover on mismatched unowned wheel: ${target}`, (t) => {
+				const bg = "\x1b[48;5;235m";
+				setPointerHoverBackground(() => bg);
+				let steps = 0;
+				const mouse = new ListMouse<string>({
+					select() {},
+					activate: () => true,
+					step: () => {
+						steps++;
+						return false;
+					},
+					ownsWheel: () => false,
+				});
+				const zones = [{ name: "fold", x: 3, width: 1 }];
+				const host = new Container();
+				host.addChild(mouse.row("A", { render: () => ["row A"], invalidate() {} }, zones));
+				host.addChild(mouse.row("B", { render: () => ["row B"], invalidate() {} }));
+				host.addChild(inert);
+				mouse.commitRows();
+				const component: Component = region
+					? host
+					: {
+							render(width) {
+								mouse.beginRows();
+								mouse.addRow("A", 0, 1, zones);
+								mouse.addRow("B", 1);
+								return mouse.paintHover(["row A", "row B", "inert"], width);
+							},
+							invalidate() {},
+							handleMouse: (event) => mouse.handle(event),
+						};
+				const { terminal, send, tui } = setup(t, component);
+				send(move());
+				tui.renderNow();
+				send(
+					target === "row"
+						? "\x1b[<65;2;2M"
+						: target === "zone"
+							? "\x1b[<65;4;1M"
+							: target === "inert"
+								? "\x1b[<65;2;3M"
+								: "\x1b[<65;2;1M",
+				);
+				assert.deepEqual(terminal.shapes(), target === "same" ? [pointer] : [pointer, arrow]);
+				tui.renderNow();
+				assert.equal(tui.getScreenLines()[0].includes(bg), target === "same");
+				assert.equal(steps, 0, "hover invalidation cannot take wheel ownership");
+			});
+		}
+	}
+	for (const modifier of ["ctrl", "none"] as const) {
+		it(`authorized ${modifier} link press/release ends another local row's hover without actionable row dispatch`, (t) => {
+			const bg = "\x1b[48;5;235m";
+			setPointerHoverBackground(() => bg);
+			const events: string[] = [];
+			const opened: string[] = [];
+			const mouse = new ListMouse<string>({
+				select() {
+					assert.fail("link must win selection");
+				},
+				activate() {
+					assert.fail("link must win activation");
+				},
+			});
+			const component: Component = {
+				render(width) {
+					mouse.beginRows();
+					mouse.addRow("A", 0);
+					mouse.addRow("B", 1);
+					return mouse.paintHover(["row A", linkTo("link B", "https://example.com")], width);
+				},
+				invalidate() {},
+				handleMouse(event) {
+					events.push(event.type);
+					return mouse.handle(event);
+				},
+			};
+			const { terminal, send, tui } = setup(t, component, {
+				linkOpenModifier: modifier,
+				openUrl: (url) => opened.push(url),
+			});
+			send(move());
+			tui.renderNow();
+			const code = modifier === "ctrl" ? 16 : 0;
+			send(`\x1b[<${code};2;2M`);
+			assert.equal(mouse.clearHover(), false, "press already ended the component episode");
+			send(`\x1b[<${code};2;2m`);
+			tui.renderNow();
+			assert.deepEqual(events, ["move", "leave"]);
+			assert.deepEqual(opened, ["https://example.com"]);
+			assert.deepEqual(terminal.shapes(), [pointer, arrow]);
+			assert.ok(!tui.getScreenLines()[0].includes(bg));
+		});
+	}
 	it("samples pointer capability overrides only at start", (t) => {
 		const { terminal, send, tui } = setup(t);
 		setCapabilityOverrides({ pointerShapes: false });

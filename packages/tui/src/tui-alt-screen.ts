@@ -255,7 +255,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private linkScreen: string[] = [];
 	private lastMouseCtrl = false;
 	private rendererControlHover?: RendererControlHover;
-	private mouseLifecycleGeneration = 0;
 	private pointerShapesEnabled = false;
 	private pointerShape: "pointer" | "default" = "default";
 	private linkOpenModifier: "ctrl" | "none";
@@ -399,11 +398,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStart(): void {
-		this.mouseLifecycleGeneration++;
+		const generation = this.lifecycleGeneration;
 		this.pointerShape = "default";
 		this.lastMouseCtrl = false;
 		this.clearRendererControlHover();
 		this.clearMouseHover();
+		if (generation !== this.lifecycleGeneration) return;
 		this.pressedMouseButtons.clear();
 		this.mouseGestureId = undefined;
 		this.stopSelectionAutoScroll();
@@ -442,14 +442,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
-		this.mouseLifecycleGeneration++;
+		const generation = this.lifecycleGeneration;
 		this.pressedMouseButtons.clear();
 		this.mouseGestureId = undefined;
 		this.hoveredLink = undefined;
 		this.linkScreen = [];
 		this.clearRendererControlHover();
 		this.clearMouseHover();
+		if (generation !== this.lifecycleGeneration) return;
 		this.closeSearch();
+		if (generation !== this.lifecycleGeneration) return;
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
 		this.stopScrollbarHover();
@@ -860,12 +862,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
+		const generation = this.lifecycleGeneration;
 		if (!this.parseSgrMouseEvent(data) || this.parseWheelEvent(data)) this.clearLinkHover();
 		if (data === FOCUS_OUT) {
 			if (this.clearRendererControlHover()) this.requestRender();
 			this.pressedMouseButtons.clear();
 			this.mouseGestureId = undefined;
 			if (this.clearMouseHover()) this.requestRender();
+			if (generation !== this.lifecycleGeneration) return { consume: true };
 			const hadActiveSelection = this.selectionPressActive;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
@@ -899,20 +903,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				wheelEvent.direction * ((wheelEvent.button & 8) !== 0 ? lines * ALT_WHEEL_SCROLL_MULTIPLIER : lines);
 			const event = this.createMouseEvent("wheel", wheelEvent.button, wheelEvent.x, wheelEvent.y, { wheelDelta });
 			if (this.reconcileMouseHover(event)) this.requestRender();
+			if (generation !== this.lifecycleGeneration) return { consume: true };
 			if (this.reconcileRendererControlHover(event)) this.requestRender();
-			const generation = this.mouseLifecycleGeneration;
 			const overlay = this.dispatchMouseToOverlay(event);
+			if (generation !== this.lifecycleGeneration) return { consume: true };
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
-			if (generation !== this.mouseLifecycleGeneration) return { consume: true };
+			if (generation !== this.lifecycleGeneration) return { consume: true };
 			if (result) {
 				if (this.applyMouseDispatchResult(event, result)) this.requestRender();
+				if (generation !== this.lifecycleGeneration) return { consume: true };
 				if (this.reconcileMouseHover(event)) this.requestRender();
+				if (generation !== this.lifecycleGeneration) return { consume: true };
 				if (this.reconcileRendererControlHover(event)) this.requestRender();
 				this.syncPointerShape();
 				return { consume: true };
 			}
 			this.routeWheel(wheelEvent, wheelDelta);
 			if (this.reconcileMouseHover(event)) this.requestRender();
+			if (generation !== this.lifecycleGeneration) return { consume: true };
 			if (this.reconcileRendererControlHover(event)) this.requestRender();
 			this.syncPointerShape();
 			return { consume: true };
@@ -927,6 +935,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// Keyboard interaction ends passive hover, even for viewport-owned shortcuts
 		// that never reach the focused component's input handler.
 		if (this.clearMouseHover()) this.requestRender();
+		if (generation !== this.lifecycleGeneration) return { consume: true };
 		if (this.clearRendererControlHover()) this.requestRender();
 		this.syncPointerShape();
 		const keybindings = getKeybindings();
@@ -1042,6 +1051,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private dispatchMouseToLayout(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
 		if (!this.currentLayout) return undefined;
+		const generation = this.lifecycleGeneration;
 		const visited = new Set<Component>();
 		const boxes = getLayoutBoxesAt(this.currentLayout, event.screenX, event.screenY);
 		for (const box of boxes) {
@@ -1055,16 +1065,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				width: box.rect.width,
 				height: box.rect.height,
 			});
+			if (generation !== this.lifecycleGeneration) return undefined;
 			if (result) return result;
 		}
 		return undefined;
 	}
 
 	private applyMouseDispatchResult(event: TuiMouseEvent, result: TuiMouseDispatchResult): boolean {
+		const generation = this.lifecycleGeneration;
 		const focusTarget = this.resolveMouseFocusTarget(result.focusTarget ?? result.target.component);
+		if (generation !== this.lifecycleGeneration) return false;
 		const passive = event.type === "move" || event.type === "leave";
 		const focusChanged = !passive && result.focus === true && this.getFocusedComponent() !== focusTarget;
 		if (!passive && result.focus) this.setFocus(focusTarget);
+		if (generation !== this.lifecycleGeneration) return false;
 		if (!passive && result.capture) this.mouseCapture = result.target;
 		// Only the current target's own deliberate focus request may preserve an existing
 		// episode. The pre-dispatch check already rejected asynchronous epoch changes.
@@ -1123,7 +1137,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const previous = this.mouseHover;
 		this.mouseHover = undefined;
 		if (!previous || !event) return false;
-		return this.dispatchMouseToTarget({ ...event, type: "leave" }, previous.target)?.render === true;
+		const generation = this.lifecycleGeneration;
+		const result = this.dispatchMouseToTarget({ ...event, type: "leave" }, previous.target);
+		return generation === this.lifecycleGeneration && result?.render === true;
 	}
 
 	private getMouseHitTarget(
@@ -1164,14 +1180,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (previous.epoch !== this.interactionEpoch || invalid) {
 			// The helper may already have removed its paint before leave arrives.
 			// Repaint an expired episode without making its pointer report handled.
-			return this.clearMouseHover(event) || invalid;
+			const generation = this.lifecycleGeneration;
+			const repaint = this.clearMouseHover(event);
+			return generation === this.lifecycleGeneration && (repaint || invalid);
 		}
 		return false;
 	}
 
 	/** Validate ownership and geometry without synthetic moves or gesture capture changes. */
 	private reconcileMouseHover(event = this.mouseHover?.event, layout = this.currentLayout): boolean {
+		const generation = this.lifecycleGeneration;
 		const repaint = this.reconcileMouseHoverOwnership(event);
+		if (generation !== this.lifecycleGeneration) return false;
 		const previous = this.mouseHover;
 		if (!previous || !event) return repaint;
 		const hit = this.getMouseHitTarget(event, layout);
@@ -1192,7 +1212,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// Vertical wheels are routed separately. Unsupported wheel/extended codes
 		// must not alias left/middle/right through their low two bits.
 		if (raw.button >= 64) return;
-		const generation = this.mouseLifecycleGeneration;
+		const generation = this.lifecycleGeneration;
 		const isMotion = (raw.button & 32) !== 0;
 		const button = this.decodeMouseButton(raw.button);
 		if (raw.release) {
@@ -1229,6 +1249,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (this.reconcileRendererControlHover(event)) this.requestRender();
 		// Do not let this dispatch's focus request hide an earlier A→B→A displacement.
 		if (this.reconcileMouseHoverOwnership(event)) this.requestRender();
+		if (generation !== this.lifecycleGeneration) return;
 		if (type !== "move") this.clearLinkHover();
 		let moveTarget: TuiMouseDispatchTarget | undefined;
 		let hoverValid: (() => boolean) | undefined;
@@ -1242,6 +1263,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					(this.linkOpenModifier === "none" || event.ctrl) &&
 					getOsc8LinkAtColumn(this.linkScreen[raw.y] ?? "", raw.x))
 			) {
+				// Link ownership bypasses row activation, but must still end component hover.
+				// Leave is non-actionable and cannot disturb press-time helper identity.
+				if (this.clearMouseHover(event)) this.requestRender();
+				if (generation !== this.lifecycleGeneration) return;
 				this.handleSelectionMouseEvent(raw);
 				return;
 			}
@@ -1268,10 +1293,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				}
 				let render = false;
 				const targetResult = this.dispatchMouseToTarget(event, target);
-				if (generation !== this.mouseLifecycleGeneration) return;
+				if (generation !== this.lifecycleGeneration) return;
 				if (targetResult) {
 					moveTarget = targetResult.target;
 					render = this.applyMouseDispatchResult(event, targetResult);
+					if (generation !== this.lifecycleGeneration) return;
 					// Focus requested by the gesture's own target is not a displacement.
 					this.mousePressEpoch = this.interactionEpoch;
 				}
@@ -1289,8 +1315,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 							gestureId: event.gestureId,
 						});
 						const clickResult = this.dispatchMouseToTarget(clickEvent, target);
-						if (generation !== this.mouseLifecycleGeneration) return;
+						if (generation !== this.lifecycleGeneration) return;
 						if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
+						if (generation !== this.lifecycleGeneration) return;
 					}
 					this.clearComponentMouseGesture();
 				}
@@ -1301,6 +1328,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleSearchMouseEvent(raw)) return;
 
 			const overlay = this.dispatchMouseToOverlay(event);
+			if (generation !== this.lifecycleGeneration) return;
 			if (!overlay.hit) {
 				if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
 				const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
@@ -1311,12 +1339,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
-			if (generation !== this.mouseLifecycleGeneration) return;
+			if (generation !== this.lifecycleGeneration) return;
 			if (result) {
 				moveTarget = result.target;
 				hoverValid = result.hoverValid;
 				pointerShape = result.pointerShape;
 				const render = this.applyMouseDispatchResult(event, result);
+				if (generation !== this.lifecycleGeneration) return;
 				if (type === "press") {
 					this.clearTextSelection();
 					this.mousePressTarget = result.target;
@@ -1331,7 +1360,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (this.handleRightClickPaste(raw)) return;
 			this.handleSelectionMouseEvent(raw);
 		} finally {
-			if (generation === this.mouseLifecycleGeneration) {
+			if (generation === this.lifecycleGeneration) {
 				if (raw.release) this.mouseGestureId = undefined;
 				// A move may already have replaced the helper's episode inside the same
 				// dispatch target. Do not send that new episode the old one's leave.
@@ -1351,21 +1380,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 						moveTarget = undefined;
 					if (this.mouseHover?.target.component !== moveTarget?.component && this.clearMouseHover(event))
 						this.requestRender();
-					this.mouseHover = moveTarget
-						? {
-								target: moveTarget,
-								event,
-								hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
-								epoch: this.interactionEpoch,
-								hoverValid,
-								pointerShape,
-							}
-						: undefined;
-					const hit = this.getRendererControlHit(event);
-					this.rendererControlHover = hit ? { ...hit, event, epoch: this.interactionEpoch } : undefined;
-					if (this.activeSearch?.component.setHoveredNavigationDirection(hit?.direction)) this.requestRender();
-				} else if (this.reconcileRendererControlHover(event)) this.requestRender();
-				this.syncPointerShape();
+					if (generation === this.lifecycleGeneration) {
+						this.mouseHover = moveTarget
+							? {
+									target: moveTarget,
+									event,
+									hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
+									epoch: this.interactionEpoch,
+									hoverValid,
+									pointerShape,
+								}
+							: undefined;
+						const hit = this.getRendererControlHit(event);
+						this.rendererControlHover = hit ? { ...hit, event, epoch: this.interactionEpoch } : undefined;
+						if (this.activeSearch?.component.setHoveredNavigationDirection(hit?.direction)) this.requestRender();
+					}
+				} else if (generation === this.lifecycleGeneration && this.reconcileRendererControlHover(event))
+					this.requestRender();
+				if (generation === this.lifecycleGeneration) this.syncPointerShape();
 			}
 		}
 	}
@@ -1730,6 +1762,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	private handleSelectionMouseEvent(event: SgrMouseEvent): void {
+		const generation = this.lifecycleGeneration;
 		const button = event.button & 3;
 		if (button !== 0 && !(event.release && button === 3)) return;
 		const anchorScrollView = this.selectionAnchor?.scrollView;
@@ -1755,6 +1788,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				} catch {
 					// URL activation is best-effort.
 				}
+				if (generation !== this.lifecycleGeneration) return;
 				this.requestRender();
 				return;
 			}
@@ -1764,9 +1798,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					clickSource: "fallback",
 				});
 				const overlay = this.dispatchMouseToOverlay(clickEvent);
+				if (generation !== this.lifecycleGeneration) return;
 				const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(clickEvent));
+				if (generation !== this.lifecycleGeneration) return;
 				if (result) {
 					const render = this.applyMouseDispatchResult(clickEvent, result);
+					if (generation !== this.lifecycleGeneration) return;
 					this.clearTextSelection();
 					if (render) this.requestRender();
 					return;
@@ -2092,6 +2129,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override doRender(): void {
 		if (this.stopped || !this.altScreenActive) return;
+		const generation = this.lifecycleGeneration;
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
@@ -2105,6 +2143,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		const mouseRepaint = this.reconcileMouseHover(undefined, nextLayout);
+		if (generation !== this.lifecycleGeneration) return;
 		const controlRepaint = this.reconcileRendererControlHover();
 		if (mouseRepaint || controlRepaint) {
 			// Leave cleared ownership before requesting this repaint, so it cannot loop.
