@@ -30,6 +30,7 @@ import {
 	getKittyImagePlacementRows,
 	type ImageProtocol,
 	isImageLine,
+	isMultiplexerEnvironment,
 	setCapabilities,
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
@@ -46,6 +47,7 @@ import {
 	type TuiMouseDispatchResult,
 	type TuiMouseDispatchTarget,
 	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	type TuiStopOptions,
 	VIEWPORT_TUI,
 	type ViewportTUI,
@@ -150,6 +152,20 @@ interface ScrollToEndIndicatorRect {
 	width: number;
 }
 
+interface RendererControlHit {
+	rect: ScrollToEndIndicatorRect;
+	search?: AltScreenSearchComponent;
+	direction?: -1 | 1;
+}
+
+interface RendererControlHover extends RendererControlHit {
+	event: TuiMouseEvent;
+	epoch: number;
+}
+
+const POINTER_SHAPE = "\x1b]22;pointer\x1b\\";
+const DEFAULT_POINTER_SHAPE = "\x1b]22;default\x1b\\";
+
 type SearchSelectionMode = "query" | "retain" | "next" | "previous";
 
 interface ActiveSearch {
@@ -237,6 +253,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private pressedUrl?: string;
 	private hoveredLink?: Osc8Link & { row: number; start: number; end: number };
 	private linkScreen: string[] = [];
+	private lastMouseCtrl = false;
+	private rendererControlHover?: RendererControlHover;
+	private pointerShapesEnabled = false;
+	private pointerShape: "pointer" | "default" = "default";
 	private linkOpenModifier: "ctrl" | "none";
 	private selectionDragged = false;
 	private readonly pressedMouseButtons = new Set<TuiMouseButton>();
@@ -247,6 +267,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		hit?: TuiMouseDispatchTarget;
 		epoch: number;
 		hoverValid?: () => boolean;
+		pointerShape?: TuiMouseEventResult["pointerShape"];
 	};
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
@@ -377,6 +398,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStart(): void {
+		this.pointerShape = "default";
+		this.lastMouseCtrl = false;
+		this.clearRendererControlHover();
+		this.clearMouseHover();
 		this.pressedMouseButtons.clear();
 		this.mouseGestureId = undefined;
 		this.stopSelectionAutoScroll();
@@ -404,17 +429,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.clearComponentMouseGesture();
 		this.lastComponentClick = undefined;
 		this.resetRenderState();
-		const term = process.env.TERM?.toLowerCase() ?? "";
-		// Multiplexers can lag when every pointer movement is forwarded. Button-motion
-		// tracking preserves clicks, wheel events, selections, and scrollbar dragging.
-		const mouseSequence =
-			process.env.TMUX !== undefined ||
-			process.env.ZELLIJ !== undefined ||
-			process.env.STY !== undefined ||
-			term.startsWith("tmux") ||
-			term.startsWith("screen")
-				? ENABLE_BUTTON_MOTION_MOUSE
-				: ENABLE_ALL_MOTION_MOUSE;
+		// Multiplexers retain button-motion reporting but never request native passive hover.
+		const allMotion = !isMultiplexerEnvironment();
+		const mouseSequence = allMotion ? ENABLE_ALL_MOTION_MOUSE : ENABLE_BUTTON_MOTION_MOUSE;
+		this.pointerShapesEnabled =
+			this.mouseEnabled && allMotion && capabilities.pointerShapes === true && process.env.PI_POINTER_SHAPE !== "0";
 		this.terminal.write(
 			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}\x1b[2J\x1b[H\x1b[?25l`,
 		);
@@ -425,6 +444,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.mouseGestureId = undefined;
 		this.hoveredLink = undefined;
 		this.linkScreen = [];
+		this.clearRendererControlHover();
 		this.clearMouseHover();
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
@@ -433,9 +453,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.stopScrollbarDrag();
 		this.clearComponentMouseGesture();
 		this.flashes.dispose();
+		const resetPointer = this.pointerShape === "pointer" ? DEFAULT_POINTER_SHAPE : "";
+		this.pointerShape = "default";
+		this.pointerShapesEnabled = false;
+		this.lastMouseCtrl = false;
 		if (!this.altScreenActive) return;
+		// Explicit default avoids relying on Ghostty's empty-reset fix (1.4.0).
+		// Mouse-mode disable then restores normal shell pointer behavior.
 		this.terminal.write(
-			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : ""}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
+			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${resetPointer}${this.mouseEnabled ? DISABLE_MOUSE : ""}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
 		);
 		this.uploadedKittyImages.clear();
 	}
@@ -622,17 +648,80 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const search = this.activeSearch;
 		const bounds = search?.overlay?.getBounds();
 		if (!search || !bounds) return undefined;
+		if (this.getMouseOverlayTarget(this.createMouseEvent("move", 35, x, y))?.component !== search.component)
+			return undefined;
 		if (x < bounds.col || x >= bounds.col + bounds.width || y < bounds.row || y >= bounds.row + bounds.height) {
 			return undefined;
 		}
 		return search.component.getNavigationDirectionAt(y - bounds.row, x - bounds.col);
 	}
 
+	private getRendererControlHit(event: TuiMouseEvent): RendererControlHit | undefined {
+		const { screenX: x, screenY: y } = event;
+		const direction = this.getSearchNavigationDirectionAt(x, y);
+		const search = this.activeSearch;
+		const bounds = search?.overlay?.getBounds();
+		if (direction !== undefined && search && bounds) {
+			let column = x;
+			let end = x + 1;
+			while (
+				column > bounds.col &&
+				search.component.getNavigationDirectionAt(y - bounds.row, column - bounds.col - 1) === direction
+			)
+				column--;
+			while (
+				end < bounds.col + bounds.width &&
+				search.component.getNavigationDirectionAt(y - bounds.row, end - bounds.col) === direction
+			)
+				end++;
+			return { search: search.component, direction, rect: { row: y, column, width: end - column } };
+		}
+		const rect = this.scrollToEndIndicatorRect;
+		if (!this.hasOverlay() && rect && y === rect.row && x >= rect.column && x < rect.column + rect.width)
+			return { rect };
+		return undefined;
+	}
+
+	private clearRendererControlHover(): boolean {
+		const previous = this.rendererControlHover;
+		this.rendererControlHover = undefined;
+		return previous?.search?.setHoveredNavigationDirection(undefined) ?? false;
+	}
+
+	/** Validation can only end a move episode, never discover a new hover from geometry. */
+	private reconcileRendererControlHover(event = this.rendererControlHover?.event): boolean {
+		const previous = this.rendererControlHover;
+		if (!previous || !event) return false;
+		const hit = this.getRendererControlHit(event);
+		if (
+			previous.epoch !== this.interactionEpoch ||
+			!hit ||
+			hit.search !== previous.search ||
+			hit.direction !== previous.direction ||
+			hit.rect.row !== previous.rect.row ||
+			hit.rect.column !== previous.rect.column ||
+			hit.rect.width !== previous.rect.width
+		)
+			return this.clearRendererControlHover();
+		previous.event = event;
+		return false;
+	}
+
+	/** Sole live OSC 22 writer. Teardown emits an explicit reset in its stop buffer. */
+	private syncPointerShape(): void {
+		if (!this.pointerShapesEnabled || !this.altScreenActive || this.stopped) return;
+		const componentPointer = this.mouseHover?.pointerShape && this.mouseHover.hoverValid?.() !== false;
+		const linkPointer = this.hoveredLink && (this.linkOpenModifier === "none" || this.lastMouseCtrl);
+		const desired = componentPointer || linkPointer || this.rendererControlHover ? "pointer" : "default";
+		if (desired === this.pointerShape) return;
+		this.terminal.write(desired === "pointer" ? POINTER_SHAPE : DEFAULT_POINTER_SHAPE);
+		this.pointerShape = desired;
+	}
+
 	private handleSearchMouseEvent(event: SgrMouseEvent): boolean {
 		const search = this.activeSearch;
 		if (!search) return false;
 		const direction = this.getSearchNavigationDirectionAt(event.x, event.y);
-		if (search.component.setHoveredNavigationDirection(direction)) this.requestRender();
 		if (direction === undefined || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) {
 			return false;
 		}
@@ -770,6 +859,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (!this.parseSgrMouseEvent(data) || this.parseWheelEvent(data)) this.clearLinkHover();
 		if (data === FOCUS_OUT) {
+			if (this.clearRendererControlHover()) this.requestRender();
 			this.pressedMouseButtons.clear();
 			this.mouseGestureId = undefined;
 			if (this.clearMouseHover()) this.requestRender();
@@ -792,27 +882,34 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				if (hadNonEmptyActiveSelection) this.requestRender();
 			}
 			this.lastClick = undefined;
+			this.syncPointerShape();
 			return { consume: true };
 		}
 		if (data === FOCUS_IN) return { consume: true };
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {
+			this.lastMouseCtrl = (wheelEvent.button & 16) !== 0;
 			const lines = this.wheelScroll.next(wheelEvent.direction, performance.now());
 			// SGR mouse button codes use bit 3 (value 8) for the Alt modifier.
 			const wheelDelta =
 				wheelEvent.direction * ((wheelEvent.button & 8) !== 0 ? lines * ALT_WHEEL_SCROLL_MULTIPLIER : lines);
 			const event = this.createMouseEvent("wheel", wheelEvent.button, wheelEvent.x, wheelEvent.y, { wheelDelta });
 			if (this.reconcileMouseHover(event)) this.requestRender();
+			if (this.reconcileRendererControlHover(event)) this.requestRender();
 			const overlay = this.dispatchMouseToOverlay(event);
 			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
 			if (result) {
 				if (this.applyMouseDispatchResult(event, result)) this.requestRender();
 				if (this.reconcileMouseHover(event)) this.requestRender();
+				if (this.reconcileRendererControlHover(event)) this.requestRender();
+				this.syncPointerShape();
 				return { consume: true };
 			}
 			this.routeWheel(wheelEvent, wheelDelta);
 			if (this.reconcileMouseHover(event)) this.requestRender();
+			if (this.reconcileRendererControlHover(event)) this.requestRender();
+			this.syncPointerShape();
 			return { consume: true };
 		}
 		const mouseEvent = this.parseSgrMouseEvent(data);
@@ -825,6 +922,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// Keyboard interaction ends passive hover, even for viewport-owned shortcuts
 		// that never reach the focused component's input handler.
 		if (this.clearMouseHover()) this.requestRender();
+		if (this.clearRendererControlHover()) this.requestRender();
+		this.syncPointerShape();
 		const keybindings = getKeybindings();
 		const isRelease = isKeyRelease(data);
 		if (keybindings.matches(data, "tui.altScreen.search")) {
@@ -1115,11 +1214,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.clearComponentMouseGesture();
 		}
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
+		this.lastMouseCtrl = event.ctrl;
+		if (this.reconcileRendererControlHover(event)) this.requestRender();
 		// Do not let this dispatch's focus request hide an earlier A→B→A displacement.
 		if (this.reconcileMouseHoverOwnership(event)) this.requestRender();
 		if (type !== "move") this.clearLinkHover();
 		let moveTarget: TuiMouseDispatchTarget | undefined;
 		let hoverValid: (() => boolean) | undefined;
+		let pointerShape: TuiMouseEventResult["pointerShape"];
 		try {
 			// Authorized modified links win over a row's press/click handler.
 			if (
@@ -1199,6 +1301,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (result) {
 				moveTarget = result.target;
 				hoverValid = result.hoverValid;
+				pointerShape = result.pointerShape;
 				const render = this.applyMouseDispatchResult(event, result);
 				if (type === "press") {
 					this.clearTextSelection();
@@ -1240,9 +1343,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 							hit: this.getMouseHitTarget(event, this.currentLayout, moveTarget.component),
 							epoch: this.interactionEpoch,
 							hoverValid,
+							pointerShape,
 						}
 					: undefined;
-			}
+				const hit = this.getRendererControlHit(event);
+				this.rendererControlHover = hit ? { ...hit, event, epoch: this.interactionEpoch } : undefined;
+				if (this.activeSearch?.component.setHoveredNavigationDirection(hit?.direction)) this.requestRender();
+			} else if (this.reconcileRendererControlHover(event)) this.requestRender();
+			this.syncPointerShape();
 		}
 	}
 
@@ -1320,7 +1428,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleScrollToEndIndicatorMouseEvent(event: SgrMouseEvent): boolean {
 		const rect = this.scrollToEndIndicatorRect;
-		if (!rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
+		if (this.hasOverlay() || !rect || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0)
+			return false;
 		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
 		this.scrollToBottom();
 		return true;
@@ -1979,7 +2088,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
-		if (this.reconcileMouseHover(undefined, nextLayout)) {
+		const mouseRepaint = this.reconcileMouseHover(undefined, nextLayout);
+		const controlRepaint = this.reconcileRendererControlHover();
+		if (mouseRepaint || controlRepaint) {
 			// Leave cleared ownership before requesting this repaint, so it cannot loop.
 			this.doRender();
 			return;
@@ -2087,5 +2198,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreenWidth = width;
 		this.previousScreenHeight = height;
 		this.currentLayout = nextLayout;
+		// The final frame has validated components, overlays, links and renderer controls.
+		// Recursive leave repaints return above, so only the innermost completed frame syncs.
+		this.syncPointerShape();
 	}
 }

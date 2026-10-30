@@ -268,7 +268,7 @@ export class ListMouse<K> {
 				this.hover!.y = event.y;
 			}
 			const episode = this.hover!.episode;
-			return { handled: true, render: changed, hoverValid: () => episode.valid };
+			return { handled: true, render: changed, pointerShape: "pointer", hoverValid: () => episode.valid };
 		}
 		if (event.type === "wheel") {
 			if (!event.wheelDelta || !this.options.step || this.options.ownsWheel?.() === false || !inItemArea)

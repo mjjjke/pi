@@ -49,6 +49,9 @@ const ENV_KEYS = [
 	"PI_HYPERLINKS",
 	"PI_IMAGE_PROTOCOL",
 	"PI_TRUE_COLOR",
+	"PI_POINTER_SHAPE",
+	"STY",
+	"ZELLIJ",
 ] as const;
 
 function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
@@ -217,6 +220,60 @@ describe("isImageLine", () => {
 	});
 });
 
+describe("pointer shape capabilities", () => {
+	for (const hint of [
+		{ TERM_PROGRAM: "ghostty" },
+		{ TERM: "xterm-ghostty" },
+		{ GHOSTTY_RESOURCES_DIR: "/ghostty" },
+		{ TERM_PROGRAM: "kitty" },
+		{ KITTY_WINDOW_ID: "1" },
+	]) {
+		it(`allows a known terminal: ${JSON.stringify(hint)}`, () => {
+			withEnv(hint, () => assert.strictEqual(detectCapabilities().pointerShapes, true));
+			withEnv({ ...hint, PI_POINTER_SHAPE: "0" }, () => assert.ok(!detectCapabilities().pointerShapes));
+		});
+	}
+	for (const term of ["foot", "foot-extra", "xterm", "unknown"]) {
+		it(`requires opt-in for ${term}`, () => {
+			withEnv({ TERM: term }, () => assert.ok(!detectCapabilities().pointerShapes));
+			withEnv({ TERM: term, PI_POINTER_SHAPE: "1" }, () =>
+				assert.strictEqual(detectCapabilities().pointerShapes, true),
+			);
+		});
+	}
+	for (const mux of ["TMUX", "STY", "ZELLIJ"]) {
+		for (const value of ["", "present"]) {
+			it(`presence of ${mux}=${JSON.stringify(value)} dominates opt-in`, () => {
+				withEnv({ [mux]: value, TERM_PROGRAM: "ghostty", PI_POINTER_SHAPE: "1" }, () =>
+					assert.ok(!detectCapabilities(() => false).pointerShapes),
+				);
+			});
+		}
+	}
+	for (const term of ["tmux", "tmux-256color", "screen", "screen-256color"]) {
+		it(`${term} dominates opt-in`, () => {
+			withEnv({ TERM: term, TERM_PROGRAM: "kitty", PI_POINTER_SHAPE: "1" }, () =>
+				assert.ok(!detectCapabilities(() => false).pointerShapes),
+			);
+		});
+	}
+	it("includes pointerShapes in override equality and cache invalidation", () => {
+		withEnv({}, () => {
+			try {
+				setCapabilityOverrides({ pointerShapes: false });
+				assert.strictEqual(getCapabilities().pointerShapes, false);
+				setCapabilityOverrides({ pointerShapes: true });
+				assert.strictEqual(getCapabilities().pointerShapes, true);
+				setCapabilityOverrides({});
+				assert.ok(!getCapabilities().pointerShapes);
+			} finally {
+				setCapabilityOverrides({});
+				resetCapabilitiesCache();
+			}
+		});
+	});
+});
+
 describe("detectCapabilities", () => {
 	it("defaults to hyperlinks: false for unknown terminals", () => {
 		withEnv({}, () => {
@@ -250,7 +307,7 @@ describe("detectCapabilities", () => {
 				},
 				() => detectCapabilities(),
 			),
-			{ images: "kitty", trueColor: true, hyperlinks: true },
+			{ images: "kitty", trueColor: true, hyperlinks: true, pointerShapes: true },
 		);
 	});
 

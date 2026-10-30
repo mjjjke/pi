@@ -16,6 +16,8 @@ export interface TerminalCapabilities {
 	images: ImageProtocol;
 	trueColor: boolean;
 	hyperlinks: boolean;
+	/** OSC 22 CSS pointer names. Absent means unsupported. */
+	pointerShapes?: boolean;
 }
 
 export interface CellDimensions {
@@ -73,6 +75,18 @@ function probeTmuxHyperlinks(): boolean {
 	}
 }
 
+/** Keep pointer-shape support behind the same hard gate as passive mouse reporting. */
+export function isMultiplexerEnvironment(): boolean {
+	const term = process.env.TERM?.toLowerCase() ?? "";
+	return (
+		process.env.TMUX !== undefined ||
+		process.env.STY !== undefined ||
+		process.env.ZELLIJ !== undefined ||
+		term.startsWith("tmux") ||
+		term.startsWith("screen")
+	);
+}
+
 function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean): TerminalCapabilities {
 	const termProgram = process.env.TERM_PROGRAM?.toLowerCase() || "";
 	const terminalEmulator = process.env.TERMINAL_EMULATOR?.toLowerCase() || "";
@@ -99,11 +113,11 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 	}
 
 	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
+		return { images: "kitty", trueColor: true, hyperlinks: true, pointerShapes: true };
 	}
 
 	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
+		return { images: "kitty", trueColor: true, hyperlinks: true, pointerShapes: true };
 	}
 
 	if (process.env.WEZTERM_PANE || termProgram === "wezterm") {
@@ -162,11 +176,15 @@ export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeT
 				? null
 				: undefined;
 	const trueColor = parseBooleanCapabilityOverride(process.env.PI_TRUE_COLOR);
+	const pointerShapes = parseBooleanCapabilityOverride(process.env.PI_POINTER_SHAPE);
+	// No passthrough under multiplexers, even for an explicit opt-in.
+	if (isMultiplexerEnvironment()) delete detected.pointerShapes;
 	return {
 		...detected,
 		...(images !== undefined ? { images } : {}),
 		...(trueColor !== undefined ? { trueColor } : {}),
 		...(hyperlinks !== undefined ? { hyperlinks } : {}),
+		...(!isMultiplexerEnvironment() && pointerShapes !== undefined ? { pointerShapes } : {}),
 	};
 }
 
@@ -194,7 +212,8 @@ export function setCapabilityOverrides(overrides: Partial<TerminalCapabilities>)
 	if (
 		capabilityOverrides.images === overrides.images &&
 		capabilityOverrides.trueColor === overrides.trueColor &&
-		capabilityOverrides.hyperlinks === overrides.hyperlinks
+		capabilityOverrides.hyperlinks === overrides.hyperlinks &&
+		capabilityOverrides.pointerShapes === overrides.pointerShapes
 	) {
 		return;
 	}

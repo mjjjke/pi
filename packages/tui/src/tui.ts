@@ -63,6 +63,8 @@ export interface TuiMouseEventResult {
 	 * press, click, drag, and wheel default to true.
 	 */
 	render?: boolean;
+	/** Desired pointer shape for this handled move. Only the renderer writes OSC 22. */
+	pointerShape?: "pointer";
 	/** Side-effect-free validity of this handled move's hover episode; once false, never true again. */
 	hoverValid?(): boolean;
 }
