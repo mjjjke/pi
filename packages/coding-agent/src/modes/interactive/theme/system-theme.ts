@@ -67,6 +67,7 @@ type FamilyName = keyof typeof FAMILIES;
 
 const TOKEN_FAMILIES: Record<ThemeToken, FamilyName> = {
 	selectedBg: "blue",
+	hoverBg: "neutral",
 	searchMatchBg: "orange",
 	userMessageBg: "blue",
 	customMessageBg: "violet",
@@ -253,7 +254,7 @@ type Surface = ThemeBg | "background" | "scrollbarTrack";
 interface Rule {
 	token: ThemeToken;
 	on: Surface[];
-	level: Level;
+	level: Level | "hover";
 }
 
 const TOOL_PANELS: Surface[] = ["toolPendingBg", "toolSuccessBg", "toolErrorBg"];
@@ -267,6 +268,8 @@ const PANELS: ThemeBg[] = [
 	"searchMatchBg",
 	"customMessageBg",
 ];
+/** Background surfaces share limiting and indexed fallback, but hover does not use panel contrast. */
+const BACKGROUND_SURFACES: ThemeBg[] = [...PANELS, "hoverBg"];
 const THINKING: ThemeColor[] = [
 	"thinkingOff",
 	"thinkingMinimal",
@@ -291,13 +294,22 @@ const each = (tokens: ThemeToken[], on: Surface[], level: Level): Rule[] =>
 
 const RULES: Rule[] = [
 	...each(PANELS, ["background"], "panel"),
+	{ token: "hoverBg", on: ["background"], level: "hover" },
 	{ token: "text", on: ["background"], level: "text" },
-	{ token: "text", on: ["selectedBg"], level: "textOnPanel" },
+	{ token: "text", on: ["selectedBg", "hoverBg"], level: "textOnPanel" },
 	{ token: "userMessageText", on: ["userMessageBg"], level: "textOnPanel" },
 	{ token: "toolTitle", on: TOOL_PANELS, level: "textOnPanel" },
-	...each(["accent", "success", "error", "warning"], ["background", "selectedBg", ...TOOL_PANELS], "readable"),
-	{ token: "muted", on: ["background", "selectedBg", "customMessageBg", ...TOOL_PANELS], level: "readable" },
-	{ token: "dim", on: ["background", "selectedBg", "customMessageBg", ...TOOL_PANELS], level: "subtle" },
+	...each(
+		["accent", "success", "error", "warning"],
+		["background", "selectedBg", "hoverBg", ...TOOL_PANELS],
+		"readable",
+	),
+	{
+		token: "muted",
+		on: ["background", "selectedBg", "hoverBg", "customMessageBg", ...TOOL_PANELS],
+		level: "readable",
+	},
+	{ token: "dim", on: ["background", "selectedBg", "hoverBg", "customMessageBg", ...TOOL_PANELS], level: "subtle" },
 	{ token: "thinkingText", on: ["background"], level: "readable" },
 	{ token: "customMessageText", on: ["customMessageBg", ...TOOL_PANELS], level: "readable" },
 	{
@@ -334,7 +346,7 @@ const RULES: Rule[] = [
 	...each(["mdQuoteBorder", "mdHr"], ["background", ...MESSAGE_PANELS, ...TOOL_PANELS], "readable"),
 	{ token: "scrollbarTrack", on: ["background"], level: "track" },
 	{ token: "scrollbarThumb", on: ["scrollbarTrack"], level: "thumb" },
-	...THINKING.map((token, index): Rule => ({ token, on: ["background"], level: THINKING_LEVELS[index] })),
+	...THINKING.map((token, index): Rule => ({ token, on: ["background", "hoverBg"], level: THINKING_LEVELS[index] })),
 ];
 
 /** Relaxation compresses levels stronger than this one toward it before weakening all levels. */
@@ -491,7 +503,12 @@ export function generateSystemThemeColors(input: SystemThemeInput): SystemThemeC
 	 * The lightness a rule needs on a surface, relaxed by `t`: from 0 to 1, levels stronger than the readable
 	 * floor move toward it; from 1 to 2, all levels move toward the surface itself.
 	 */
-	const target = (level: Level, surfaceL: number, t: number): number | undefined => {
+	const target = (level: Level | "hover", surfaceL: number, t: number): number | undefined => {
+		if (level === "hover") {
+			// Use the relaxed panel target before background limiting, never the final panel RGB.
+			const panel = target("panel", surfaceL, t);
+			return panel === undefined ? undefined : surfaceL + 0.5 * (panel - surfaceL);
+		}
 		const reached = levelTarget(level, appearance, surfaceL);
 		if (reached === undefined && t === 0) return undefined;
 		const distance = (reached ?? extreme) - surfaceL;
@@ -532,7 +549,7 @@ export function generateSystemThemeColors(input: SystemThemeInput): SystemThemeC
 				}
 			}
 			const l = lighter ? Math.max(...targets) : Math.min(...targets);
-			colors.set(token, PANELS.includes(token as ThemeBg) ? limitPanel(token, l) : paint(token, l));
+			colors.set(token, BACKGROUND_SURFACES.includes(token as ThemeBg) ? limitPanel(token, l) : paint(token, l));
 		}
 		return colors;
 	};
@@ -643,7 +660,7 @@ function indexedColors(saturation: number, appearance: ThemeAppearance | undefin
 	const colors = {} as Record<ThemeToken, string | number>;
 	const dim: ThemeColor[] = [];
 	for (const [token, familyName] of Object.entries(TOKEN_FAMILIES) as [ThemeToken, FamilyName][]) {
-		if (PANELS.includes(token as ThemeBg)) {
+		if (BACKGROUND_SURFACES.includes(token as ThemeBg)) {
 			colors[token] = "";
 			continue;
 		}

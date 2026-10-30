@@ -25,6 +25,7 @@
 		"text": "text",
 		"thinkingText": "okhsl(226 7% 65%)",
 		"selectedBg": "blueBg",
+		"hoverBg": "okhsl(229 5% 18%)",
 		"scrollbarTrack": "okhsl(237 7% 33%)",
 		"scrollbarThumb": "okhsl(232 7% 65%)",
 		"searchMatchBg": "okhsl(53 51% 24%)",

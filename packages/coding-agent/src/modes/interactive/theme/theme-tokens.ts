@@ -44,6 +44,11 @@ export const THEME_TOKENS = defineThemeTokens({
 		fallback: "text",
 	},
 	selectedBg: { slot: "background", description: "Selected item background" },
+	hoverBg: {
+		slot: "background",
+		description: "Pointer hover background on clickable rows and targets (falls back to toolPendingBg when omitted)",
+		fallback: "toolPendingBg",
+	},
 	searchMatchBg: {
 		slot: "background",
 		description: "Transcript search match background and current-match text (falls back to selectedBg when omitted)",

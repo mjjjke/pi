@@ -1,5 +1,11 @@
 import type { Terminal, WheelScrollLines } from "@earendil-works/pi-tui";
-import { ProcessTerminal, type TUI, TuiAltScreen, TuiMainScreen } from "@earendil-works/pi-tui";
+import {
+	ProcessTerminal,
+	setPointerHoverBackground,
+	type TUI,
+	TuiAltScreen,
+	TuiMainScreen,
+} from "@earendil-works/pi-tui";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { type EditorLinks, openTranscriptLink } from "../../utils/link-policy.ts";
 import { configureLinkRendering, getEditorLinks } from "../../utils/link-rendering.ts";
@@ -28,6 +34,7 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 	const terminal = options.terminal ?? new ProcessTerminal();
 
 	if (options.tuiMode === "fullscreen") {
+		setPointerHoverBackground(() => theme.getBgAnsi("hoverBg"));
 		const styleSearchMatch = (text: string) => theme.bg("searchMatchBg", theme.fg("searchMatchText", text));
 		const tui = new TuiAltScreen(terminal, options.showHardwareCursor, options.logDirectory, {
 			searchMatchStyle: (text) => theme.underline(styleSearchMatch(text)),

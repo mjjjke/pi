@@ -151,6 +151,10 @@
           "$ref": "#/$defs/ColorValue",
           "description": "Selected item background"
         },
+        "hoverBg": {
+          "$ref": "#/$defs/ColorValue",
+          "description": "Pointer hover background on clickable rows and targets (falls back to toolPendingBg when omitted)"
+        },
         "searchMatchBg": {
           "$ref": "#/$defs/ColorValue",
           "description": "Transcript search match background and current-match text (falls back to selectedBg when omitted)"
@@ -320,7 +324,7 @@
           "description": "Editor border color in bash mode"
         }
       },
-      "description": "Theme color definitions (scrollbar, thinkingMax, and search highlight colors are optional and use compatible fallbacks)",
+      "description": "Theme color definitions (hoverBg, scrollbar, thinkingMax, and search highlight colors are optional and use compatible fallbacks)",
       "additionalProperties": false
     },
     "export": {

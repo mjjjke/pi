@@ -221,6 +221,8 @@ function cmdTheme(themeName: string): void {
 	["thinkingOff", "thinkingMinimal", "thinkingLow", "thinkingMedium", "thinkingHigh"].forEach(logColor);
 
 	console.log("\n--- Backgrounds ---");
+	console.log("selectedBg:", theme.bg("selectedBg", " Sample "));
+	console.log("hoverBg:", theme.bg("hoverBg", " Sample "));
 	console.log("userMessageBg:", theme.bg("userMessageBg", " Sample "));
 	const searchMatch = theme.bg("searchMatchBg", theme.fg("searchMatchText", " Sample "));
 	console.log("searchMatch:", theme.underline(searchMatch));

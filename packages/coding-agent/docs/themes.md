@@ -106,7 +106,7 @@ Theme colors describe interface roles rather than individual components. Use the
 | Area | Color names |
 |---|---|
 | General interface | `accent`, `border*`, `text`, `muted`, `dim`, `success`, `error`, `warning` |
-| Selection and fullscreen | `selectedBg`, `searchMatch*`, `scrollbar*` |
+| Selection and fullscreen | `selectedBg`, `hoverBg`, `searchMatch*`, `scrollbar*` |
 | Messages | `userMessage*`, `customMessage*`, `thinkingText` |
 | Tool execution | `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`, `toolTitle`, `toolOutput` |
 | Markdown | `md*` |
@@ -117,15 +117,20 @@ Theme colors describe interface roles rather than individual components. Use the
 
 The schema is the format reference. The built-in themes provide complete values that you can copy and adjust.
 
-Five colors are optional and inherit another color when omitted:
+Six colors are optional and inherit another color when omitted:
 
 | Optional color | Fallback |
 |---|---|
+| `hoverBg` | `toolPendingBg` |
 | `scrollbarTrack` | `muted` |
 | `scrollbarThumb` | `text` |
 | `searchMatchBg` | `selectedBg` |
 | `searchMatchText` | `text` |
 | `thinkingMax` | `thinkingXhigh` |
+
+`hoverBg` is the pointer-hover surface for clickable rows and local targets, separate from keyboard selection (`selectedBg`). Set it explicitly if your tool panel color looks like selection; its fallback is a convention, not a contrast guarantee for arbitrary themes. The system theme places it halfway from the terminal background toward the relaxed panel lightness in OKLab, with the same neutral color construction and background limiting. Without terminal color reports it has no background and promises no distinctness.
+
+Theme JSON with `hoverBg` requires a core version that supports the token. Older cores reject it; when updating a linked installation, rebuild/relink and restart Pi before adding it (`/reload` does not replace the core).
 
 If `export` colors are omitted, Pi derives HTML page and panel backgrounds from `userMessageBg`.
 
