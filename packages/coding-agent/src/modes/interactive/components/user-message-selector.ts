@@ -1,4 +1,14 @@
-import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	getKeybindings,
+	ListMouse,
+	Spacer,
+	Text,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
@@ -17,6 +27,24 @@ class UserMessageList implements Component {
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
 	private maxVisible: number = 10; // Max messages visible
+	private readonly mouse = new ListMouse<string>({
+		select: (key) => {
+			const index = this.messages.findIndex((message) => message.id === key);
+			if (index >= 0) this.selectedIndex = index;
+		},
+		activate: (key) => {
+			if (!this.messages.some((message) => message.id === key)) return false;
+			this.onSelect?.(key);
+			return true;
+		},
+		step: (direction) => {
+			const index = Math.max(0, Math.min(this.messages.length - 1, this.selectedIndex + direction));
+			if (index === this.selectedIndex) return false;
+			this.selectedIndex = index;
+			return true;
+		},
+		ownsWheel: () => this.messages.length > this.maxVisible,
+	});
 
 	constructor(messages: UserMessageItem[], initialSelectedId?: string) {
 		// Store messages in chronological order (oldest to newest)
@@ -30,7 +58,12 @@ class UserMessageList implements Component {
 		// No cached state to invalidate currently
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		return this.mouse.handle(event);
+	}
+
 	render(width: number): string[] {
+		this.mouse.beginRows();
 		const lines: string[] = [];
 
 		if (this.messages.length === 0) {
@@ -48,6 +81,7 @@ class UserMessageList implements Component {
 		// Render visible messages (2 lines per message + blank line)
 		for (let i = startIndex; i < endIndex; i++) {
 			const message = this.messages[i];
+			this.mouse.addRow(message.id, lines.length, 2);
 			const isSelected = i === this.selectedIndex;
 
 			// Normalize message to single line

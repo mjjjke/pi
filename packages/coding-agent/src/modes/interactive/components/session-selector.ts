@@ -8,8 +8,11 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
+	ListMouse,
 	Spacer,
 	Text,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -309,6 +312,28 @@ class SessionList implements Component, Focusable {
 	public onRenameSession?: (sessionPath: string) => void;
 	public onError?: (message: string) => void;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
+	private readonly mouse = new ListMouse<string>({
+		select: (key) => {
+			const index = this.filteredSessions.findIndex((node) => node.session.path === key);
+			if (index < 0) return;
+			this.selectionTouched = true;
+			this.selectedIndex = index;
+		},
+		activate: (key) => {
+			if (!this.filteredSessions.some((node) => node.session.path === key)) return false;
+			this.onSelect?.(key);
+			return true;
+		},
+		step: (direction) => {
+			this.selectionTouched = true;
+			const index = Math.max(0, Math.min(this.filteredSessions.length - 1, this.selectedIndex + direction));
+			if (index === this.selectedIndex) return false;
+			this.selectedIndex = index;
+			return true;
+		},
+		ownsWheel: () => this.filteredSessions.length > this.maxVisible,
+		enabled: () => this.confirmingDeletePath === null,
+	});
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
 	private _focused = false;
@@ -419,7 +444,15 @@ class SessionList implements Component, Focusable {
 
 	invalidate(): void {}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type === "press" && event.y === 0 && this.confirmingDeletePath === null && !this.mouse.closed) {
+			return this.searchInput.handleMouse(event);
+		}
+		return this.mouse.handle(event);
+	}
+
 	render(width: number): string[] {
+		this.mouse.beginRows();
 		const lines: string[] = [];
 
 		// Render search input
@@ -457,6 +490,7 @@ class SessionList implements Component, Focusable {
 		for (let i = startIndex; i < endIndex; i++) {
 			const node = this.filteredSessions[i]!;
 			const session = node.session;
+			this.mouse.addRow(session.path, lines.length);
 			const isSelected = i === this.selectedIndex;
 			const isConfirmingDelete = session.path === this.confirmingDeletePath;
 			const isCurrent = this.isCurrentSessionPath(session.path);
