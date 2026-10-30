@@ -287,9 +287,9 @@ handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 }
 ```
 
-Returning `handled` suppresses renderer-level fallback behavior. `capture` keeps subsequent drag and release events routed to the same component. `focus` requests keyboard focus. The optional `render` flag controls repainting: press, click, drag, and wheel default to rendering; move and release do not. Set `render: true` for a hover state that visibly changed, or `render: false` for a handled no-op. Render requests are coalesced and terminal output remains differential.
+Returning `handled` suppresses renderer-level fallback behavior. `capture` keeps subsequent drag and release events routed to the same component. A captured component gesture ends early when keyboard focus moves to a different component or a non-release key reaches the focused component: its remaining drag, release and click are swallowed. Focus requested by the gesture's own handler results does not end it. Wheel, hover, text selection, scrollbar drag and modified-link clicks are unaffected. `focus` requests keyboard focus. The optional `render` flag controls repainting: press, click, drag, and wheel default to rendering; move and release do not. Set `render: true` for a hover state that visibly changed, or `render: false` for a handled no-op. Render requests are coalesced and terminal output remains differential.
 
-Unhandled gestures retain alternate-screen defaults: wheel input scrolls the nearest `ScrollView` and chains unused delta, primary-button drags select text, OSC 8 links open before parent click handlers, and unhandled right-click preserves configured paste behavior. A click is emitted only when press/release completes without a drag.
+Unhandled gestures retain alternate-screen defaults: wheel input scrolls the nearest `ScrollView` and chains unused delta, primary-button drags select text, OSC 8 links open before parent click handlers, and unhandled right-click preserves configured paste behavior. A click is emitted only when press/release completes without a drag. Renderer clicks carry `clickSource: "captured"` after an accepted component press, or `"fallback"` after an unhandled press (used by Editor click-to-position). Directly constructed events may omit `clickSource`. The captured-gesture lifetime rule does not guard fallback clicks.
 
 Use `MouseRegion` to add mouse behavior without changing a component's rendering:
 
@@ -302,6 +302,38 @@ const collapsible = new MouseRegion(content, (event) => {
 ```
 
 `Container` and `Box` route events to nested children using geometry recorded by the last rendered frame, so pointer motion does not rerender children merely to hit-test them. Explicit `VStack`, `HStack`, and `ScrollView` layouts use the alternate-screen layout frame directly.
+
+#### ListMouse
+
+`ListMouse<K>` shares press-time row identity and click/wheel policy without changing keyboard handling or rendering. Use stable keys (indices only for static lists). A left press selects without activating; a captured click requires a press this helper accepted and uses its original key/zone even after rows are rebuilt. Fallback clicks never act and clear stale press state. Undefined-source direct clicks may select and activate without a press, for synthetic callers/tests.
+
+```typescript
+const mouse = new ListMouse<string>({
+  select: (key) => { selectedKey = key; },
+  activate: (key) => {
+    const item = currentItems.find((item) => item.id === key);
+    if (!item) return false;
+    onSelect(item);
+    return true;
+  },
+  step: (direction) => stepSelectionClamped(direction), // -1 or 1; returns visible change
+  ownsWheel: () => currentItems.length > maxVisible,
+});
+
+// Manual renderer: reset geometry at each render, then record only visible item lines.
+mouse.beginRows();
+mouse.addRow(item.id, localY, visibleHeight);
+// handleMouse(event) delegates to mouse.handle(event).
+
+// Alternatively, a container-of-rows renderer can wrap a whole (possibly wrapped) row:
+container.addChild(mouse.row(item.id, new Text(item.label, 0, 0)));
+```
+
+`activate(key)` must revalidate against the current list and return whether it acted. Only a successful activation closes the helper; a removed key leaves it usable. `closeOnActivate: false` supports toggles. `closed` reports permanent closure; `close()` is idempotent, for a finished surface still mounted. `enabled: () => false` leaves events unhandled and records no press (for modal states or an arming delay).
+
+`step` is optional. Wheel events are handled only inside item-row bounds and while `ownsWheel()` is true (default true when `step` exists). Manual bounds include interior separators, not titles, counters or hints; region bounds cover that row only. Wheel uses the delta's sign, never touches the held press, and reports the step's boolean as `render`, including handled no-ops at a clamped end.
+
+`addRow(key, y, height = 1, zones?)` and `row(key, child, zones?)` accept `ListMouseZone[]` (`{ name, x, width }`). A zone click calls optional `zoneClick(key, zone)` instead of `activate`, never closes, and must revalidate its key/zone there. `hitTest(x, y)` returns `{ key, zone? }` for manual rows. Right/middle buttons and release, drag, move and leave are unhandled.
 
 ### Focusable Interface (IME Support)
 

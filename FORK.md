@@ -52,7 +52,46 @@ Test paths below are relative to the indicated package's `test/` directory. Reti
 | Cached-prefix invariant gate | Already-sent context (system, tools, earlier messages) must reach the next request byte-identical on the final wire body; only the moving Anthropic `cache_control` breakpoint and the uncached OAuth `cch` digits in `system[0]` may differ. A whole-body rewrite of old context (2026-10-13: a cch regex matched billing text in an old tool result) misses the cache every turn and burns a quota window. `.husky/pre-commit` runs the test when `packages/ai/*` is staged, because `npm run check` runs no tests. | ai: `prompt-prefix-stability.test.ts` (Anthropic API key, Anthropic OAuth signing, Codex SSE/zstd, negative control with the historical whole-body signer), helper `prompt-prefix-utils.ts` | Upstream gates an equivalent final-wire prefix invariant in its checks. |
 | Working-directory change (`/cd`) | A conversation could not move to another project: cwd is fixed per runtime (`AgentSession._cwd`, `SessionManager`, settings storage, resource loader) and `/resume` only reopens a session at its recorded cwd. `AgentSessionRuntime.changeCwd(target)` relocates the same `SessionManager` (same id and entries) and recreates the runtime through the existing factory with a carry (staged content, owner-less staged instructions, `nextTurn` messages, live model and thinking level instead of launch `--model`/`--thinking`, tool selection by the `/reload` rule, held `images.blockImages`/`codemode.mode`). Persistence: header `cwd` rewritten; core custom entry `pi.cwd` (`from`, `to`, `previousSessionFile`, `source`, `reason?`) and, when the model has seen a cwd, a `pi.cwd` custom message notice (context marker) are written with the old bytes into a new file published atomically in the destination's session dir (commit = publication; later failures are warnings); a `.moved` marker beside the old file hides it from discovery until it is unlinked; open of the new file removes a marked old copy; custom or pinned locations rewrite in place. `<file>.artifacts` never moves: symlink aliases at new paths, created before the commit. `SettingsManager.holdSessionValues` (both keys always); refused while a tool hides declarations (`codemode.mode: "only"`). Destination trust resolved before relocation (host hook over `resolveProjectTrusted`, cached for the factory); "No" leaves the session unchanged. A cd first reconciles the previous cd's old copy or is refused. Events: `session_shutdown`/`session_start` reason `"cwd"` (`targetCwd`; `previousCwd`, `previousSessionFile`). `ExtensionContext.requestCwdChange` (refused before the branch bootstraps; pending until the first idle point after the run settles; `abort()`, idle `navigateTree`, replacement, quit and `dispose()` cancel; one outcome per request). An applied model request starts one run after destination startup, using the recorded notice without duplicating it or inventing user input; startup input owns that run, and stops/navigation/replacement/disposal suppress the wakeup. User `/cd` and unsuccessful changes stay passive. Built-in `/cd`, transcript marker. Interactive runtime reset hides the footer until destination startup finishes (also on `/reload`), so a custom statusline never flashes the built-in footer with stale cwd/branch data. Refused while busy, for models without mid-conversation system updates, with refused writes. CLI host `process.chdir`. Used by `pi-harness-control` (`cd`), `pi-subagents`, `pi-handoff`, `pi-pair`, `pi-context-view`. | coding-agent: `session-manager/cwd-change.test.ts`, `suite/agent-session-cwd-change.test.ts`, `suite/agent-session-cwd-change-deferred.test.ts`, `suite/agent-session-cwd-change-cache.test.ts`, `suite/agent-session-cwd-change-continue.test.ts`, `interactive-cwd-change.test.ts`, `settings-held-values.test.ts`, `cli-cwd-policy.test.ts`, `suite/compaction-boundary-cache.test.ts` (unchanged); ai: `prompt-prefix-stability.test.ts` (unchanged) | Upstream offers a same-session working-directory change with durable relocation, an extension lifecycle signal and a deferred request API with equivalent guarantees. |
 | Terminal focus, core prompt events, before-quit hook and custom-message receipts | `ctx.ui.terminalFocus()` and `terminal_focus` expose terminal reports in both renderers, independently of mouse capture. Core destination-trust and auth dialogs share the outermost `ui_prompt_start`/`ui_prompt_end` lifecycle with extension dialogs (`source: "project_trust"` / `"auth"`; absent for extensions). Interactive `session_before_quit` can cancel before admission closes or the terminal stops; signals and repeated user requests bypass an outstanding hook, extension requests coalesce. `sendMessage(..., { onReceipt })` acknowledges exactly one append (`committed`, entry id) or final drop, including bootstrap, reload/cwd carry and disposal; failed appends stay owned until retry or final sweep. Active admissions finish at loop unwind, never drop then append. Receipts are after-the-fact, never awaited by core or a consumer's stop/teardown path. Used by `pi-notify` and `pi-subagents`. | tui: `terminal-focus.test.ts`, `tui-alt-screen.test.ts`; coding-agent: `interactive-terminal-focus.test.ts`, `ui-prompt-core-dialogs.test.ts`, `interactive-before-quit.test.ts`, `send-message-receipt.test.ts`, `interactive-cwd-change.test.ts`, `interactive-mode-suspend.test.ts` | Upstream offers equivalent focus state, core dialog lifecycle events, cancellable interactive pre-quit and custom-message commit receipts. |
+| Selector mouse input | Shared foundation: renderer-owned captured gesture lifetime on focus identity changes or delivered keys, clickSource provenance at both synthesis sites, and exported ListMouse for press-time key/zone identity, one-shot activation and clipped item-area wheel handling. No selector migrations yet; residuals include same-focus timers, async autocomplete swaps, responsive overlay hiding, non-capturing cover, and fallback clicks for all non-ListMouse consumers (SelectList/SettingsList included); see subsection below. | tui: `mouse-gesture-lifetime.test.ts`, `list-mouse.test.ts`; existing `tui-alt-screen.test.ts`, `mouse-leave.test.ts`, `mouse-components.test.ts`, `phantom-drag.test.ts`, `select-list.test.ts`, `settings-list.test.ts`; coding-agent: unmodified `extension-selector.test.ts` | Upstream ships equivalent captured-gesture lifetime, click provenance and selector click/wheel policy, and consumers pass. |
 | Extension selector mouse input | `ctx.ui.select()` (including Plan-mode approval menus) supports fullscreen option clicks, press highlighting without hover selection, and wheel navigation for lists longer than a 10-option centered viewport. Short-list wheel events still reach the chat; clicks outside option rows are unhandled. Wrapped labels/descriptions and clamped keyboard navigation remain intact; regular mode remains keyboard-only. Uses row `MouseRegion`s rather than replacing wrapped `Text` with single-line `SelectList`. Shared callers (extension confirmation and core login/auth/MCP dialogs, including Radius login) inherit this behavior; other selector component implementations are unchanged. | coding-agent: `extension-selector.test.ts` (row hit testing, wrapping, scrolling/fallthrough, keyboard behavior, virtual fullscreen press/release after recentering, drag cancellation and regular-mode dispatch) | Upstream offers equivalent mouse selection and wheel fallthrough for extension selectors. |
+
+### Selector mouse input
+
+Slice 1 provides the shared foundation, not the selector migrations. Full design:
+[selector-mouse-design.md](../pi-mjjjke/docs/selector-mouse-design.md) in pi-mjjjke.
+
+A **captured component gesture** ends when keyboard focus changes identity or a
+non-release key reaches the focused component. Its remaining drag, release and
+synthesized click are swallowed, including after focus moves away and back.
+Focus requested by the gesture's own handler results is re-baselined. Wheel,
+hover, renderer text selection, scrollbar drag and modified-link clicks retain
+their existing behavior. SelectList and SettingsList captured press→Esc→release
+now only cancel, without component changes.
+
+Renderer clicks carry `clickSource: "captured" | "fallback"`. `ListMouse<K>`
+requires its own accepted press for captured clicks, ignores fallback clicks and
+clears stale press state, and preserves undefined-source direct-event behavior.
+Adapters revalidate press-time keys/zones; a failed activation does not close a
+still-visible list. Successful terminal activation closes once. Manual row maps
+and wrapped MouseRegion rows share the policy; wheel belongs only to clipped
+item areas. No selector is migrated to ListMouse in this slice.
+
+Known residuals (not fixed or covered by a universal selector-ownership claim):
+- Timer-driven in-place replacements with no key or focus change keep captures live.
+- Async Editor autocomplete replacement during a hold completes the new suggestion.
+- Capturing overlays hidden by responsive `visible()` predicates retain held clicks.
+- Non-capturing overlays covering the press target do not void its capture.
+- Fallback clicks are not epoch-guarded for **all non-ListMouse consumers**, including
+  SelectList, SettingsList and click-only handlers such as Editor. An unhandled
+  press followed by a focused replacement can still activate those lists on release.
+
+Regression coverage: tui `mouse-gesture-lifetime.test.ts`, `list-mouse.test.ts`
+(real fullscreen renderer + VirtualTerminal, including characterization of the
+residuals); existing `tui-alt-screen`, `mouse-leave`, `mouse-components`,
+`phantom-drag`, `select-list`, `settings-list`; coding-agent
+`extension-selector.test.ts` unmodified. Physical Ghostty delivery is not verified
+by these tests. Retire when upstream ships equivalent captured-gesture lifetime,
+click provenance and selector click/wheel policy, and the consumers pass.
 
 ### Clickable transcript links
 
@@ -76,9 +115,9 @@ focus/capture results are ignored and only an explicit `render: true` repaints.
 Cached child rectangles in Container, Box and MouseRegion allow geometry-only
 validation after rendering, without synthetic moves or extra renders for non-hover
 handlers. A leave requesting repaint during layout is reflected in the same frame.
-Nested controls and overlays retain their exact dispatch target; gesture capture
-and click synthesis are unchanged. Multiplexer button-motion policy is unchanged
-(no passive hover). Regression coverage: `packages/tui/test/mouse-leave.test.ts`
+Nested controls and overlays retain their exact dispatch target. Captured gesture
+lifetime and click provenance follow the Selector mouse input contract above.
+Multiplexer button-motion policy is unchanged (no passive hover). Regression coverage: `packages/tui/test/mouse-leave.test.ts`
 (drag/release, layout/overlay/resize/clipping, explicit repaint, no-hover render
 counts) and `packages/tui/test/tui-alt-screen.test.ts`. Retire when upstream offers
 equivalent component hover teardown notifications. Used by pi-ask-user-question,

@@ -245,6 +245,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
 	private mousePressMoved = false;
+	private mousePressEpoch = 0;
+	private mouseGestureVoided = false;
 	private lastComponentClick?: {
 		timestamp: number;
 		count: number;
@@ -711,6 +713,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.mousePressTarget = undefined;
 		this.mousePressPoint = undefined;
 		this.mousePressMoved = false;
+		this.mouseGestureVoided = false;
 	}
 
 	private clearLinkHover(): void {
@@ -895,7 +898,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		button: number,
 		x: number,
 		y: number,
-		extra: Partial<Pick<TuiMouseEvent, "wheelDelta" | "clickCount">> = {},
+		extra: Partial<Pick<TuiMouseEvent, "wheelDelta" | "clickCount" | "clickSource">> = {},
 	): TuiMouseEvent {
 		return {
 			type,
@@ -911,6 +914,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			ctrl: (button & 16) !== 0,
 			...(extra.wheelDelta === undefined ? {} : { wheelDelta: extra.wheelDelta }),
 			...(extra.clickCount === undefined ? {} : { clickCount: extra.clickCount }),
+			...(extra.clickSource === undefined ? {} : { clickSource: extra.clickSource }),
 		};
 	}
 
@@ -1079,6 +1083,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				this.handleSelectionMouseEvent(raw);
 				return;
 			}
+			if (
+				type !== "move" &&
+				(this.mouseCapture || this.mousePressTarget) &&
+				(this.mouseGestureVoided || this.mousePressEpoch !== this.interactionEpoch)
+			) {
+				// Focus moved or a key reached the focused component since the press. Swallow
+				// the rest of the stale gesture; a new press starts fresh even after a lost release.
+				this.lastComponentClick = undefined;
+				if (type === "press") this.clearComponentMouseGesture();
+				else {
+					if (raw.release) this.clearComponentMouseGesture();
+					else this.mouseGestureVoided = true;
+					return;
+				}
+			}
 			if (type !== "move" && (this.mouseCapture || this.mousePressTarget)) {
 				const target = this.mouseCapture ?? this.mousePressTarget!;
 				if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
@@ -1090,11 +1109,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				if (targetResult) {
 					moveTarget = targetResult.target;
 					render = this.applyMouseDispatchResult(event, targetResult);
+					// Focus requested by the gesture's own target is not a displacement.
+					this.mousePressEpoch = this.interactionEpoch;
 				}
 				if (raw.release) {
 					if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
 						const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
 							clickCount: this.getComponentClickCount(target, raw.x, raw.y),
+							clickSource: "captured",
 						});
 						const clickResult = this.dispatchMouseToTarget(clickEvent, target);
 						if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
@@ -1126,6 +1148,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					this.mousePressTarget = result.target;
 					this.mousePressPoint = { x: raw.x, y: raw.y };
 					this.mousePressMoved = false;
+					this.mousePressEpoch = this.interactionEpoch;
 				}
 				if (render) this.requestRender();
 				return;
@@ -1551,6 +1574,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (isClick) {
 				const clickEvent = this.createMouseEvent("click", event.button, event.x, event.y, {
 					clickCount: this.lastClick?.count ?? 1,
+					clickSource: "fallback",
 				});
 				const overlay = this.dispatchMouseToOverlay(clickEvent);
 				const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(clickEvent));

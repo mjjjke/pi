@@ -45,6 +45,8 @@ export interface TuiMouseEvent {
 	wheelDelta?: number;
 	/** Consecutive click count when type is click. */
 	clickCount?: number;
+	/** Renderer click provenance. Undefined for directly constructed events. */
+	clickSource?: "captured" | "fallback";
 }
 
 export interface TuiMouseEventResult {
@@ -526,6 +528,8 @@ export abstract class TuiBase extends Container implements TUI {
 	abstract readonly mode: TuiMode;
 	public terminal: Terminal;
 	private focusedComponent: Component | null = null;
+	/** Changes when keyboard focus moves or a non-release key reaches the focused component. */
+	protected interactionEpoch = 0;
 	private inputListeners = new Set<TuiInputListener>();
 	private terminalFocus: boolean | undefined;
 	private terminalFocusListeners = new Set<(focused: boolean) => void>();
@@ -671,6 +675,7 @@ export abstract class TuiBase extends Container implements TUI {
 			this.focusedComponent.focused = false;
 		}
 
+		if (nextFocus !== previousFocus) this.interactionEpoch++;
 		this.focusedComponent = nextFocus;
 
 		if (isFocusable(nextFocus)) {
@@ -1179,6 +1184,7 @@ export abstract class TuiBase extends Container implements TUI {
 			if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) {
 				return;
 			}
+			if (!isKeyRelease(data)) this.interactionEpoch++;
 			this.focusedComponent.handleInput(data);
 			// Keyboard input is latency-sensitive. Avoid the throttled timer path,
 			// where even setTimeout(0) can take a full 16 ms tick on Windows.

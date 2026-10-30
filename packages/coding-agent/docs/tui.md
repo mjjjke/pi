@@ -57,6 +57,8 @@ Forward keys your editor does not own to the base implementation, and restore th
 
 Fullscreen mode routes normalized mouse events to components. A handler can mark an event handled, capture a drag sequence, request focus, or request a render.
 
+`ListMouse<K>` provides press-time row identity and clipped-list wheel handling; captured gestures end on focus changes or delivered keys, and renderer `clickSource` distinguishes accepted-press clicks from fallback clicks (which ListMouse rejects). See [Mouse Input](../../tui/README.md#mouse-input).
+
 Unhandled wheel events scroll the nearest `ScrollView`. Unhandled primary-button drags remain available for transcript selection. OSC 8 links take precedence over enclosing click regions.
 
 Regular mode leaves mouse input to the terminal because the terminal owns scrollback. Design every interaction with a keyboard path even when fullscreen mouse input is available.

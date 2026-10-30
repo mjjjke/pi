@@ -49,6 +49,7 @@ export {
 	setImageTranscoder,
 } from "./components/image.ts";
 export { Input } from "./components/input.ts";
+export { ListMouse, type ListMouseHit, type ListMouseOptions, type ListMouseZone } from "./components/list-mouse.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
 export {
 	type DefaultTextStyle,
