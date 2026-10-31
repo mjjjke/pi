@@ -3536,6 +3536,15 @@ export class InteractiveMode {
 				await this.handleClearCommand();
 				return;
 			}
+			if (text === "/continue") {
+				this.editor.setText("");
+				try {
+					if (!(await this.session.continueInterrupted())) this.showStatus("Nothing to continue.");
+				} catch (error) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+				return;
+			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
 				this.editor.setText("");

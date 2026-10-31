@@ -42,6 +42,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Start background compaction; --now waits, --cancel cancels the pending summary",
 		argumentHint: "[--now [instructions] | --cancel | instructions]",
 	},
+	{ name: "continue", description: "Continue an interrupted turn without adding a message" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
 	{ name: "cd", description: "Change working directory in the same conversation", argumentHint: "<path>" },

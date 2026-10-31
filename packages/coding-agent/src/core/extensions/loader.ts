@@ -173,6 +173,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		appendDeveloperMessage: notInitialized,
 		queueDeveloperMessage: notInitialized,
 		cancelQueuedDeveloperMessage: notInitialized,
+		continueInterrupted: notInitialized,
 		setStandingInstruction: notInitialized,
 		clearStandingInstruction: notInitialized,
 		getStandingInstruction: notInitialized,
@@ -442,6 +443,11 @@ function createExtensionAPI(
 		cancelQueuedDeveloperMessage(pendingId) {
 			assertActive();
 			return runtime.cancelQueuedDeveloperMessage(pendingId);
+		},
+
+		continueInterrupted() {
+			assertActive();
+			return runtime.continueInterrupted();
 		},
 
 		setStandingInstruction(key, content, options) {

@@ -322,6 +322,20 @@ Session replacement invalidates the old context. Capture only plain data before 
 
 In this fork the `setup` callback of `ctx.newSession()` and `ctx.requestNewSession()` receives a `SessionSetupManager`: a frozen, state-only facade with the read-only getters (`getBranch()`, `getEntries()`, `getStandingState()`, ...) plus `appendCustomEntry()`, `appendSessionInfo()` and `appendLabelChange()`. It cannot append messages. Send context (handoff text, seeds, instructions) from `withSession`, where it is staged until the first run (see [before the first run](#before-the-first-run)). This is a breaking type change for callers that used the full `SessionManager` there.
 
+### pi.continueInterrupted()
+
+This fork exposes `pi.continueInterrupted(): Promise<boolean>` (also on SDK `AgentSession`). It resumes the current branch's interrupted turn without adding a user or custom message:
+
+- A projected assistant leaf with `stopReason: "error"` or `"aborted"` is durably omitted from model context before continuing. Raw session history retains it; partial text is regenerated, not reused.
+- A tool-result leaf or unanswered user message continues directly, preserving any aborted tool results for the model to inspect.
+- A completed assistant, empty branch, or other projected leaf returns `false`. Busy (streaming, compaction, retry or extension binding), closed, disposed and write-blocked sessions also return `false` without starting a request. Stale extension APIs throw.
+
+```typescript
+const continued = await pi.continueInterrupted();
+```
+
+The promise resolves after the run settles (`true` if continuation started, not a guarantee of success). It uses the normal agent lifecycle, including `agent_start`, `agent_end`, `agent_settled`, abort, automatic retry and compaction. Like auto-retry, it does not dispatch input or `before_agent_start` or consume `nextTurn` context. If cancelled during the omission's awaited `session_context_change` handlers, it settles without a request and returns `false`; the committed omission remains. The interactive `/continue` command uses this same API.
+
 ### Background compaction
 
 `ctx.startBackgroundCompaction({source: "user" | "model", customInstructions?})`, `ctx.getBackgroundCompaction()` and `ctx.cancelBackgroundCompaction(jobId?)` control requested jobs. Getter fields are `jobId`, `source`, `phase`, `hardThreshold` (not `H`). They are optional for older/hand-built contexts, always bound on AgentSession contexts, and reject stale runtime access. `ctx.compact()` remains blocking. See [Compaction Reference](compaction.md#background-api-and-events) for frozen cuts, request-boundary adoption, hooks and terminal events.

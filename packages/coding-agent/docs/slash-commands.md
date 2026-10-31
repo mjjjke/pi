@@ -22,6 +22,7 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 |---|---|
 | `/new` | Start a new session |
 | `/resume` | Switch to another saved session |
+| `/continue` | Continue an interrupted turn without adding a message |
 | `/name [name]` | Set the session display name, or show the current name when omitted |
 | `/session` | Show current session information and statistics |
 | `/tree` | Navigate the session tree |
@@ -31,6 +32,8 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | `/compact --now [instructions]` | Stop the run and wait for compaction |
 | `/compact --cancel` | Cancel the pending background job (also stops a compaction wait) |
 | `/import <path>` | Import and resume a JSONL session |
+
+`/continue` works only while idle. It regenerates an errored or aborted assistant response (including partial text stopped with Esc), keeping the old attempt in raw history but omitting it from model context. A final tool result or unanswered user message continues directly. Completed responses and other non-interrupted leaves do not start a turn: Pi shows `Nothing to continue.` Normal working status, Esc cancellation, retries and compaction apply.
 
 ## Export and share
 

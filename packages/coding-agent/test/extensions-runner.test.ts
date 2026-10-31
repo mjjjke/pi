@@ -85,6 +85,7 @@ describe("ExtensionRunner", () => {
 		appendDeveloperMessage: () => {},
 		queueDeveloperMessage: () => ({ status: "committed", entryId: "entry" }),
 		cancelQueuedDeveloperMessage: () => false,
+		continueInterrupted: async () => false,
 		setStandingInstruction: () => {},
 		clearStandingInstruction: () => {},
 		getStandingInstruction: () => undefined,

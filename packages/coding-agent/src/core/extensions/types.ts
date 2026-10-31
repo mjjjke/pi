@@ -2190,6 +2190,14 @@ export interface ExtensionAPI {
 	cancelQueuedDeveloperMessage(pendingId: string): boolean;
 
 	/**
+	 * Continue an interrupted turn without adding input. Error/aborted assistant attempts stay in
+	 * raw history but are durably omitted from model context. Tool results and unanswered user
+	 * messages continue directly. Resolves after settlement; false when busy, closed, write-blocked,
+	 * or the projected leaf is not interrupted. Stale extension APIs throw.
+	 */
+	continueInterrupted(): Promise<boolean>;
+
+	/**
 	 * Set the desired value of a keyed standing instruction. Core delivers it as a keyed developer
 	 * message (at the first run's bootstrap, else at the request boundary `apply` selects), carries
 	 * the value in effect across compaction and derives its state per branch. Writes a non-context
@@ -2688,6 +2696,7 @@ export interface ExtensionActions {
 	appendDeveloperMessage: AppendDeveloperMessageHandler;
 	queueDeveloperMessage: QueueDeveloperMessageHandler;
 	cancelQueuedDeveloperMessage: CancelQueuedDeveloperMessageHandler;
+	continueInterrupted: () => Promise<boolean>;
 	setStandingInstruction: SetStandingInstructionHandler;
 	clearStandingInstruction: ClearStandingInstructionHandler;
 	getStandingInstruction: GetStandingInstructionHandler;

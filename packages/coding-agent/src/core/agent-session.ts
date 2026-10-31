@@ -3356,8 +3356,24 @@ export class AgentSession {
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
+		await this._runAgentLoop(
+			async () => {
+				await this.agent.prompt(messages);
+				return true;
+			},
+			runStart,
+			onStartMessagePersistence,
+		);
+	}
+
+	/** Shared loop and settlement for new prompts and message-free recovery. */
+	private async _runAgentLoop(
+		start: () => Promise<boolean>,
+		runStart?: { message: AgentMessage; persisted: boolean },
+		onStartMessagePersistence?: (outcome: StartMessagePersistence) => void,
+	): Promise<void> {
 		try {
-			await this.agent.prompt(messages);
+			if (!(await start())) return;
 			this._recoverCustomAdmissions();
 			// No retry, compaction, queued continuation or before-settle boundary once writes are blocked:
 			// each would start another refused run; queued input stays queued (§3.6).
@@ -3385,7 +3401,7 @@ export class AgentSession {
 			try {
 				if (this._runStart === runStart) this._runStart = undefined;
 				try {
-					onStartMessagePersistence?.({ message: runStart.message, persisted: runStart.persisted });
+					if (runStart) onStartMessagePersistence?.({ message: runStart.message, persisted: runStart.persisted });
 				} catch {
 					// An observer hook must not change how the run ends.
 				}
@@ -3407,6 +3423,53 @@ export class AgentSession {
 				}
 			}
 		}
+	}
+
+	/**
+	 * Resume an interrupted projected turn without appending input. Returns false when busy,
+	 * closed, write-blocked, or when the projected leaf is not an interrupted turn.
+	 */
+	async continueInterrupted(): Promise<boolean> {
+		if (
+			this.isStreaming ||
+			this.isCompacting ||
+			this.isRetrying ||
+			this._readiness ||
+			this._disposed ||
+			this._admissionClosed ||
+			this._isSessionWriteBlocked()
+		)
+			return false;
+		this._refreshFinalizedContext();
+		const leaf = this.messages.at(-1);
+		if (
+			!leaf ||
+			(leaf.role !== "user" &&
+				leaf.role !== "toolResult" &&
+				!(leaf.role === "assistant" && (leaf.stopReason === "error" || leaf.stopReason === "aborted")))
+		)
+			return false;
+
+		// Reserve before the omission's awaited context-change hooks: another starter cannot win,
+		// and Esc/disposal during those hooks must suppress the request, just like auto-retry.
+		this._isAgentRunActive = true;
+		this._cwdContinuation = undefined;
+		this._agentRunAbortRequested = false;
+		this._failedResponse = undefined;
+		let continued = false;
+		await this._runAgentLoop(async () => {
+			if (leaf.role === "assistant") {
+				await this._omitRecoveryAttempt(leaf);
+				this._failedResponse = leaf;
+			}
+			if (this._agentRunAbortRequested || this._disposed || this._admissionClosed || this._isSessionWriteBlocked())
+				return false;
+			this._recordSelection();
+			continued = true;
+			await this.agent.continue();
+			return true;
+		});
+		return continued;
 	}
 
 	/**
@@ -5862,6 +5925,7 @@ export class AgentSession {
 				},
 				queueDeveloperMessage: (content, options) => this._queueDeveloperMessage(content, options, runner),
 				cancelQueuedDeveloperMessage: (pendingId) => this.cancelQueuedDeveloperMessage(pendingId),
+				continueInterrupted: () => this.continueInterrupted(),
 				setStandingInstruction: (key, content, options) => this.setStandingInstruction(key, content, options),
 				clearStandingInstruction: (key) => this.clearStandingInstruction(key),
 				getStandingInstruction: (key) => this.getStandingInstruction(key),
