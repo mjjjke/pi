@@ -2192,8 +2192,11 @@ export interface ExtensionAPI {
 	/**
 	 * Continue an interrupted turn without adding input. Error/aborted assistant attempts stay in
 	 * raw history but are durably omitted from model context. Tool results and unanswered user
-	 * messages continue directly. Resolves after settlement; false when busy, closed, write-blocked,
-	 * or the projected leaf is not interrupted. Stale extension APIs throw.
+	 * messages continue directly. Retains the leaf's run prompt options in memory; without them,
+	 * applies the current base prompt before the first request without replaying preflight.
+	 * Resolves after settlement, except during agent_settled: resolves immediately with true for
+	 * deferred acceptance, rechecked after dispatch (safe to await from a handler). False when busy,
+	 * closed, write-blocked, or the projected leaf is not interrupted. Stale extension APIs throw.
 	 */
 	continueInterrupted(): Promise<boolean>;
 

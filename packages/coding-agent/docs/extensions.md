@@ -334,7 +334,11 @@ This fork exposes `pi.continueInterrupted(): Promise<boolean>` (also on SDK `Age
 const continued = await pi.continueInterrupted();
 ```
 
-The promise resolves after the run settles (`true` if continuation started, not a guarantee of success). It uses the normal agent lifecycle, including `agent_start`, `agent_end`, `agent_settled`, abort, automatic retry and compaction. Like auto-retry, it does not dispatch input or `before_agent_start` or consume `nextTurn` context. If cancelled during the omission's awaited `session_context_change` handlers, it settles without a request and returns `false`; the committed omission remains. The interactive `/continue` command uses this same API.
+Ordinarily the promise resolves after the run settles (`true` if continuation started, not a guarantee of success). During `agent_settled` dispatch it instead resolves immediately: `true` means accepted for deferred admission after all settlement observers finish, so a handler may safely await it. Admission is checked again then; a stop, shutdown, branch/leaf change or competing run can suppress the deferred continuation without changing that acceptance result.
+
+It uses the normal agent lifecycle, including `agent_start`, `agent_end`, `agent_settled`, abort, automatic retry and compaction. Like auto-retry, it does not dispatch input or `before_agent_start` or consume `nextTurn` context. If cancelled during the omission's awaited `session_context_change` handlers, it settles without a request and returns `false`; the committed omission remains. The interactive `/continue` command uses this same API.
+
+The session retains the last settled run's prompt options for its projected leaf, including a request-local forced prompt and structured sections, throughout every continued tool turn and retry. Metadata-only appends do not invalidate them; tree navigation does. These options are not persisted. When that state is unavailable for the current leaf (for example after restart or branch navigation), continuation builds from the current base prompt options, as a new run would before extension preflight, and appends any structured prompt delta before its first request. It never rewrites prior entries, guesses an old forced prompt, or replays preflight side effects. Instructions that must survive restart or branch navigation should use [standing instructions](#standing-instructions).
 
 ### Background compaction
 

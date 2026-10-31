@@ -727,6 +727,12 @@ export class AgentSession {
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
+	/** Request-local prompt state belongs only to the last settled leaf of this branch. */
+	private _interruptedPrompt?: {
+		leafId: string;
+		branchGeneration: number;
+		options: NormalizedBuildSystemPromptOptions;
+	};
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -3409,9 +3415,19 @@ export class AgentSession {
 				if (!this._disposed) this._commitPendingInstructionsAtRunEnd();
 				if (this._agentRunAbortRequested) this._finishCancelledRetry();
 				this._failedResponse = undefined;
-				this._runSystemPromptOptions = undefined;
 				this._recoverCustomAdmissions();
 				this._flushPendingAtRunEnd();
+				const leaf = this.messages.at(-1);
+				const leafId = leaf && this._findPersistedMessageEntryId(leaf);
+				this._interruptedPrompt =
+					this._runSystemPromptOptions && leafId
+						? {
+								leafId,
+								branchGeneration: this._branchGeneration,
+								options: normalizeBuildSystemPromptOptions(this._runSystemPromptOptions),
+							}
+						: undefined;
+				this._runSystemPromptOptions = undefined;
 				this._pendingNewSessionRequest?.resolve({ cancelled: true });
 				this._pendingNewSessionRequest = undefined;
 			} finally {
@@ -3428,6 +3444,8 @@ export class AgentSession {
 	/**
 	 * Resume an interrupted projected turn without appending input. Returns false when busy,
 	 * closed, write-blocked, or when the projected leaf is not an interrupted turn.
+	 * During agent_settled, true means accepted for deferred admission (not started): resolves
+	 * immediately so an awaiting handler cannot deadlock its own settlement.
 	 */
 	async continueInterrupted(): Promise<boolean> {
 		if (
@@ -3450,6 +3468,37 @@ export class AgentSession {
 		)
 			return false;
 
+		if (this._isEmittingAgentSettled) {
+			const admissionGen = this._admissionGen;
+			const branchGeneration = this._branchGeneration;
+			const leafId = this.sessionManager.getLeafId();
+			const stopGeneration = this._cwdInputStopGeneration;
+			this._deferredSettledActions.push(async () => {
+				if (
+					this._isAdmissionChanged(admissionGen) ||
+					this._branchGeneration !== branchGeneration ||
+					this.sessionManager.getLeafId() !== leafId ||
+					this._cwdInputStopGeneration !== stopGeneration
+				)
+					return;
+				await this.continueInterrupted();
+			});
+			return true;
+		}
+
+		const retained = this._interruptedPrompt;
+		const runOptions =
+			retained &&
+			retained.leafId === this._findPersistedMessageEntryId(leaf) &&
+			retained.branchGeneration === this._branchGeneration
+				? retained.options
+				: this._baseSystemPromptOptions;
+		const options = normalizeBuildSystemPromptOptions({
+			...runOptions,
+			selectedTools: this.getActiveToolNames(),
+			toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
+			toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
+		});
 		// Reserve before the omission's awaited context-change hooks: another starter cannot win,
 		// and Esc/disposal during those hooks must suppress the request, just like auto-retry.
 		this._isAgentRunActive = true;
@@ -3457,6 +3506,7 @@ export class AgentSession {
 		this._agentRunAbortRequested = false;
 		this._failedResponse = undefined;
 		let continued = false;
+		this._runSystemPromptOptions = options;
 		await this._runAgentLoop(async () => {
 			if (leaf.role === "assistant") {
 				await this._omitRecoveryAttempt(leaf);
@@ -3464,6 +3514,15 @@ export class AgentSession {
 			}
 			if (this._agentRunAbortRequested || this._disposed || this._admissionClosed || this._isSessionWriteBlocked())
 				return false;
+			// No preflight replay: when request-local state is unavailable, reconcile the current
+			// base prompt just as a new run does, before its first request (never rewrite history).
+			const update = this._preparePromptAndToolLoadout(options);
+			if (update) {
+				const id = this.sessionManager.appendMessage(update);
+				this._refreshFinalizedContext();
+				const entry = this.sessionManager.getEntry(id);
+				if (entry) this._emit({ type: "entry_appended", entry });
+			}
 			this._recordSelection();
 			continued = true;
 			await this.agent.continue();
