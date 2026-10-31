@@ -55,6 +55,11 @@ class UserMessageList implements Component {
 		this.selectedIndex = initialIndex >= 0 ? initialIndex : Math.max(0, messages.length - 1);
 	}
 
+	setHeightBudget(height: number): void {
+		// Each item uses a message, metadata and separator; reserve the counter row.
+		this.maxVisible = Math.max(1, Math.min(10, Math.floor((height - 1) / 3)));
+	}
+
 	invalidate(): void {
 		// No cached state to invalidate currently
 	}
@@ -183,6 +188,15 @@ export class UserMessageSelectorComponent extends Container {
 		if (messages.length === 0) {
 			setTimeout(() => onCancel(), 100);
 		}
+	}
+
+	render(width: number): string[] {
+		const chromeHeight = this.children.reduce(
+			(height, child) => height + (child === this.messageList ? 0 : child.render(width).length),
+			0,
+		);
+		this.messageList.setHeightBudget((process.stdout.rows ?? 24) - chromeHeight);
+		return super.render(width);
 	}
 
 	getMessageList(): UserMessageList {
