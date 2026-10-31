@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { TuiAltScreen } from "../../tui/src/tui-alt-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { SessionInfo, SessionTreeNode } from "../src/core/session-manager.ts";
+import type { SessionEntry, SessionInfo, SessionTreeNode } from "../src/core/session-manager.ts";
 import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
 import { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
 import { UserMessageSelectorComponent } from "../src/modes/interactive/components/user-message-selector.ts";
@@ -278,6 +278,42 @@ describe("manual selector hover", () => {
 		});
 	}
 
+	it("tree all-mode selected backgrounds fill the width for every entry kind", async () => {
+		const base = { id: "entry", parentId: null, timestamp: new Date(0).toISOString() };
+		const entries: SessionEntry[] = [
+			node("entry", null).entry,
+			{ ...base, type: "model_change", provider: "test", modelId: "model" },
+			{ ...base, type: "thinking_level_change", thinkingLevel: "high" },
+			{ ...base, type: "compaction", summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1000 },
+			{ ...base, type: "branch_summary", fromId: "other", summary: "summary" },
+			{ ...base, type: "custom", customType: "test" },
+			{ ...base, type: "custom_message", customType: "test", content: "text", display: true },
+			{ ...base, type: "context_edit", targetId: "other", replacement: null },
+			{ ...base, type: "label", targetId: "other", label: "bookmark" },
+			{ ...base, type: "standing_instruction", key: "mode", content: "Plan" },
+			{ ...base, type: "session_info", name: "title" },
+			{ ...base, type: "session_info" },
+		];
+		for (const entry of entries) {
+			for (const width of [40, 100]) {
+				const selector = new TreeSelectorComponent(
+					[{ entry, children: [] }],
+					null,
+					30,
+					vi.fn(),
+					vi.fn(),
+					undefined,
+					"entry",
+					"all",
+				);
+				const lines = selector.getTreeList().render(width);
+				const cells = await backgrounds(lines, width);
+				expect(cells[0][0], entry.type).toBeDefined();
+				expect(cells[0], entry.type).toEqual(Array(width).fill(cells[0][0]));
+			}
+		}
+	});
+
 	it("tree folding removes the hovered descendant rather than transferring to its replacement", () => {
 		const selector = new TreeSelectorComponent(
 			[node("root", null, [node("branch", "root", [node("tip", "branch")]), node("other", "root")])],
@@ -345,6 +381,7 @@ describe("manual selector hover", () => {
 			expect(x).toBeGreaterThanOrEqual(2);
 			const baseCells = await backgrounds(before, width);
 			expect(baseCells[y][x - 1]).toBeDefined();
+			expect(baseCells[y]).toEqual(Array(width).fill(baseCells[y][0]));
 			expect(baseCells[y][x + 1]).toBe(baseCells[y][x - 1]);
 			const move = mouse(selector, `user: ${id}`, { type: "move", button: "none", x }, width);
 			const cells = await backgrounds(selector.render(width), width);

@@ -94,7 +94,11 @@ function renderHorizontalViewport(
 			horizontalScroll > 0
 				? `${row.gutter}${sliceByColumn(row.body, horizontalScroll, viewportWidth, true)}\x1b[0m`
 				: row.gutter + row.body;
-		return truncateToWidth(line, width, "");
+		const clipped = truncateToWidth(line, width, "");
+		// Pad after horizontal clipping so short selected rows fill the viewport too.
+		return row.isSelected
+			? clipped + theme.bg("selectedBg", " ".repeat(Math.max(0, width - visibleWidth(clipped))))
+			: clipped;
 	});
 	return { lines, horizontalScroll };
 }
