@@ -12,6 +12,7 @@ type RebindContext = {
 	updateAvailableProviderCount: () => Promise<void>;
 	updateEditorBorderColor: () => void;
 	updateTerminalTitle: () => void;
+	showFooterAfterRebind: (rebind: object | undefined) => void;
 };
 
 type InteractiveModePrototype = {
@@ -36,6 +37,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 
 		const subscribeToAgent = vi.fn();
 		const updateTerminalTitle = vi.fn();
+		const showFooterAfterRebind = vi.fn();
 		let bindCount = 0;
 
 		const context: RebindContext = {
@@ -51,6 +53,7 @@ describe("overlapping startup and replacement session rebinds", () => {
 			updateAvailableProviderCount: async () => {},
 			updateEditorBorderColor: () => {},
 			updateTerminalTitle,
+			showFooterAfterRebind,
 		};
 
 		const startupRebind = interactiveModePrototype.rebindCurrentSession.call(context);
@@ -69,11 +72,13 @@ describe("overlapping startup and replacement session rebinds", () => {
 
 		expect(subscribeToAgent).toHaveBeenCalledTimes(1);
 		expect(updateTerminalTitle).not.toHaveBeenCalled();
+		expect(showFooterAfterRebind).not.toHaveBeenCalled();
 
 		resolveReplacementBind();
 		await replacementRebind;
 
 		expect(subscribeToAgent).toHaveBeenCalledTimes(1);
 		expect(updateTerminalTitle).toHaveBeenCalledTimes(1);
+		expect(showFooterAfterRebind).toHaveBeenCalledExactlyOnceWith(undefined);
 	});
 });
