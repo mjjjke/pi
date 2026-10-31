@@ -144,3 +144,19 @@ describe("fork selector allocated height", () => {
 		}
 	});
 });
+
+describe("fork selector chrome with a short list", () => {
+	beforeAll(() => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+	});
+	it("keeps the chrome for a single message when its natural height fits", () => {
+		const selector = new UserMessageSelectorComponent([{ id: "a", text: "only prompt" }], vi.fn(), vi.fn());
+		const natural = selector.measureHeight(80);
+		const full = selector.render(80, natural).map(stripTerminalSequences);
+		expect(full.length).toBeLessThanOrEqual(natural);
+		expect(full.some((line) => line.includes("Fork from Message"))).toBe(true);
+		expect(full.some((line) => line.includes("only prompt"))).toBe(true);
+		expect(full.filter((line) => /─{10}/.test(line)).length).toBeGreaterThanOrEqual(2);
+	});
+});
