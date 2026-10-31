@@ -3,7 +3,7 @@ import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { renderComponent } from "./link-identity.ts";
 import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import { type Component, Container, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
 	extractAnsiCode,
 	getActiveBackgroundAnsi,
@@ -53,7 +53,7 @@ export interface ScrollbarGeometry {
 
 interface LayoutContext {
 	viewport: { width: number; height: number };
-	renderCache: Map<Component, Map<number, string[]>>;
+	renderCache: Map<Component, Map<string, string[]>>;
 	requestRender: () => void;
 	primaryScrollView: ScrollView | undefined;
 }
@@ -66,22 +66,40 @@ function intersect(a: LayoutRect, b: LayoutRect): LayoutRect {
 	return { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
 }
 
-function renderCached(context: LayoutContext, component: Component, width: number): string[] {
+function renderCached(context: LayoutContext, component: Component, width: number, height?: number): string[] {
 	const safeWidth = Math.max(1, Math.floor(width));
 	let widths = context.renderCache.get(component);
 	if (!widths) {
-		widths = new Map<number, string[]>();
+		widths = new Map<string, string[]>();
 		context.renderCache.set(component, widths);
 	}
-	let lines = widths.get(safeWidth);
+	const key = `${safeWidth}:${height ?? "natural"}`;
+	let lines = widths.get(key);
 	if (!lines) {
-		lines = renderComponent(component, safeWidth);
-		widths.set(safeWidth, lines);
+		lines = renderComponent(component, safeWidth, height);
+		widths.set(key, lines);
 	}
 	return lines;
 }
 
 function measureHeight(context: LayoutContext, component: Component, width: number): number {
+	if (component.measureHeight) return component.measureHeight(width);
+	const node = getLayoutNode(component);
+	if (node?.type === "vstack") {
+		const entries = visibleStackEntries(node.entries, context.viewport);
+		const heights = entries.map((entry) =>
+			typeof entry.basis === "number" ? entry.basis : measureHeight(context, entry.component, width),
+		);
+		return (
+			allocateStackSizes(entries, heights, undefined, node.gap).reduce((sum, size) => sum + size, 0) +
+			Math.max(0, entries.length - 1) * node.gap
+		);
+	}
+	// Plain containers concatenate children. Do not render their height-aware descendants
+	// provisionally: that would replace the final frame's mouse and hover geometry.
+	if (component instanceof Container && component.render === Container.prototype.render) {
+		return component.children.reduce((sum, child) => sum + measureHeight(context, child, width), 0);
+	}
 	return renderCached(context, component, width).length;
 }
 
@@ -116,8 +134,9 @@ function layoutComponent(
 	const safeWidth = Math.max(1, Math.floor(width));
 	const node = getLayoutNode(component);
 	if (!node) {
-		const lines = renderCached(context, component, safeWidth);
-		const allocatedHeight = height === undefined ? lines.length : Math.max(0, Math.floor(height));
+		const boundedHeight = height === undefined ? undefined : Math.max(0, Math.floor(height));
+		const lines = renderCached(context, component, safeWidth, boundedHeight);
+		const allocatedHeight = boundedHeight ?? lines.length;
 		let lineOffset = 0;
 		if (lines.length > allocatedHeight && allocatedHeight > 0) {
 			const cursorLine = lines.findIndex((line) => line.includes(CURSOR_MARKER));

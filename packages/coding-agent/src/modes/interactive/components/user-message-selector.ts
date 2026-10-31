@@ -27,6 +27,7 @@ class UserMessageList implements Component {
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
 	private maxVisible: number = 10; // Max messages visible
+	private heightBudget = Number.POSITIVE_INFINITY;
 	private readonly mouse = new ListMouse<string>({
 		isSelected: (key) => this.messages[this.selectedIndex]?.id === key,
 		select: (key) => {
@@ -55,9 +56,19 @@ class UserMessageList implements Component {
 		this.selectedIndex = initialIndex >= 0 ? initialIndex : Math.max(0, messages.length - 1);
 	}
 
+	measureHeight(): number {
+		return this.messages.length === 0
+			? 1
+			: Math.min(10, this.messages.length) * 3 + (this.messages.length > 10 ? 1 : 0);
+	}
+
 	setHeightBudget(height: number): void {
-		// Each item uses a message, metadata and separator; reserve the counter row.
-		this.maxVisible = Math.max(1, Math.min(10, Math.floor((height - 1) / 3)));
+		this.heightBudget = Math.max(0, height);
+		// Below four rows, omit the separator, then the counter, then metadata.
+		this.maxVisible =
+			this.messages.length <= 10 && this.messages.length * 3 <= height
+				? Math.max(1, this.messages.length)
+				: Math.max(1, Math.min(10, Math.floor((height - 1) / 3)));
 	}
 
 	invalidate(): void {
@@ -71,9 +82,10 @@ class UserMessageList implements Component {
 	render(width: number): string[] {
 		this.mouse.beginRows();
 		const lines: string[] = [];
+		if (this.heightBudget === 0) return this.mouse.paintHover(lines, width);
 
 		if (this.messages.length === 0) {
-			lines.push(theme.fg("muted", "  No user messages found"));
+			lines.push(truncateToWidth(theme.fg("muted", "  No user messages found"), width));
 			return this.mouse.paintHover(lines, width);
 		}
 
@@ -87,7 +99,7 @@ class UserMessageList implements Component {
 		// Render visible messages (2 lines per message + blank line)
 		for (let i = startIndex; i < endIndex; i++) {
 			const message = this.messages[i];
-			this.mouse.addRow(message.id, lines.length, 2);
+			this.mouse.addRow(message.id, lines.length, Math.min(2, this.heightBudget));
 			const isSelected = i === this.selectedIndex;
 
 			// Normalize message to single line
@@ -99,20 +111,20 @@ class UserMessageList implements Component {
 			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth);
 			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
 
-			lines.push(messageLine);
+			lines.push(truncateToWidth(messageLine, width));
 
 			// Second line: metadata (position in history)
 			const position = i + 1;
 			const metadata = `  Message ${position} of ${this.messages.length}`;
 			const metadataLine = theme.fg("muted", metadata);
-			lines.push(metadataLine);
-			lines.push(""); // Blank line between messages
+			if (this.heightBudget >= 2) lines.push(truncateToWidth(metadataLine, width));
+			if (this.heightBudget >= 4) lines.push(""); // Blank line between messages
 		}
 
 		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.messages.length) {
+		if (this.heightBudget >= 3 && (startIndex > 0 || endIndex < this.messages.length)) {
 			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.messages.length})`);
-			lines.push(scrollInfo);
+			lines.push(truncateToWidth(scrollInfo, width));
 		}
 
 		return this.mouse.paintHover(lines, width);
@@ -150,6 +162,7 @@ class UserMessageList implements Component {
  */
 export class UserMessageSelectorComponent extends Container {
 	private messageList: UserMessageList;
+	private readonly fullChildren: Component[];
 
 	constructor(
 		messages: UserMessageItem[],
@@ -183,6 +196,7 @@ export class UserMessageSelectorComponent extends Container {
 		// Add bottom border
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
+		this.fullChildren = [...this.children];
 
 		// Auto-cancel if no messages
 		if (messages.length === 0) {
@@ -190,12 +204,21 @@ export class UserMessageSelectorComponent extends Container {
 		}
 	}
 
-	render(width: number): string[] {
-		const chromeHeight = this.children.reduce(
-			(height, child) => height + (child === this.messageList ? 0 : child.render(width).length),
+	measureHeight(width: number): number {
+		return this.fullChildren.reduce(
+			(height, child) =>
+				height + (child === this.messageList ? this.messageList.measureHeight() : child.render(width).length),
 			0,
 		);
-		this.messageList.setHeightBudget((process.stdout.rows ?? 24) - chromeHeight);
+	}
+
+	render(width: number, height = this.measureHeight(width)): string[] {
+		const chromeHeight = this.measureHeight(width) - this.messageList.measureHeight();
+		// Preserve all chrome only when a complete item and counter still fit.
+		// Otherwise the list owns the viewport; the selection always has priority.
+		const showChrome = height >= chromeHeight + 4;
+		this.children = showChrome ? this.fullChildren : [this.messageList];
+		this.messageList.setHeightBudget(height - (showChrome ? chromeHeight : 0));
 		return super.render(width);
 	}
 

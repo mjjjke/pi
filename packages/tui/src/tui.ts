@@ -145,9 +145,13 @@ export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
 	 * @param width - Current viewport width
+	 * @param height - Allocated height in fullscreen layout; undefined during natural-size measurement
 	 * @returns Array of strings, each representing a line
 	 */
-	render(width: number): string[];
+	render(width: number, height?: number): string[];
+
+	/** Optional natural height measurement without changing rendered input/hover geometry. */
+	measureHeight?(width: number): number;
 
 	/** Optional handler for keyboard input when component has focus. */
 	handleInput?(data: string): void;
@@ -429,13 +433,14 @@ export class Container implements Component {
 		return undefined;
 	}
 
-	render(width: number): string[] {
+	render(width: number, height?: number): string[] {
 		const lines: string[] = [];
 		const mouseChildren: Array<{ component: Component; height: number }> = [];
 		const mouseTargets: TuiMouseDispatchTarget[] = [];
 		for (const child of this.children) {
 			const originY = lines.length;
-			const childLines = renderComponent(child, width);
+			// A single-child container is a transparent wrapper, including its height budget.
+			const childLines = renderComponent(child, width, this.children.length === 1 ? height : undefined);
 			mouseChildren.push({ component: child, height: childLines.length });
 			mouseTargets.push({ component: child, originX: 0, originY, width, height: childLines.length });
 			for (const line of childLines) {

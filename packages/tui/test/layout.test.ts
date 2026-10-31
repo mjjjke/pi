@@ -6,6 +6,7 @@ import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
 import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
+import { type Component, Container } from "../src/tui.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
@@ -13,6 +14,31 @@ function visibleLines(lines: string[]): string[] {
 }
 
 describe("viewport layout", () => {
+	it("passes allocated height through single-child wrappers without provisional input geometry", () => {
+		const rendered: Array<number | undefined> = [];
+		const responsive: Component = {
+			measureHeight: () => 30,
+			render: (_width, height) => {
+				rendered.push(height);
+				return [`selected at ${height}`, "metadata", "counter"];
+			},
+			invalidate: () => {},
+		};
+		const wrapper = new Container();
+		wrapper.addChild(responsive);
+		const root = new VStack([
+			{ component: new Text("transcript", 0, 0), basis: 0, grow: 1, minSize: 1 },
+			{ component: new VStack([wrapper, new Text("footer", 0, 0)]), minSize: 1 },
+		]);
+		const first = renderLayoutFrame(root, 40, 8, () => {});
+		assert.strictEqual(rendered.length, 1);
+		assert.ok(rendered[0] !== undefined && rendered[0] < 8);
+		assert.ok(first.lines.includes(`selected at ${rendered[0]}`));
+		renderLayoutFrame(root, 40, 12, () => {});
+		assert.strictEqual(rendered.length, 2);
+		assert.ok(rendered[1]! > rendered[0]!);
+	});
+
 	it("allocates vertical grow space deterministically", () => {
 		const frame = renderLayoutFrame(
 			new VStack([
