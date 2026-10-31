@@ -2,7 +2,7 @@ import { renderComponent } from "../link-identity.ts";
 import { recordMouseLayout } from "../mouse-layout.ts";
 import {
 	type Component,
-	dispatchMouseEvent,
+	forwardMouseEvent,
 	type TuiMouseDispatchResult,
 	type TuiMouseDispatchTarget,
 	type TuiMouseEvent,
@@ -101,7 +101,7 @@ export class Box implements Component {
 		let childY = 0;
 		for (const { component: child, height: childHeight } of mouseChildren) {
 			if (contentY >= childY && contentY < childY + childHeight) {
-				return dispatchMouseEvent(child, {
+				return forwardMouseEvent(child, {
 					...event,
 					x: contentX,
 					y: contentY - childY,

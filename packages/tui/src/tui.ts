@@ -86,11 +86,26 @@ export interface TuiMouseDispatchResult extends TuiMouseEventResult {
 	focusTarget?: Component;
 }
 
-/**
- * Dispatch an event to a component and retain the exact target and coordinate
- * transform. Containers use this when forwarding events to nested children.
- */
+const mouseLeaveOwner = Symbol("mouseLeaveOwner");
+type MouseDispatchEvent = TuiMouseEvent & { [mouseLeaveOwner]?: Component };
+
+/** Dispatch to an exact target, including leave notifications for a saved owner. */
 export function dispatchMouseEvent(component: Component, event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+	const targeted: MouseDispatchEvent =
+		event.type === "leave"
+			? { ...event, [mouseLeaveOwner]: (event as MouseDispatchEvent)[mouseLeaveOwner] ?? component }
+			: event;
+	return forwardMouseEvent(component, targeted);
+}
+
+/**
+ * Forward a hit-tested event and retain the exact target and coordinate transform.
+ * An addressed leave belongs only to its saved owner, never the current child.
+ * Unaddressed direct events retain transparent forwarding for synthetic callers.
+ */
+export function forwardMouseEvent(component: Component, event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+	const owner = (event as MouseDispatchEvent)[mouseLeaveOwner];
+	if (event.type === "leave" && owner && owner !== component) return undefined;
 	const result = component.handleMouse?.(event);
 	if (!result) return undefined;
 	if ("target" in result) {
@@ -401,7 +416,7 @@ export class Container implements Component {
 		let childY = 0;
 		for (const { component: child, height: childHeight } of mouseChildren) {
 			if (event.y >= childY && event.y < childY + childHeight) {
-				const result = dispatchMouseEvent(child, {
+				const result = forwardMouseEvent(child, {
 					...event,
 					y: event.y - childY,
 					height: childHeight,

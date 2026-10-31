@@ -1,6 +1,6 @@
 import { renderComponent } from "../link-identity.ts";
 import { recordMouseLayout } from "../mouse-layout.ts";
-import { type Component, dispatchMouseEvent, type TuiMouseEvent, type TuiMouseEventResult } from "../tui.ts";
+import { type Component, forwardMouseEvent, type TuiMouseEvent, type TuiMouseEventResult } from "../tui.ts";
 import { applyBackgroundSpan } from "../utils.ts";
 import { MouseRegion } from "./mouse-region.ts";
 
@@ -79,7 +79,7 @@ class ListMouseRegion extends MouseRegion {
 	}
 
 	override handleMouse(event: TuiMouseEvent) {
-		return dispatchMouseEvent(this.content, event) ?? this.onEvent(event);
+		return forwardMouseEvent(this.content, event) ?? this.onEvent(event);
 	}
 
 	override invalidate(): void {

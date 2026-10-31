@@ -2,7 +2,7 @@ import { renderComponent } from "../link-identity.ts";
 import { recordMouseLayout } from "../mouse-layout.ts";
 import {
 	type Component,
-	dispatchMouseEvent,
+	forwardMouseEvent,
 	type TuiMouseDispatchResult,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -27,7 +27,7 @@ export class MouseRegion implements Component {
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | TuiMouseEventResult | undefined {
-		const childResult = dispatchMouseEvent(this.child, event);
+		const childResult = forwardMouseEvent(this.child, event);
 		return childResult ?? this.onMouse(event);
 	}
 
