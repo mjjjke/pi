@@ -35,7 +35,7 @@ function event(type: TuiMouseEvent["type"], y = 4): TuiMouseEvent {
 		ctrl: false,
 	};
 }
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, withCounter = false) {
 	const terminal = new VirtualTerminal(40, 10);
 	const tui = new TuiAltScreen(terminal);
 	const editor = new Editor(tui, theme);
@@ -47,6 +47,7 @@ async function fixture(t: TestContext) {
 				{ value: "a", label: "A" },
 				{ value: "b", label: "B" },
 				{ value: "c", label: "C" },
+				...(withCounter ? [{ value: "d", label: "D" }] : []),
 			],
 		}),
 		applyCompletion: (lines, cursorLine, cursorCol) => {
@@ -54,6 +55,7 @@ async function fixture(t: TestContext) {
 			return { lines, cursorLine, cursorCol };
 		},
 	});
+	if (withCounter) editor.setAutocompleteMaxVisible(3);
 	editor.handleInput("/");
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	assert.equal(editor.isShowingAutocomplete(), true);
@@ -64,6 +66,37 @@ async function fixture(t: TestContext) {
 afterEach(() => setPointerHoverBackground(undefined));
 
 describe("Editor autocomplete hover forwarding", () => {
+	for (const exitRow of [0, 1, 2, 6, 8]) {
+		for (const returnRow of [4, 5]) {
+			it(`hovers on the first renderer re-entry from row ${exitRow} to ${returnRow}`, async (t) => {
+				setPointerHoverBackground(() => bg);
+				const { editor, terminal, tui } = await fixture(t, true);
+				const writes: string[] = [];
+				const write = terminal.write.bind(terminal);
+				terminal.write = (data) => {
+					writes.push(data);
+					write(data);
+				};
+				tui.addChild(editor);
+				tui.start();
+				tui.renderNow();
+				for (const renderBetween of [false, true]) {
+					terminal.sendInput("\x1b[<35;4;5M");
+					tui.renderNow();
+					assert.ok(tui.getScreenLines()[4].includes(bg));
+					terminal.sendInput(`\x1b[<35;4;${exitRow + 1}M`);
+					if (renderBetween) tui.renderNow();
+					writes.length = 0;
+					terminal.sendInput(`\x1b[<35;4;${returnRow + 1}M`);
+					tui.renderNow();
+					await terminal.flush();
+					assert.ok(tui.getScreenLines()[returnRow].includes(bg));
+					assert.ok(writes.join("").includes("\x1b]22;pointer\x1b\\"));
+					assert.equal(terminal.getViewport()[returnRow].trim(), returnRow === 4 ? "B" : "C");
+				}
+			});
+		}
+	}
 	for (const change of ["move", "content", "replace"] as const) {
 		it(`clears a nested autocomplete owner on ${change} without pointer motion`, async (t) => {
 			setPointerHoverBackground(() => bg);
@@ -138,7 +171,10 @@ describe("Editor autocomplete hover forwarding", () => {
 		assert.equal(editor.getText(), "/");
 		assert.deepEqual(editor.getCursor(), before);
 		assert.equal(activations(), 0);
-		assert.deepEqual(editor.handleMouse(event("move", 1)), { handled: true, render: true });
+		const cleared = editor.handleMouse(event("move", 1))!;
+		assert.equal(cleared.handled, true);
+		assert.equal(cleared.render, true);
+		assert.equal((cleared as { target?: { component: Component } }).target?.component instanceof SelectList, true);
 		assert.equal(move.hoverValid?.(), false);
 		assert.ok(editor.render(40).every((line) => !line.includes(bg)));
 		assert.equal(editor.handleMouse(event("move", 1)), undefined);

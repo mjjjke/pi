@@ -11,6 +11,7 @@ import {
 	renderFakeCursor,
 	retargetMouseEvent,
 	type TUI,
+	type TuiMouseDispatchResult,
 	type TuiMouseDispatchTarget,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -655,10 +656,12 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
-	private clearAutocompleteHover(): TuiMouseEventResult | undefined {
+	private clearAutocompleteHover(): TuiMouseDispatchResult | undefined {
 		const hover = this.autocompleteHover;
 		this.autocompleteHover = undefined;
-		return hover?.target.component.handleMouse?.({ ...hover.event, type: "leave" });
+		// Keep cleanup attributed to the exact child, not the Editor. Otherwise a
+		// body move becomes an Editor hover owner whose later leave clears re-entry.
+		return hover ? dispatchMouseEvent(hover.target.component, { ...hover.event, type: "leave" }) : undefined;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
