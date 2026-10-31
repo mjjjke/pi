@@ -7,6 +7,7 @@ import {
 	type Component,
 	dispatchMouseEvent,
 	retargetMouseEvent,
+	type TuiMouseDispatchResult,
 	type TuiMouseDispatchTarget,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
@@ -338,11 +339,12 @@ export class SettingsList implements Component {
 		}
 	}
 
-	private clearSubmenuHover(): TuiMouseEventResult | undefined {
+	private clearSubmenuHover(): TuiMouseDispatchResult | undefined {
 		const hover = this.submenuHover;
 		this.submenuHover = undefined;
-		// Notify the exact previous owner, even if its container has moved or replaced it.
-		return hover?.target.component.handleMouse?.({ ...hover.event, type: "leave" });
+		// Keep cleanup attributed to the exact previous child, even after it moves or
+		// is replaced. A parent-owned cleanup move would clear the next re-entry.
+		return hover ? dispatchMouseEvent(hover.target.component, { ...hover.event, type: "leave" }) : undefined;
 	}
 
 	private closeSubmenu(): void {
