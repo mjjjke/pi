@@ -11,6 +11,7 @@ import { grepRenderers } from "../src/core/tools/renderers/grep.ts";
 import { lsRenderers } from "../src/core/tools/renderers/ls.ts";
 import { readRenderers } from "../src/core/tools/renderers/read.ts";
 import { writeRenderers } from "../src/core/tools/renderers/write.ts";
+import { keyHint, keyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { configureLinkRendering } from "../src/utils/link-rendering.ts";
 
@@ -34,6 +35,8 @@ function context(args: unknown): ToolRenderContext<Record<string, unknown>, unkn
 		isError: false,
 		durationMs: undefined,
 		outputPad: 0,
+		keyText,
+		keyHint,
 	};
 }
 it("headers link the read range and compact row, write existence, file-only find/grep and edit refresh", () => {

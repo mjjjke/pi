@@ -18,7 +18,7 @@ import { openBrowser } from "../src/utils/open-browser.ts";
 
 vi.mock("../src/utils/open-browser.ts", () => ({ openBrowser: vi.fn() }));
 afterEach(() => vi.clearAllMocks());
-it("real user and assistant prompt zones survive the regular/exit-transcript sink", () => {
+it("regular rendering omits prompt zones without changing component output", () => {
 	initTheme("dark");
 	const terminal = new VirtualTerminal(80, 24);
 	const writes: string[] = [];
@@ -46,11 +46,18 @@ it("real user and assistant prompt zones survive the regular/exit-transcript sin
 			timestamp: 0,
 		}),
 	);
+	for (const zone of ["A", "B", "C"])
+		expect(
+			tui
+				.render(80)
+				.join("")
+				.match(new RegExp(`\\x1b\\]133;${zone}\\x07`, "g")),
+		).toHaveLength(2);
 	tui.start();
 	tui.renderNow();
 	tui.stop();
-	for (const zone of ["A", "B", "C"])
-		expect(writes.join("").match(new RegExp(`\\x1b\\]133;${zone}\\x07`, "g"))).toHaveLength(2);
+	// Upstream #11565 strips prompt zones so regular renders do not end OSC 7501 program status.
+	expect(writes.join("")).not.toContain("\x1b]133;");
 });
 it("assistant streaming defers only the growing final bare target, preserving delimiters and finalization", () => {
 	initTheme("dark");

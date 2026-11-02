@@ -1,4 +1,3 @@
-import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import {
@@ -13,17 +12,13 @@ import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { authorizeLinkTarget } from "../../utils/link-policy.ts";
 import { getEditorLinks } from "../../utils/link-rendering.ts";
-import { resolvePath } from "../../utils/paths.ts";
+import { resolvePath, shortenHomePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 import type { ToolRenderContext } from "../extensions/types.ts";
 
 export function shortenPath(path: unknown): string {
 	if (typeof path !== "string") return "";
-	const home = os.homedir();
-	if (path.startsWith(home)) {
-		return `~${path.slice(home.length)}`;
-	}
-	return path;
+	return shortenHomePath(path);
 }
 
 const toolLinkIds = new WeakMap<object, string>();

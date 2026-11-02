@@ -34,7 +34,7 @@ contextTokens >= contextWindow - reserveTokens
 
 It adopts a ready requested job, waits for a running one, or uses blocking compaction when no job is available. It never launches a background job automatically. `compaction.enabled: false` disables waiting/blocking safety-net actions, not installation of explicitly requested ready jobs.
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
+By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). It only decides when compaction starts. Summary requests use the model's output limit, reduced when needed so input and output fit the context window.
 
 During a multi-turn agent run, Pi checks the canonical projected context after tools finish and their results are appended, before starting the next assistant response. If the threshold is reached, Pi adopts, waits, or blocks during `prepareNextTurn`, before draining queued input. The admitted batch is then persisted before any request, even if a later hook stops the run. It skips this between-turn check when the completed tool batch terminates the run and no queued message requires another response. Pi also checks before a new user prompt and performs final-attempt overflow recovery after the low-level run ends.
 
@@ -463,7 +463,7 @@ Configure compaction in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settin
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable the hard-threshold safety net (never an automatic background launcher) |
-| `reserveTokens` | `16384` | Tokens to reserve for LLM response |
+| `reserveTokens` | `16384` | Free context tokens at or below which the hard-threshold safety net acts |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
 
 Disable the safety net with `"enabled": false`. Explicit `/compact` jobs still run and install when ready.
@@ -486,7 +486,7 @@ Use `compaction.modelOverrides` to tune token budgets for different models:
 }
 ```
 
-For a model with a 1M context window, this override activates the safety net at or over 600K tokens and keeps the ordinary 20000 recent tokens. Other models retain the ordinary 16384-token reserve. `reserveTokens` also influences summarization output limits, capped by the model's maximum output tokens; it is not solely a trigger threshold.
+For a model with a 1M context window, this override activates the safety net at or over 600K tokens and keeps the ordinary 20000 recent tokens. Other models retain the ordinary 16384-token reserve.
 
 Keys are exact, case-sensitive `provider/modelId` values, including any slashes within the model ID. Each `reserveTokens` and `keepRecentTokens` value falls back independently from the model override to the ordinary setting to the built-in default. Values must be non-negative safe integers. Invalid values in the matching model override produce an error when read; only omitted fields fall back to the ordinary setting. Model override entries must be objects. Invalid ordinary token settings produce an error when read, even if the active model has a valid override. Only omitted ordinary values use built-in defaults. `enabled` remains global, not model-specific.
 

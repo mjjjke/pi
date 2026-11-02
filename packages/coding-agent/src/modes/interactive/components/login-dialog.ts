@@ -7,9 +7,11 @@ import {
 	Spacer,
 	sanitizeTerminalText,
 	Text,
+	TruncatedText,
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { browserLink } from "../../../utils/browser-link.ts";
+import { copyToClipboard } from "../../../utils/clipboard.ts";
 import { authorizeBrowserUrl } from "../../../utils/link-policy.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
 import { theme } from "../theme/theme.ts";
@@ -41,6 +43,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 	private inputResolver?: (value: string) => void;
 	private inputRejecter?: (error: Error) => void;
+	private deviceCodeAction?: { info: OAuthDeviceCodeInfo; hint: Container };
+	private deviceCodeHint?: Container;
 	private onComplete: (success: boolean, message?: string) => void;
 
 	// Focusable implementation - propagate to input for IME cursor positioning
@@ -106,8 +110,17 @@ export class LoginDialogComponent extends Container implements Focusable {
 		);
 	}
 
+	private clearDeviceCodeAction(): void {
+		if (this.deviceCodeHint) {
+			this.contentContainer.removeChild(this.deviceCodeHint);
+		}
+		this.deviceCodeHint = undefined;
+		this.deviceCodeAction = undefined;
+	}
+
 	private cancel(): void {
 		if (this.signal.aborted) return;
+		this.clearDeviceCodeAction();
 		this.abortController.abort();
 		if (this.inputRejecter) {
 			this.inputRejecter(new Error("Login cancelled"));
@@ -121,6 +134,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Called by onAuth callback - show URL and optional instructions
 	 */
 	showAuth(url: string, instructions?: string): void {
+		this.clearDeviceCodeAction();
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
 		this.authUrl = new AuthUrlComponent(this.tui, url);
@@ -141,6 +155,12 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showDeviceCode(info: OAuthDeviceCodeInfo): void {
 		this.authUrl = undefined;
+		info = {
+			...info,
+			openBrowserOnConfirm: info.openBrowserOnConfirm ?? true,
+			copyCodeOnConfirm: info.copyCodeOnConfirm ?? true,
+		};
+		this.clearDeviceCodeAction();
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
 		const linkedUrl = browserLink(info.verificationUri, info.verificationUri);
@@ -154,7 +174,44 @@ export class LoginDialogComponent extends Container implements Focusable {
 			new Text(theme.fg("warning", `Enter code: ${sanitizeTerminalText(info.userCode)}`), 1, 0),
 		);
 
+		if (!this.signal.aborted && (info.openBrowserOnConfirm || info.copyCodeOnConfirm)) {
+			const actionLabel = info.openBrowserOnConfirm
+				? info.copyCodeOnConfirm
+					? "to open browser and copy code"
+					: "to open browser"
+				: "to copy code";
+			// Reuse this single row for progress/result text, including in narrow terminals.
+			const hint = new Container();
+			hint.addChild(new TruncatedText(`(${keyHint("tui.select.confirm", actionLabel)})`, 1, 0));
+			this.contentContainer.addChild(hint);
+			this.deviceCodeHint = hint;
+			this.deviceCodeAction = { info, hint };
+		}
 		this.tui.requestRender();
+	}
+
+	private setDeviceCodeStatus(hint: Container, message: string): void {
+		if (this.signal.aborted || !this.focused || !this.contentContainer.children.includes(hint)) return;
+		hint.children = [new TruncatedText(theme.fg("dim", message), 1, 0)];
+		this.tui.requestRender();
+	}
+
+	private activateDeviceCode(info: OAuthDeviceCodeInfo, hint: Container): void {
+		this.setDeviceCodeStatus(hint, info.copyCodeOnConfirm ? "Copying code..." : "Browser open requested");
+		if (info.copyCodeOnConfirm) {
+			// Do not delay polling or browser opening while clipboard tools are running.
+			void copyToClipboard(info.userCode)
+				.then(() => this.setDeviceCodeStatus(hint, "Code copied to clipboard"))
+				.catch(() => this.setDeviceCodeStatus(hint, "Copy code manually"));
+		}
+		if (info.openBrowserOnConfirm) {
+			try {
+				const target = authorizeBrowserUrl(info.verificationUri);
+				if (target !== undefined) openBrowser(target);
+			} catch {
+				// Launcher failures must not interrupt login.
+			}
+		}
 	}
 
 	/**
@@ -162,6 +219,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showManualInput(prompt: string): Promise<string> {
 		if (this.signal.aborted) return Promise.reject(new Error("Login cancelled"));
+		this.clearDeviceCodeAction();
 		this.input.setValue("");
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("dim", prompt), 1, 0));
@@ -181,6 +239,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showPrompt(message: string, placeholder?: string): Promise<string> {
 		if (this.signal.aborted) return Promise.reject(new Error("Login cancelled"));
+		this.clearDeviceCodeAction();
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
 		if (placeholder) {
@@ -207,6 +266,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/** Show informational text before another login step. */
 	showDetails(lines: string[]): void {
 		this.authUrl = undefined;
+		this.clearDeviceCodeAction();
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
 		for (const line of lines) {
@@ -258,6 +318,21 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 		if (this.authUrl && kb.matches(data, "app.message.copy")) {
 			void this.authUrl.copy();
+			return;
+		}
+
+		if (
+			this.deviceCodeAction &&
+			!this.inputResolver &&
+			!this.signal.aborted &&
+			this.focused &&
+			kb.matches(data, "tui.select.confirm")
+		) {
+			const action = this.deviceCodeAction;
+			// Consume once so a repeated Enter cannot launch multiple browsers or clipboard writes.
+			this.deviceCodeAction = undefined;
+			this.activateDeviceCode(action.info, action.hint);
+			this.tui.requestRender();
 			return;
 		}
 

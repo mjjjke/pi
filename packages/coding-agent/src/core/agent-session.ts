@@ -194,6 +194,18 @@ import {
 	type VirtualModelStateData,
 } from "./virtual-models.ts";
 
+/**
+ * Stream functions that resolve auth through a given ModelRuntime themselves, such as the one
+ * createAgentSession installs. Summaries sent through them must not pass pre-resolved credentials:
+ * the runtime would take them as an explicit API key instead of the stored OAuth login (#11520).
+ */
+const runtimeStreamFunctions = new WeakMap<StreamFn, ModelRuntime>();
+
+/** Mark `streamFn` as resolving auth through `modelRuntime` on its own. */
+export function markRuntimeStreamFunction(streamFn: StreamFn, modelRuntime: ModelRuntime): void {
+	runtimeStreamFunctions.set(streamFn, modelRuntime);
+}
+
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
@@ -659,7 +671,6 @@ export class AgentSession {
 	private _admissionClosed = false;
 	private readonly _boundaryDispatchedMessages = new WeakSet<object>();
 	private _lastAssistantMessage: AssistantMessage | undefined;
-	private _lastAssistantToolResults: AgentMessage[] = [];
 	private _lastActivityOutcome: AgentActivityOutcome = "completed";
 	private _isBeforeSettle = false;
 	private _abortDuringBeforeSettle = false;
@@ -1189,6 +1200,9 @@ export class AgentSession {
 			: { model: selectedModel, thinkingLevel: captured.thinkingLevel };
 		if (captured.streamFunction === streamSimple) {
 			return { ...(await this._getRequiredRequestAuth(model, signal)), thinkingLevel };
+		}
+		if (runtimeStreamFunctions.get(captured.streamFunction) === this._modelRuntime) {
+			return { model, thinkingLevel };
 		}
 
 		try {
@@ -2392,7 +2406,6 @@ export class AgentSession {
 		// extension and listener dispatch above also picks up messages that turn_end
 		// handlers queued.
 		if (event.type === "turn_end") {
-			this._lastAssistantToolResults = event.toolResults;
 			if (!this._agentRunAbortRequested) this._flushPendingCustomMessages({ keepCompactionNotices: true });
 		}
 	};
@@ -2528,7 +2541,24 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private async _omitRecoveryAttempt(message: AssistantMessage, toolResults: AgentMessage[] = []): Promise<void> {
+	/**
+	 * Persistently omit a failed attempt and its tool results from model context. Results are
+	 * found in the projected context, so the pair stays together whether the attempt comes from
+	 * the current run or a resumed session. An unpaired result fails the next request (#11227).
+	 */
+	private async _omitRecoveryAttempt(message: AssistantMessage): Promise<void> {
+		const toolCallIds = new Set(message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
+		// A context edit replaces the projected copy, so match it by source entry as well.
+		const entryId = this._findPersistedMessageEntryId(message);
+		const messages = this.agent.state.messages;
+		const index = messages.findIndex(
+			(m) => m === message || (entryId !== undefined && this._entryIdsByMessage.get(m) === entryId),
+		);
+		const toolResults: AgentMessage[] = [];
+		for (const m of index < 0 ? [] : messages.slice(index + 1)) {
+			if (m.role === "assistant") break;
+			if (m.role === "toolResult" && toolCallIds.has(m.toolCallId)) toolResults.push(m);
+		}
 		const targets = [message, ...toolResults];
 		const targetIds = targets.map((target) => this._findPersistedMessageEntryId(target));
 		const unresolvedProjectedTarget = targets.some(
@@ -2938,9 +2968,14 @@ export class AgentSession {
 	 * the registered, non-hidden ones; they are declared to the model. Active tools with a
 	 * `prepareLoadout` hook can change the declared descriptions and hide declarations from
 	 * requests (see {@link _installHiddenDeclarationsProjection}).
+	 *
+	 * The active tools are a set: tools that stay active keep their current order and newly active
+	 * ones are appended, so reordering the same names does not change the prompt (#11495).
 	 */
 	private _applyToolLoadout(toolNames: string[]): AgentTool[] {
-		const tools = [...new Set(toolNames)].flatMap((name) => {
+		const requested = new Set(toolNames);
+		const kept = this.getActiveToolNames().filter((name) => requested.has(name));
+		const tools = [...new Set([...kept, ...requested])].flatMap((name) => {
 			const tool = this._toolRegistry.get(name);
 			return tool && this._getToolExposure(name) !== "hidden" && this._isActivatable(name) ? [tool] : [];
 		});
@@ -3189,6 +3224,7 @@ export class AgentSession {
 		options?: { includeAllExtensionTools?: boolean },
 	): void {
 		this._pendingToolNames.clear();
+		// Projection includes the latest compaction or branch-summary checkpoint and all later changes.
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
 		const extensionToolNames = options?.includeAllExtensionTools ? this._defaultActiveExtensionToolNames : [];
@@ -3196,7 +3232,10 @@ export class AgentSession {
 			[...(current.toolsAdded ?? []).map((tool) => tool.name), ...extensionToolNames],
 			modifiers,
 		);
+		// Recorded tools that are not registered yet, such as MCP tools of servers still connecting, are
+		// activated when they register. Excluded tools never register, so they are not kept pending.
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
+		// Ignores names that are not registered.
 		this._setActiveTools(names);
 	}
 
@@ -3543,7 +3582,7 @@ export class AgentSession {
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) {
-			await this._checkCompaction(lastAssistant, false, [], "desired");
+			await this._checkCompaction(lastAssistant, false, "desired");
 		}
 		this._throwIfRunStopped();
 
@@ -3601,9 +3640,7 @@ export class AgentSession {
 
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const message = this._lastAssistantMessage;
-		const toolResults = this._lastAssistantToolResults;
 		this._lastAssistantMessage = undefined;
-		this._lastAssistantToolResults = [];
 		if (this._agentRunAbortRequested) {
 			this._finishCancelledRetry();
 			return false;
@@ -3630,7 +3667,7 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(message, true, toolResults, "desired")) {
+		if (await this._checkCompaction(message, true, "desired")) {
 			return !this._agentRunAbortRequested;
 		}
 
@@ -5461,7 +5498,6 @@ export class AgentSession {
 	private async _checkCompaction(
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
-		toolResults: AgentMessage[] = [],
 		carry: CompactionCarry = "delivered",
 	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings(this.model);
@@ -5555,7 +5591,7 @@ export class AgentSession {
 
 			// Persistently omit the selected final attempt before post-run recovery compaction.
 			this._overflowRecoveryAttempted = true;
-			await this._omitRecoveryAttempt(assistantMessage, toolResults);
+			await this._omitRecoveryAttempt(assistantMessage);
 			// The omission's context-change handlers are awaited: an abort, disposal or refused write meanwhile
 			// must not start the recovery compaction.
 			if (this._agentRunAbortRequested || this._disposed || this._isSessionWriteBlocked()) return false;

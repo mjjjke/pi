@@ -66,7 +66,7 @@ describe("pi-fast-mode capability detection", () => {
 		});
 		expect(generatedModel("anthropic", "claude-opus-4-7").capabilities?.fastMode).toBeUndefined();
 		expect(generatedModel("anthropic", "claude-opus-4-6").capabilities?.fastMode).toBeUndefined();
-		expect(generatedModel("openai-codex", "gpt-5.5").capabilities?.fastMode).toEqual({
+		expect(generatedModel("openai-codex", "gpt-6-luna").capabilities?.fastMode).toEqual({
 			provider: "openai-codex",
 			body: { service_tier: "priority" },
 		});

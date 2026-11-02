@@ -1,6 +1,6 @@
 // Fork-only: model capabilities and compat flags the fork adds to generated model data
 // (fast mode, mid-conversation developer instructions, progress updates, mid-conversation
-// system messages). Shared by generate-models.ts and pin-release-model-data.ts so live
+// system messages). Shared by catalog/generate.ts and pin-release-model-data.ts so live
 // generation and release pinning produce the same metadata. See FORK.md.
 import {
 	anthropicSupportsMidConversationInstructions,
@@ -65,9 +65,13 @@ export function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities |
 }
 
 // First-party OpenAI models whose upstream data lacks `supportsMidConvoSystemMessages` although
-// they accept developer messages mid-conversation, which is how their transport renders later
-// system updates. Without the flag the fork refuses those updates (assertSystemUpdatesSupported).
-const FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS = new Set(["openai:gpt-5.4-nano", "openai:gpt-5.5-pro"]);
+// the fork capability policy marks them for developer messages. Their transport renders later
+// system updates as developer messages; without this flag the fork refuses those updates.
+const FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS = new Set([
+	"openai:gpt-5.4-nano",
+	"openai:gpt-5.5-pro",
+	"openai:gpt-5.6-cyber",
+]);
 
 /** Fork compat patch: flags the fork sets on top of the upstream data. */
 export function getGeneratedCompat(model: Model<Api>): Model<Api>["compat"] {

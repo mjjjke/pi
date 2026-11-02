@@ -42,6 +42,7 @@ function footerRebindHarness(height = 1) {
 		defaultEditor: {},
 		editor: { render: () => [], invalidate() {} },
 		editorContainer: new Container(),
+		extensionDialogs: [],
 		ui: {
 			terminal: { columns: 80 },
 			hideOverlay: vi.fn(),

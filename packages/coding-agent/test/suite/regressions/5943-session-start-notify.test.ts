@@ -85,6 +85,7 @@ type ReloadCommandContext = {
 	defaultEditor: { setPaddingX: (padding: number) => void; setAutocompleteMaxVisible: (maxVisible: number) => void };
 	themeController: { applyFromSettings: () => Promise<void> };
 	resetExtensionUI: () => void;
+	clearEditorContainer: () => void;
 	createRuntimeSwitchBox: (message: string, height: number) => Container;
 	showFooterAfterRebind: () => void;
 	applyRuntimeSettings: () => void;
@@ -164,6 +165,9 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
 		customHeader: overrides.customHeader,
 		builtInHeader: overrides.builtInHeader,
 		resetExtensionUI: overrides.resetExtensionUI ?? (() => {}),
+		clearEditorContainer() {
+			this.editorContainer.clear();
+		},
 		createRuntimeSwitchBox: interactiveModePrototype.createRuntimeSwitchBox,
 		showFooterAfterRebind: () => {},
 		applyRuntimeSettings: () => {},

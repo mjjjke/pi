@@ -90,17 +90,19 @@ describe("pin-release-model-data", () => {
 	it("sets supportsMidConvoSystemMessages for the first-party OpenAI models of the fork compat patch", () => {
 		const nano = model({ id: "gpt-5.4-nano", provider: "openai", api: "openai-responses" });
 		const pro = model({ id: "gpt-5.5-pro", provider: "openai", api: "openai-responses" });
+		const cyber = model({ id: "gpt-5.6-cyber", provider: "openai", api: "openai-responses" });
 		const other = model({ id: "gpt-5.4-nano", provider: "openrouter", api: "openai-completions" });
 		const write = (file: string, value: unknown) =>
 			writeFileSync(join(sourceDir, file), `${JSON.stringify(value)}\n`);
 		write("openai.json", {
-			"openai-responses": { [`chat:${nano.id}`]: nano, [`chat:${pro.id}`]: pro },
+			"openai-responses": { [`chat:${nano.id}`]: nano, [`chat:${pro.id}`]: pro, [`chat:${cyber.id}`]: cyber },
 		});
 		write("openrouter.json", { "openai-completions": { [`chat:${other.id}`]: other } });
 		const pinned = buildPinnedModelData(sourceDir, ["anthropic", "openai", "openai-codex", "openrouter", "xai"]);
 		const openai = JSON.parse(pinned.fileContents["openai.json"])["openai-responses"];
 		expect(openai[`chat:${nano.id}`].compat).toEqual({ supportsMidConvoSystemMessages: true });
 		expect(openai[`chat:${pro.id}`].compat).toEqual({ supportsMidConvoSystemMessages: true });
+		expect(openai[`chat:${cyber.id}`].compat).toEqual({ supportsMidConvoSystemMessages: true });
 		const openrouter = JSON.parse(pinned.fileContents["openrouter.json"])["openai-completions"];
 		expect(openrouter[`chat:${other.id}`].compat).toBeUndefined();
 		const patched = structuredClone(nano);
@@ -108,8 +110,8 @@ describe("pin-release-model-data", () => {
 		expect(patched).toEqual(openai[`chat:${nano.id}`]);
 	});
 
-	it("generate-models applies the same fork patch", () => {
-		const source = readFileSync(join(import.meta.dirname, "../scripts/generate-models.ts"), "utf8");
+	it("catalog generation applies the same fork patch", () => {
+		const source = readFileSync(join(import.meta.dirname, "../catalog/generate.ts"), "utf8");
 		expect(source).toContain("applyForkModelData(model)");
 		expect(source).not.toContain("getGeneratedCapabilities(model)");
 	});

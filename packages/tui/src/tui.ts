@@ -166,6 +166,12 @@ export interface Component {
 	wantsKeyRelease?: boolean;
 
 	/**
+	 * If true while focused, fullscreen viewport keys (`tui.altScreen.*` scrolling and prompt jumps) go to this
+	 * component instead of scrolling the transcript, as they do for a focused overlay. Default is false.
+	 */
+	capturesViewportInput?: boolean;
+
+	/**
 	 * Invalidate any cached rendering state.
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
@@ -614,6 +620,29 @@ export abstract class TuiBase extends Container implements TUI {
 
 	protected afterTerminalStop(_options: TuiStopOptions): void {}
 
+	/** Mode resets written before the terminal's own resets when the process exits without stop(). */
+	protected getExitRestorePrefix(): string {
+		return `${this.terminalColorSchemeNotificationsEnabled ? "\x1b[?2031l" : ""}\x1b[?25h`;
+	}
+
+	/** Mode resets written after the terminal's own resets when the process exits without stop(). */
+	protected getExitRestoreSuffix(): string {
+		return "";
+	}
+
+	/**
+	 * Last-resort restore for exit paths that skip stop(), e.g. a direct process.exit() (#11170).
+	 * Hard kills and native aborts run no JavaScript and cannot be covered.
+	 */
+	private readonly exitRestoreHandler = (): void => {
+		if (this.stopped) return;
+		try {
+			this.terminal.restoreOnExit?.(this.getExitRestorePrefix(), this.getExitRestoreSuffix());
+		} catch {
+			// Never throw from an exit handler.
+		}
+	};
+
 	get fullRedraws(): number {
 		return this.fullRedrawCount;
 	}
@@ -990,6 +1019,8 @@ export abstract class TuiBase extends Container implements TUI {
 	start(): void {
 		const generation = ++this.lifecycleGeneration;
 		this.stopped = false;
+		process.off("exit", this.exitRestoreHandler);
+		process.on("exit", this.exitRestoreHandler);
 		this.beforeTerminalStart();
 		if (generation !== this.lifecycleGeneration) return;
 		this.terminal.start(
@@ -1058,6 +1089,7 @@ export abstract class TuiBase extends Container implements TUI {
 	stop(options: TuiStopOptions = {}): void {
 		const generation = ++this.lifecycleGeneration;
 		this.stopped = true;
+		process.off("exit", this.exitRestoreHandler);
 		this.cancelRenderTimer();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");

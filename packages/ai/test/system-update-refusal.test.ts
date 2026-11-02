@@ -162,7 +162,7 @@ describe("lazyApi refusal", () => {
 		["Mistral", () => model("mistral-conversations")],
 		["Chat Completions", () => model("openai-completions")],
 		["Responses", () => model("openai-responses")],
-		["openai-codex/gpt-5.3-codex-spark", () => getModel("openai-codex", "gpt-5.3-codex-spark") as Model<Api>],
+		["Codex without system-update support", () => model("openai-codex-responses", { provider: "openai-codex" })],
 		["anthropic/claude-haiku-4-5", () => getModel("anthropic", "claude-haiku-4-5") as Model<Api>],
 	];
 

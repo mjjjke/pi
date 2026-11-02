@@ -222,6 +222,7 @@ describe("tool renderer decorators", () => {
 		);
 		const row = createRow("read", { path: "notes.txt" }, definition);
 		row.updateArgs({ path: "notes.txt", offset: 1 });
+		renderText(row); // Argument updates are applied at the next render upstream.
 		row.updateArgs({ path: "notes.txt", offset: 1, limit: 5 });
 
 		const rendered = renderText(row);
@@ -529,6 +530,7 @@ describe("tool renderer decorators", () => {
 			),
 		);
 		row.updateArgs({ value: 2 });
+		expect(renderText(row)).not.toContain("base call");
 		row.updateArgs({ value: 3 });
 
 		expect(renderText(row)).toContain("base call");

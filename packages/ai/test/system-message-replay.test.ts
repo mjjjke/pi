@@ -92,7 +92,7 @@ describe("system message replay", () => {
 		const update: Message = { role: "system", content: "Later update", timestamp: 5 };
 		expect(getInitialSystemMessage([initial, boundary, user, update])).toBe(initial);
 		expect(withoutInitialSystemMessage([initial, boundary, user, update])).toEqual([boundary, user, update]);
-		expect(resolveTranscriptTools([initial, boundary, user], true).requestTools).toEqual([tool("read")]);
+		expect(resolveTranscriptTools([initial, boundary, user], "additions").requestTools).toEqual([tool("read")]);
 		expect(getInitialSystemMessage([boundary, initial, user])).toBeUndefined();
 		expect(getInitialSystemMessage([user, initial])).toBeUndefined();
 		expect(withoutInitialSystemMessage([boundary, initial, user])).toEqual([boundary, initial, user]);

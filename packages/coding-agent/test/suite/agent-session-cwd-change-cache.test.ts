@@ -78,19 +78,21 @@ async function wire(context: Context, transport: "anthropic" | "responses", addi
 }
 
 function prefix(before: string, after: string, transport: "anthropic" | "responses", tools = true) {
+	const hasTools = Object.hasOwn(JSON.parse(before), "tools");
+	if (tools && !hasTools) expect(JSON.parse(after)).not.toHaveProperty("tools");
 	expectPromptPrefixStable(
 		before,
 		after,
 		transport === "anthropic"
 			? {
-					fixed: ["system", ...(tools ? ["tools"] : [])],
+					fixed: ["system", ...(tools && hasTools ? ["tools"] : [])],
 					history: "messages",
 					normalize: (raw, path, length) =>
 						path === `messages[${length - 1}]`
 							? raw.replace(/,"cache_control":\{"type":"ephemeral"\}(\}\]\})$/, "$1")
 							: raw,
 				}
-			: { fixed: ["instructions", ...(tools ? ["tools"] : [])], history: "input" },
+			: { fixed: ["instructions", ...(tools && hasTools ? ["tools"] : [])], history: "input" },
 	);
 }
 
@@ -198,7 +200,7 @@ describe("cwd final-wire cache contract", () => {
 		},
 	);
 
-	it("a capable Responses model after an earlier removal uses one full-list change for an addition", async () => {
+	it("a capable Responses model anchors additions after an earlier removal without rewriting history", async () => {
 		let destination = false;
 		const f = await cwdFixture({
 			extension: (pi) => {
@@ -228,8 +230,13 @@ describe("cwd final-wire cache contract", () => {
 			await f.runtime.session.prompt("addition after removal");
 			await f.runtime.session.prompt("stable");
 			const bodies = await Promise.all(contexts.slice(1).map((context) => wire(context, "responses")));
-			expect(JSON.parse(bodies[0]!).tools).not.toEqual(JSON.parse(bodies[1]!).tools);
-			prefix(bodies[0]!, bodies[1]!, "responses", false);
+			expect(JSON.parse(bodies[1]!).input).toContainEqual(
+				expect.objectContaining({
+					type: "additional_tools",
+					tools: expect.arrayContaining([expect.objectContaining({ name: "added" })]),
+				}),
+			);
+			prefix(bodies[0]!, bodies[1]!, "responses");
 			prefix(bodies[1]!, bodies[2]!, "responses");
 		} finally {
 			await f.cleanup();
@@ -237,7 +244,7 @@ describe("cwd final-wire cache contract", () => {
 	});
 
 	it.each(["add", "remove", "redefine"] as const)(
-		"tool %s is appended on Anthropic; Responses accepts full-list changes and stabilizes",
+		"tool %s is anchored on Anthropic and capable Responses without rewriting history",
 		async (change) => {
 			let destination = false;
 			const f = await cwdFixture({
@@ -267,10 +274,12 @@ describe("cwd final-wire cache contract", () => {
 				await f.runtime.session.prompt("stable");
 				for (const transport of ["anthropic", "responses"] as const) {
 					const bodies = await Promise.all(contexts.map((context) => wire(context, transport)));
-					prefix(bodies[0]!, bodies[1]!, transport, transport === "anthropic" || change === "add");
+					prefix(bodies[0]!, bodies[1]!, transport);
 					prefix(bodies[1]!, bodies[2]!, transport);
-					if (transport === "responses" && change !== "add")
-						expect(JSON.parse(bodies[0]!).tools).not.toEqual(JSON.parse(bodies[1]!).tools);
+					if (transport === "responses" && change === "remove")
+						expect(JSON.stringify(JSON.parse(bodies[1]!).input)).toContain(
+							"The following tools are no longer available",
+						);
 				}
 				if (change === "add") {
 					const bodies = await Promise.all(contexts.map((context) => wire(context, "responses", false)));

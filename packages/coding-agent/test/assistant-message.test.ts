@@ -1,12 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { getOsc8LinkAtColumn, setCapabilities, TuiAltScreen, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { getProgressUpdateIndices } from "../src/modes/interactive/components/progress-update.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import * as syntaxHighlight from "../src/utils/syntax-highlight.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -95,6 +96,68 @@ describe("AssistantMessageComponent", () => {
 			}
 		},
 	);
+	test("keeps repeated Markdown block links distinct when blocks are cached", () => {
+		initTheme("dark");
+		setCapabilities({ images: null, hyperlinks: true, trueColor: true });
+		const paragraph = "[repeated](https://ok.test/)";
+		const message = (count: number) =>
+			createAssistantMessage([{ type: "text", text: Array(count).fill(paragraph).join("\n\n") }]);
+		const component = new AssistantMessageComponent(message(3));
+		const ids = () =>
+			component
+				.render(80)
+				.map((line) => getOsc8LinkAtColumn(line, 1)?.id)
+				.filter((id): id is string => id !== undefined);
+		const original = ids();
+		expect(original).toHaveLength(3);
+		expect(new Set(original).size).toBe(3);
+		component.updateContent(message(4), true);
+		expect(ids().slice(0, 3)).toEqual(original);
+		expect(new Set(ids()).size).toBe(4);
+	});
+
+	test("admits a trailing bare link when a reused Markdown slot stops streaming", () => {
+		initTheme("dark");
+		setCapabilities({ images: null, hyperlinks: true, trueColor: true });
+		const message = createAssistantMessage([{ type: "text", text: "https://ok.test/" }]);
+		const component = new AssistantMessageComponent();
+		component.updateContent(message, true);
+		expect(component.render(80).some((line) => getOsc8LinkAtColumn(line, 1))).toBe(false);
+		component.updateContent(message, false);
+		expect(component.render(80).some((line) => getOsc8LinkAtColumn(line, 1)?.url === "https://ok.test/")).toBe(true);
+	});
+
+	afterEach(() => vi.restoreAllMocks());
+
+	test("reuses its Markdown across streaming and its end, and renders like a new component after a theme change", () => {
+		initTheme("dark");
+		const highlight = vi.spyOn(syntaxHighlight, "highlight");
+		const streaming: boolean[] = [];
+		const code = "```ts\nconst a = 1;\n```";
+		const content = (text: string): AssistantMessage["content"] => [
+			{ type: "thinking", thinking: "Thinking with **bold** text" },
+			{ type: "text", text },
+		];
+		const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", 1, [
+			(markdown, { isStreaming }) => {
+				streaming.push(isStreaming);
+				return markdown;
+			},
+		]);
+		component.updateContent(createAssistantMessage(content(code)), true);
+		component.render(80);
+		const message = createAssistantMessage(content(`${code}\n\nThe end.`));
+		component.updateContent(message, false);
+		component.render(80);
+		expect(highlight).toHaveBeenCalledTimes(1);
+		expect(streaming.at(-1)).toBe(false);
+
+		initTheme("light");
+		component.invalidate();
+		expect(component.render(80)).toEqual(new AssistantMessageComponent(message).render(80));
+		initTheme("dark");
+	});
+
 	test("adds OSC 133 zone markers to assistant messages without tool calls", () => {
 		initTheme("dark");
 
@@ -151,6 +214,48 @@ describe("AssistantMessageComponent", () => {
 
 		expect(rendered.match(/Thinking\.\.\./g)).toHaveLength(1);
 		expect(rendered).toContain("answer");
+	});
+
+	test("renders nothing for hidden thinking with an empty label", () => {
+		initTheme("dark");
+
+		const thinkingOnly = new AssistantMessageComponent(
+			createAssistantMessage(
+				[
+					{ type: "thinking", thinking: "reasoning" },
+					{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "file.txt" } },
+				],
+				{ stopReason: "toolUse" },
+			),
+			true,
+			undefined,
+			"",
+		);
+		expect(thinkingOnly.render(80)).toEqual([]);
+
+		const withText = new AssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "reasoning" },
+				{ type: "text", text: "answer" },
+			]),
+			true,
+			undefined,
+			"",
+		);
+		expect(withText.render(80).map((line) => stripAnsi(line).trim())).toEqual(["", "answer"]);
+	});
+
+	test("keeps label row and spacing for hidden thinking with a label", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "reasoning" },
+				{ type: "text", text: "answer" },
+			]),
+			true,
+		);
+		expect(component.render(80).map((line) => stripAnsi(line).trim())).toEqual(["", "Thinking...", "", "answer"]);
 	});
 
 	test("collapses individual thinking runs when clicked", () => {

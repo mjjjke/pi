@@ -33,6 +33,7 @@ export function mouseHost(
 		ui,
 		editor,
 		editorContainer,
+		extensionDialogs: [],
 		keybindings: new KeybindingsManager(),
 		programStatus: { setBlocked: vi.fn() },
 		runtimeHost: { session: { modelRuntime: { logout } } },

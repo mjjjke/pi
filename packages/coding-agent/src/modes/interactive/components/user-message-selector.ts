@@ -2,6 +2,7 @@ import {
 	type Component,
 	Container,
 	getKeybindings,
+	getSelectPageIndex,
 	ListMouse,
 	Spacer,
 	Text,
@@ -22,6 +23,7 @@ interface UserMessageItem {
  * Custom user message list component with selection
  */
 class UserMessageList implements Component {
+	readonly capturesViewportInput: boolean = true;
 	private messages: UserMessageItem[] = [];
 	private selectedIndex: number = 0;
 	public onSelect?: (entryId: string) => void;
@@ -133,6 +135,7 @@ class UserMessageList implements Component {
 	handleInput(keyData: string): void {
 		this.mouse.clearHover();
 		const kb = getKeybindings();
+		const pageIndex = getSelectPageIndex(kb, keyData, this.selectedIndex, this.messages.length, this.maxVisible);
 		// Up arrow - go to previous (older) message, wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.selectedIndex = this.selectedIndex === 0 ? this.messages.length - 1 : this.selectedIndex - 1;
@@ -140,6 +143,11 @@ class UserMessageList implements Component {
 		// Down arrow - go to next (newer) message, wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
 			this.selectedIndex = this.selectedIndex === this.messages.length - 1 ? 0 : this.selectedIndex + 1;
+		}
+		// Page up/down
+		else if (pageIndex !== undefined) {
+			if (this.messages.length === 0) return;
+			this.selectedIndex = pageIndex;
 		}
 		// Enter - select message and branch
 		else if (kb.matches(keyData, "tui.select.confirm")) {

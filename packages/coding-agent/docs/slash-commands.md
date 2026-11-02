@@ -21,7 +21,7 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | Command | Description |
 |---|---|
 | `/new` | Start a new session |
-| `/resume` | Switch to another saved session |
+| `/resume` | Resume another session |
 | `/continue` | Continue an interrupted turn without adding a message |
 | `/name [name]` | Set the session display name, or show the current name when omitted |
 | `/session` | Show current session information and statistics |
@@ -31,7 +31,7 @@ Extensions, prompt templates, and skills can add commands. The command menu in P
 | `/compact [instructions]` | Start background compaction and keep working |
 | `/compact --now [instructions]` | Stop the run and wait for compaction |
 | `/compact --cancel` | Cancel the pending background job (also stops a compaction wait) |
-| `/import <path>` | Import and resume a JSONL session |
+| `/import <path>` | Import a JSONL session, preserving its ID and working directory |
 
 `/continue` works only while idle. It regenerates an errored or aborted assistant response (including partial text stopped with Esc), keeping the old attempt in raw history but omitting it from model context. A final tool result or unanswered user message continues directly. Completed responses and other non-interrupted leaves do not start a turn: Pi shows `Nothing to continue.` Normal working status, Esc cancellation, retries and compaction apply.
 
@@ -51,6 +51,7 @@ Review a session before exporting or sharing it. Sessions can contain prompts, t
 | Command | Description |
 |---|---|
 | `/trust` | Save a project trust decision for future Pi processes |
+| `/mcp` | Manage MCP servers: sign in, reconnect, enable or disable, and change exposure |
 | `/reload` | Reload keybindings, extensions, skills, templates, themes, and context files |
 | `/hotkeys` | Show active keyboard shortcuts |
 | `/changelog` | Show changelog entries |
