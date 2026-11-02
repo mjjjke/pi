@@ -6624,6 +6624,8 @@ export class InteractiveMode {
 		}
 
 		this.clearEditorContainer();
+		// Own the slot before focus callbacks of the previous component can displace the dialog.
+		this.activeLogin = dialog;
 		this.editorContainer.addChild(dialog);
 		this.ui.setFocus(dialog);
 		this.ui.requestRender();
@@ -6759,6 +6761,10 @@ export class InteractiveMode {
 		providerName: string,
 		method: "api_key" | "oauth",
 	): Promise<void> {
+		if (dialog.displaced) {
+			if (this.activeLogin === dialog) this.activeLogin = undefined;
+			return;
+		}
 		this.activeLogin = dialog;
 		this.programStatus.setBlocked("login", { kind: "auth", message: `Log in to ${providerName}` });
 		const promptsDone = new AbortController();
@@ -6786,6 +6792,8 @@ export class InteractiveMode {
 		const previousModel = this.session.model;
 		const dialog = new LoginDialogComponent(this.ui, providerId, (_success, _message) => {}, providerName);
 		this.clearEditorContainer();
+		// Own the slot before focus callbacks of the previous component can displace the dialog.
+		this.activeLogin = dialog;
 		this.editorContainer.addChild(dialog);
 		this.ui.setFocus(dialog);
 		this.ui.requestRender();

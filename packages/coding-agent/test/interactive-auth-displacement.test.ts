@@ -221,3 +221,50 @@ it("initial logout enumeration preserves UI opened while lookup was pending", as
 	await input;
 	expect(current).toBe(replacement);
 });
+
+for (const method of ["api_key", "oauth"] as const) {
+	it(`${method} login displaced while mounting (custom editor blur) is cancelled`, async () => {
+		const providerLogin = vi.fn(async (_id: string, _method: string, callbacks: AuthInteraction) => {
+			await callbacks.prompt(promptOf("secret"));
+		});
+		const f = setup(providerLogin);
+		Object.assign(f.host, {
+			defaultEditor: f.host.editor,
+			getLoginProviderOptions: () => [
+				{ id: "fake", name: "Fake", authType: method, method: { name: "Fake", login() {} } },
+			],
+		});
+		const uiContext = invoke(f.host, "createExtensionUIContext") as {
+			setEditorComponent: (factory: () => Input) => void;
+			input: (title: string) => Promise<string | undefined>;
+		};
+		let armed = false;
+		let focused = false;
+		let replacementInput: Promise<string | undefined> | undefined;
+		// A custom editor that opens an input when it loses focus displaces the login while it mounts.
+		uiContext.setEditorComponent(() => {
+			const custom = Object.assign(new Input(), { getText: () => "", setText: () => {} });
+			Object.defineProperty(custom, "focused", {
+				get: () => focused,
+				set: (value: boolean) => {
+					focused = value;
+					if (armed && !value) {
+						armed = false;
+						replacementInput = uiContext.input("Replacement opened on blur");
+					}
+				},
+			});
+			return custom;
+		});
+		armed = true;
+		await invoke(f.host, "handleLoginCommand", "fake");
+		const replacement = f.host.editorContainer.children[0];
+		expect(replacementInput).toBeDefined();
+		expect(providerLogin).not.toHaveBeenCalled();
+		await f.runtime.logout("fake");
+		expect(f.providerLogout).toHaveBeenCalledTimes(1);
+		expect(f.host.editorContainer.children[0]).toBe(replacement);
+		replacement.handleInput?.("\x1b");
+		await replacementInput;
+	});
+}
