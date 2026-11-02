@@ -17,6 +17,7 @@ interface SessionShareContext {
 	session: AgentSession;
 	ui: TUI;
 	editorContainer: Container;
+	onEditorReplace?: () => void;
 	editor: EditorComponent;
 	showStatus: (message: string) => void;
 	showError: (message: string) => void;
@@ -113,6 +114,7 @@ async function tryShareViaRadius(tmpFile: string, context: SessionShareContext):
 	if (!token) return false;
 
 	const loader = new BorderedLoader(context.ui, theme, "Uploading to Radius...");
+	context.onEditorReplace?.();
 	context.editorContainer.clear();
 	context.editorContainer.addChild(loader);
 	context.ui.setFocus(loader);
@@ -166,6 +168,7 @@ async function tryShareViaRadius(tmpFile: string, context: SessionShareContext):
 
 async function shareViaGist(tmpFile: string, context: SessionShareContext): Promise<void> {
 	const loader = new BorderedLoader(context.ui, theme, "Creating gist...");
+	context.onEditorReplace?.();
 	context.editorContainer.clear();
 	context.editorContainer.addChild(loader);
 	context.ui.setFocus(loader);
@@ -219,6 +222,7 @@ async function shareViaGist(tmpFile: string, context: SessionShareContext): Prom
 
 function restoreEditor(loader: BorderedLoader, context: SessionShareContext): void {
 	loader.dispose();
+	context.onEditorReplace?.();
 	context.editorContainer.clear();
 	context.editorContainer.addChild(context.editor);
 	context.ui.setFocus(context.editor);

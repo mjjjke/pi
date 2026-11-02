@@ -27,6 +27,18 @@ export class LoginDialogComponent extends Container implements Focusable {
 	/** The shown sign-in URL, which `app.message.copy` copies. */
 	private authUrl?: AuthUrlComponent;
 	private abortController = new AbortController();
+	private _displaced = false;
+
+	get displaced(): boolean {
+		return this._displaced;
+	}
+
+	/** Losing the editor slot ends this login, but must not navigate back over its replacement. */
+	cancelForDisplacement(): void {
+		if (this.signal.aborted) return;
+		this._displaced = true;
+		this.cancel();
+	}
 	private inputResolver?: (value: string) => void;
 	private inputRejecter?: (error: Error) => void;
 	private onComplete: (success: boolean, message?: string) => void;
@@ -95,6 +107,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 
 	private cancel(): void {
+		if (this.signal.aborted) return;
 		this.abortController.abort();
 		if (this.inputRejecter) {
 			this.inputRejecter(new Error("Login cancelled"));
@@ -148,6 +161,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string): Promise<string> {
+		if (this.signal.aborted) return Promise.reject(new Error("Login cancelled"));
 		this.input.setValue("");
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("dim", prompt), 1, 0));
@@ -166,6 +180,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
 	showPrompt(message: string, placeholder?: string): Promise<string> {
+		if (this.signal.aborted) return Promise.reject(new Error("Login cancelled"));
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
 		if (placeholder) {

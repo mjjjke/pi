@@ -26,6 +26,7 @@ interface BugReportContext {
 	session: AgentSession;
 	ui: TUI;
 	editorContainer: Container;
+	onEditorReplace?: () => void;
 	editor: EditorComponent;
 	keybindings: KeybindingsManager;
 	showStatus: (message: string) => void;
@@ -279,6 +280,7 @@ function showLoader(context: BugReportContext, message: string): BorderedLoader 
 }
 
 function showOverlay(context: BugReportContext, component: Overlay): void {
+	context.onEditorReplace?.();
 	context.editorContainer.clear();
 	context.editorContainer.addChild(component);
 	context.ui.setFocus(component);
@@ -287,6 +289,7 @@ function showOverlay(context: BugReportContext, component: Overlay): void {
 
 function restoreEditor(context: BugReportContext, component: Overlay): void {
 	component.dispose?.();
+	context.onEditorReplace?.();
 	context.editorContainer.clear();
 	context.editorContainer.addChild(context.editor);
 	context.ui.setFocus(context.editor);

@@ -505,6 +505,7 @@ export class InteractiveMode {
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
+	private activeLogin?: LoginDialogComponent;
 	private activeSelectorToken?: object;
 	private activeSelectorDispose?: () => void;
 	private footer: FooterComponent;
@@ -663,7 +664,7 @@ export class InteractiveMode {
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 			if (this.cwdBox) {
-				this.editorContainer.clear();
+				this.clearEditorContainer();
 				this.editorContainer.addChild(this.cwdBox);
 				this.ui.setFocus(this.cwdBox);
 			}
@@ -2935,7 +2936,7 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.extensionSelector);
 			this.ui.setFocus(this.extensionSelector);
 			// Extension dialogs share the editor slot: opening one replaces the status of a displaced one.
@@ -2949,7 +2950,7 @@ export class InteractiveMode {
 	 */
 	private hideExtensionSelector(): void {
 		this.extensionSelector?.dispose();
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(this.editor);
 		this.extensionSelector = undefined;
 		this.programStatus.setBlocked("extension-dialog", undefined);
@@ -3017,7 +3018,7 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.extensionInput);
 			this.ui.setFocus(this.extensionInput);
 			this.programStatus.setBlocked("extension-dialog", { kind: "question", message: title });
@@ -3030,7 +3031,7 @@ export class InteractiveMode {
 	 */
 	private hideExtensionInput(): void {
 		this.extensionInput?.dispose();
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(this.editor);
 		this.extensionInput = undefined;
 		this.programStatus.setBlocked("extension-dialog", undefined);
@@ -3061,7 +3062,7 @@ export class InteractiveMode {
 			);
 
 			this.disposeActiveSelector();
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.extensionEditor);
 			this.ui.setFocus(this.extensionEditor);
 			this.programStatus.setBlocked("extension-dialog", { kind: "question", message: title });
@@ -3073,7 +3074,7 @@ export class InteractiveMode {
 	 * Hide the extension editor.
 	 */
 	private hideExtensionEditor(): void {
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(this.editor);
 		this.extensionEditor = undefined;
 		this.programStatus.setBlocked("extension-dialog", undefined);
@@ -3092,7 +3093,7 @@ export class InteractiveMode {
 		const currentText = this.editor.getText();
 
 		this.disposeActiveSelector();
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 
 		if (factory) {
 			// Create the custom editor with tui, theme, and keybindings
@@ -3193,7 +3194,7 @@ export class InteractiveMode {
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.editor);
 			this.editor.setText(savedText);
 			this.ui.setFocus(this.editor);
@@ -3243,7 +3244,7 @@ export class InteractiveMode {
 						options?.onHandle?.(overlayHandle);
 					} else {
 						this.disposeActiveSelector();
-						this.editorContainer.clear();
+						this.clearEditorContainer();
 						this.editorContainer.addChild(component);
 						this.ui.setFocus(component);
 						this.ui.requestRender();
@@ -5248,6 +5249,12 @@ export class InteractiveMode {
 	// Selectors
 	// =========================================================================
 
+	/** All external editor-slot replacements cancel only the active login, not displaced extension dialogs. */
+	private clearEditorContainer(): void {
+		this.activeLogin?.cancelForDisplacement();
+		this.editorContainer.clear();
+	}
+
 	private disposeActiveSelector(): void {
 		const dispose = this.activeSelectorDispose;
 		this.activeSelectorToken = undefined;
@@ -5269,7 +5276,7 @@ export class InteractiveMode {
 			if (this.activeSelectorToken !== token) return;
 			this.activeSelectorToken = undefined;
 			this.activeSelectorDispose = undefined;
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
 		};
@@ -5278,7 +5285,7 @@ export class InteractiveMode {
 		this.disposeActiveSelector();
 		this.activeSelectorToken = token;
 		this.activeSelectorDispose = dispose;
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(created.component);
 		this.ui.setFocus(created.focus);
 		this.ui.requestRender();
@@ -6401,7 +6408,7 @@ export class InteractiveMode {
 		return result === "Yes";
 	}
 
-	private async showOAuthSelector(mode: "login" | "logout", reopen = false): Promise<void> {
+	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
 		if (mode === "login") {
 			this.showLoginAuthTypeSelector();
 			return;
@@ -6414,8 +6421,8 @@ export class InteractiveMode {
 			this.showError(`Could not read stored credentials: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
-		// Automatic reopens must not replace a dialog opened during credential enumeration.
-		if (reopen && !this.editorContainer.children.includes(this.editor)) return;
+		// Neither initial lookups nor reopens may replace UI opened during credential enumeration.
+		if (!this.editorContainer.children.includes(this.editor)) return;
 		if (providerOptions.length === 0) {
 			this.showStatus(
 				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
@@ -6438,7 +6445,7 @@ export class InteractiveMode {
 					done();
 					if (!providerOption) return;
 					if (source === "mouse" && !(await this.showLogoutConfirm(providerOption.name, detail))) {
-						if (this.editorContainer.children.includes(this.editor)) void this.showOAuthSelector("logout", true);
+						if (this.editorContainer.children.includes(this.editor)) void this.showOAuthSelector("logout");
 						return;
 					}
 
@@ -6568,7 +6575,7 @@ export class InteractiveMode {
 
 	private showAmbientAuthDialog(providerOption: AuthSelectorProvider, onBack?: () => void): void {
 		const restoreEditor = () => {
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
 			this.ui.requestRender();
@@ -6590,7 +6597,7 @@ export class InteractiveMode {
 			true,
 		);
 
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(dialog);
 		this.ui.setFocus(dialog);
 		this.ui.requestRender();
@@ -6616,7 +6623,7 @@ export class InteractiveMode {
 			]);
 		}
 
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(dialog);
 		this.ui.setFocus(dialog);
 		this.ui.requestRender();
@@ -6630,9 +6637,11 @@ export class InteractiveMode {
 
 		try {
 			await this.loginProvider(dialog, providerId, providerName, "api_key");
+			if (dialog.displaced) return;
 			restoreEditor();
 			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
 		} catch (error: unknown) {
+			if (dialog.displaced) return;
 			restoreEditor();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (error instanceof CredentialSynchronizationError) {
@@ -6654,17 +6663,22 @@ export class InteractiveMode {
 	): Promise<string> {
 		return new Promise((resolve, reject) => {
 			const restoreDialog = () => {
+				if (dialog.signal.aborted) {
+					reject(new Error("Login cancelled"));
+					return false;
+				}
 				this.editorContainer.clear();
 				this.editorContainer.addChild(dialog);
 				this.ui.setFocus(dialog);
 				this.ui.requestRender();
+				return true;
 			};
 			const labels = prompt.options.map((option) => option.label);
 			const selector = new ExtensionSelectorComponent(
 				prompt.message,
 				labels,
 				(optionLabel) => {
-					restoreDialog();
+					if (!restoreDialog()) return;
 					const id = prompt.options.find((option) => option.label === optionLabel)?.id;
 					if (id) resolve(id);
 					else reject(new Error("Login cancelled"));
@@ -6688,7 +6702,7 @@ export class InteractiveMode {
 		providerId: string,
 		promptsDone: AbortSignal,
 	): Promise<string> {
-		if (prompt.signal?.aborted || promptsDone.aborted) throw new Error("Login cancelled");
+		if (dialog.signal.aborted || prompt.signal?.aborted || promptsDone.aborted) throw new Error("Login cancelled");
 		return this.session.extensionRunner.runUIPrompt(
 			prompt.type === "select" ? "select" : "input",
 			prompt.message,
@@ -6703,7 +6717,8 @@ export class InteractiveMode {
 		providerId: string,
 		promptsDone: AbortSignal,
 	): Promise<string> {
-		const signal = AbortSignal.any([promptsDone, ...(prompt.signal ? [prompt.signal] : [])]);
+		const signal = AbortSignal.any([dialog.signal, promptsDone, ...(prompt.signal ? [prompt.signal] : [])]);
+		if (signal.aborted) throw new Error("Login cancelled");
 		let response: Promise<string>;
 		if (prompt.type === "select") {
 			response = this.showAuthSelect(dialog, prompt, providerId);
@@ -6744,6 +6759,7 @@ export class InteractiveMode {
 		providerName: string,
 		method: "api_key" | "oauth",
 	): Promise<void> {
+		this.activeLogin = dialog;
 		this.programStatus.setBlocked("login", { kind: "auth", message: `Log in to ${providerName}` });
 		const promptsDone = new AbortController();
 		try {
@@ -6759,14 +6775,17 @@ export class InteractiveMode {
 			);
 		} finally {
 			promptsDone.abort();
-			this.programStatus.setBlocked("login", undefined);
+			if (this.activeLogin === dialog) {
+				this.activeLogin = undefined;
+				this.programStatus.setBlocked("login", undefined);
+			}
 		}
 	}
 
 	private async showLoginDialog(providerId: string, providerName: string, onBack?: () => void): Promise<void> {
 		const previousModel = this.session.model;
 		const dialog = new LoginDialogComponent(this.ui, providerId, (_success, _message) => {}, providerName);
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(dialog);
 		this.ui.setFocus(dialog);
 		this.ui.requestRender();
@@ -6780,10 +6799,12 @@ export class InteractiveMode {
 
 		try {
 			await this.loginProvider(dialog, providerId, providerName, "oauth");
+			if (dialog.displaced) return;
 			restoreEditor();
 			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
 			if (providerId === RADIUS_PROVIDER_ID) this.offerRadiusMcpServer(providerId, providerName);
 		} catch (error: unknown) {
+			if (dialog.displaced) return;
 			restoreEditor();
 			const errorMsg = error instanceof Error ? error.message : String(error);
 			if (error instanceof CredentialSynchronizationError) {
@@ -6918,7 +6939,7 @@ export class InteractiveMode {
 			this.editor.render(this.ui.terminal.columns).length,
 		);
 		this.cwdBox = box;
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(box);
 		this.ui.setFocus(box);
 		this.ui.requestRender(true);
@@ -6949,7 +6970,7 @@ export class InteractiveMode {
 		} finally {
 			this.cwdBox = undefined;
 			this.editor.setText(text);
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
 			this.ui.requestRender();
@@ -6976,14 +6997,14 @@ export class InteractiveMode {
 		);
 
 		const previousEditor = this.editor;
-		this.editorContainer.clear();
+		this.clearEditorContainer();
 		this.editorContainer.addChild(reloadBox);
 		this.ui.setFocus(reloadBox);
 		this.ui.requestRender(true);
 		await new Promise((resolve) => process.nextTick(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
-			this.editorContainer.clear();
+			this.clearEditorContainer();
 			this.editorContainer.addChild(editor);
 			this.ui.setFocus(editor);
 			this.ui.requestRender();
@@ -7137,6 +7158,7 @@ export class InteractiveMode {
 			session: this.session,
 			ui: this.ui,
 			editorContainer: this.editorContainer,
+			onEditorReplace: () => this.activeLogin?.cancelForDisplacement(),
 			editor: this.editor,
 			showStatus: (message) => this.showStatus(message),
 			showError: (message) => this.showError(message),
@@ -7149,6 +7171,7 @@ export class InteractiveMode {
 				session: this.session,
 				ui: this.ui,
 				editorContainer: this.editorContainer,
+				onEditorReplace: () => this.activeLogin?.cancelForDisplacement(),
 				editor: this.editor,
 				keybindings: this.keybindings,
 				showStatus: (message) => this.showStatus(message),
