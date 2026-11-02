@@ -69,6 +69,10 @@ presence check as reopens. Coverage: coding-agent `interactive-auth-displacement
 Intentionally tolerated: the Esc restore/onBack microtask race after user cancellation,
 the Radius MCP offer over newer UI after successful login, general extension-dialog
 displacement, and displaced logout confirmations remaining pending (as documented below).
+Also tolerated: re-entrant `setFocus` (pre-existing in pi-tui, any mount). If the previous
+component's blur handler mounts new UI during the login mount, the login is cancelled and
+never starts, but the outer `setFocus` leaves keyboard focus on the cancelled dialog. No known
+custom editor does this; the general fix belongs in pi-tui's focus handling.
 This is not a general editor-slot owner or scheduler. Retire when upstream offers equivalent
 login cancellation and initial logout mount guards.
 
