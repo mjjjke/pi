@@ -9,6 +9,7 @@ import { contentText, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import {
 	type AgentSession,
+	buildPiDocumentationSection,
 	type CreateAgentSessionOptions,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
@@ -491,6 +492,13 @@ export function resolveDocumentationVariant(
 	throw new TypeError('PI_EVAL_VARIANT must be "without_docs" or "with_docs".');
 }
 
+/** Add opt-in documentation routing to the documentation eval's default prompt. */
+export function includePiDocumentation(defaultPrompt: string): string {
+	const cwdStart = defaultPrompt.lastIndexOf("\n<cwd>\n");
+	if (cwdStart === -1) throw new Error("Default Pi system prompt has no working-directory section.");
+	return `${defaultPrompt.slice(0, cwdStart)}\n<docs>\n${buildPiDocumentationSection()}\n</docs>${defaultPrompt.slice(cwdStart)}`;
+}
+
 export function excludePiDocumentation(defaultPrompt: string): string {
 	const documentationStartMarker = "\n<docs>\n";
 	const documentationEndMarker = "\n</docs>";
@@ -531,7 +539,7 @@ export function createPiDocumentationEvalHarness<TOutput extends JsonValue>(
 		...options,
 		name: variant,
 		tools: options.tools ?? [...DOCUMENTATION_EVAL_TOOLS],
-		...(variant === "without_docs" ? { transformSystemPrompt: excludePiDocumentation } : {}),
+		...(variant === "with_docs" ? { transformSystemPrompt: includePiDocumentation } : {}),
 		expectedPiDocumentation: variant === "with_docs",
 	});
 }

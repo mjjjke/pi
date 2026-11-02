@@ -380,6 +380,7 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export { buildPiDocumentationSection } from "./core/system-prompt.ts";
 export {
 	type AppliedEditsResult,
 	applyEditsToNormalizedContent,

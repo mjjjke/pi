@@ -1,7 +1,13 @@
 import { describe, expect, test } from "vitest";
+import { getDocsPath, getExamplesPath, getReadmePath } from "../src/config.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
-import { buildSystemPrompt } from "../src/core/system-prompt.ts";
+import {
+	buildPiDocumentationSection,
+	buildSystemPrompt,
+	buildSystemPromptSections,
+	diffSystemPromptSections,
+} from "../src/core/system-prompt.ts";
 
 const testSkill: Skill = {
 	name: "test-skill",
@@ -48,8 +54,11 @@ describe("buildSystemPrompt", () => {
 				skills: [],
 			});
 
-			expect(defaultPrompt.startsWith("You are a coding assistant running inside pi, a coding agent harness.")).toBe(
-				true,
+			expect(defaultPrompt).toBe(
+				"You are an expert coding assistant.\nUse the available tools to answer the user's request.\n\n" +
+					"<tools>\n(none)\n</tools>\n\n" +
+					"<rules>\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n" +
+					"<cwd>\n/tmp\n</cwd>",
 			);
 			expect(customPrompt.startsWith("You are Exact.\n\n<cwd>")).toBe(true);
 		});
@@ -136,20 +145,64 @@ describe("buildSystemPrompt", () => {
 			},
 		);
 
-		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
-			const prompt = buildSystemPrompt({
-				contextFiles: [],
-				skills: [],
-				cwd: process.cwd(),
+		test("lists snippets without filler or a trailing blank line", () => {
+			const sections = buildSystemPromptSections({ cwd: "/tmp", toolSnippets: { read: "Read files" } });
+			expect(sections.tools).toBe("<tools>\n- read: Read files\n</tools>");
+			expect(sections.docs).toBeUndefined();
+		});
+
+		test("keeps documentation routing available only as an explicit section", () => {
+			const docs = buildPiDocumentationSection();
+			expect(docs).toContain(`- Main documentation: ${getReadmePath()}`);
+			expect(docs).toContain(`- Additional docs: ${getDocsPath()}`);
+			expect(docs).toContain(`- Examples: ${getExamplesPath()}`);
+			expect(docs).toContain("resolve docs/... under Additional docs and examples/... under Examples");
+			expect(docs).toContain("environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)");
+			expect(docs).toContain("Before implementing harness changes, read the relevant docs and examples in full");
+			expect(buildSystemPromptSections({ cwd: "/tmp", sections: { docs } }).docs).toBe(`<docs>\n${docs}\n</docs>`);
+			expect(buildSystemPromptSections({ cwd: "/tmp" }).docs).toBeUndefined();
+		});
+
+		test("preserves custom section overrides, including an explicit docs section", () => {
+			const sections = buildSystemPromptSections({
+				cwd: "/tmp",
+				sections: { tools: "Custom tools", rules: "Custom rules", docs: "Custom documentation" },
+			});
+			expect(sections.tools).toBe("<tools>\nCustom tools\n</tools>");
+			expect(sections.rules).toBe("<rules>\nCustom rules\n</rules>");
+			expect(sections.docs).toBe("<docs>\nCustom documentation\n</docs>");
+		});
+
+		test("keeps an explicit docs override after rules and before appended instructions", () => {
+			const options = { cwd: "/tmp", appendSystemPrompt: "Keep this policy." };
+			const sections = buildSystemPromptSections({
+				...options,
+				sections: { docs: "Custom documentation" },
 			});
 
-			expect(prompt).toContain(
-				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
+			expect(Object.keys(sections)).toEqual(["preamble", "tools", "rules", "docs", "addendum", "cwd"]);
+			expect(buildSystemPrompt({ ...options, sections: { docs: "Custom documentation" } })).toBe(
+				Object.values(sections).join("\n\n"),
 			);
-			expect(prompt).toContain("environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)");
-			expect(prompt).toContain(
-				"Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.",
-			);
+			expect(buildSystemPromptSections(options)).not.toHaveProperty("docs");
+		});
+
+		test("resyncs legacy defaults as a patch without mutating the sent sections", () => {
+			const current = buildSystemPromptSections({ cwd: "/tmp" });
+			const previous = {
+				...current,
+				preamble: "Legacy preamble",
+				tools: "<tools>\n(none)\n\nAdditional tools may be available.\n</tools>",
+				docs: "<docs>\nLegacy documentation\n</docs>",
+			};
+			const sent = { ...previous };
+			expect(diffSystemPromptSections(previous, current)).toEqual({
+				preamble: current.preamble,
+				tools: current.tools,
+				docs: null,
+			});
+			expect(previous).toEqual(sent);
+			expect(diffSystemPromptSections(current, buildSystemPromptSections({ cwd: "/tmp" }))).toBeUndefined();
 		});
 	});
 

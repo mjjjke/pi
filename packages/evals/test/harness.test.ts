@@ -1,12 +1,13 @@
 import { homedir } from "node:os";
 import { getDocsPath, getExamplesPath, getReadmePath } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { buildSystemPrompt } from "../../coding-agent/src/core/system-prompt.ts";
+import { buildPiDocumentationSection, buildSystemPrompt } from "../../coding-agent/src/core/system-prompt.ts";
 import {
 	applyIsolatedEnvironment,
 	createPiDocumentationEvalHarness,
 	DOCUMENTATION_EVAL_TOOLS,
 	excludePiDocumentation,
+	includePiDocumentation,
 	resolveDocumentationVariant,
 	resolveModelSelection,
 	verifySystemPrompt,
@@ -61,6 +62,19 @@ describe("isolateProcessEnvironment", () => {
 });
 
 describe("documentation variant", () => {
+	it.each(["without_docs", "with_docs"] as const)("builds the %s prompt", (variant) => {
+		const defaultPrompt = buildSystemPrompt({ cwd: "/workspace", selectedTools: [...DOCUMENTATION_EVAL_TOOLS] });
+		const prompt = variant === "with_docs" ? includePiDocumentation(defaultPrompt) : defaultPrompt;
+		expect(verifySystemPrompt(prompt, { name: variant, expectedPiDocumentation: variant === "with_docs" })).toBe(
+			prompt,
+		);
+		if (variant === "with_docs") {
+			expect(prompt).toContain(`<docs>\n${buildPiDocumentationSection()}\n</docs>`);
+			expect(excludePiDocumentation(prompt)).toBe(defaultPrompt);
+		} else {
+			expect(prompt).not.toContain("<docs>");
+		}
+	});
 	it.each(["without_docs", "with_docs"] as const)("accepts %s", (variant) => {
 		expect(resolveDocumentationVariant(variant)).toBe(variant);
 	});
@@ -69,11 +83,13 @@ describe("documentation variant", () => {
 		expect(() => resolveDocumentationVariant(variant)).toThrow("PI_EVAL_VARIANT");
 	});
 
-	it("strips only the documentation routing section from the default Pi prompt", () => {
-		const prompt = buildSystemPrompt({
-			cwd: "/workspace",
-			selectedTools: [...DOCUMENTATION_EVAL_TOOLS],
-		});
+	it("strips only an explicitly supplied documentation routing section", () => {
+		const prompt = includePiDocumentation(
+			buildSystemPrompt({
+				cwd: "/workspace",
+				selectedTools: [...DOCUMENTATION_EVAL_TOOLS],
+			}),
+		);
 		expect(prompt).toContain("\n<docs>\nPi documentation (read only");
 		expect(prompt).toContain("\n<rules>\n");
 		expect(prompt).toContain("\n<cwd>\n/workspace\n</cwd>");
@@ -91,10 +107,12 @@ describe("documentation variant", () => {
 	});
 
 	it("verifies the prompt that was sent", () => {
-		const prompt = buildSystemPrompt({
-			cwd: "/workspace",
-			selectedTools: [...DOCUMENTATION_EVAL_TOOLS],
-		});
+		const prompt = includePiDocumentation(
+			buildSystemPrompt({
+				cwd: "/workspace",
+				selectedTools: [...DOCUMENTATION_EVAL_TOOLS],
+			}),
+		);
 		const stripped = excludePiDocumentation(prompt);
 
 		expect(verifySystemPrompt(stripped, { name: "without_docs", expectedPiDocumentation: false })).toBe(stripped);
@@ -104,6 +122,7 @@ describe("documentation variant", () => {
 	});
 
 	it("fails closed when prompt markers are missing", () => {
+		expect(() => includePiDocumentation("Instructions")).toThrow("no working-directory section");
 		expect(() => excludePiDocumentation("Instructions")).toThrow("no Pi documentation section");
 		expect(() => excludePiDocumentation("\n<docs>\nPi documentation\n</docs>")).toThrow(
 			"no working-directory section",
