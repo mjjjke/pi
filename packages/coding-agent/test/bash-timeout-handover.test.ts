@@ -321,7 +321,9 @@ describe("bash_timeout handover", () => {
 			const message = (error as Error).message;
 			const descendant = backgroundPid(message);
 			pids.add(descendant);
-			expect(message).toMatch(/Command timed out after 0\.3 seconds$/);
+			expect(message).toMatch(
+				/Command timed out after 0\.3 seconds\. The shell exited with code 0 after 0(?:\.\d)? seconds, but background processes it started kept writing output until the timeout\.$/,
+			);
 			expect(Date.now() - startedAt).toBeLessThan(2000);
 			await waitFor(() => !isAlive(descendant));
 		});

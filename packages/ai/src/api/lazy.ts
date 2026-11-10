@@ -2,7 +2,12 @@ import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderStrea
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { assertSystemUpdatesSupported } from "../utils/transcript.ts";
 
-function createSetupErrorMessage(model: Model<Api>, error: unknown, timestamp: number): AssistantMessage {
+function createSetupErrorMessage(
+	model: Model<Api>,
+	error: unknown,
+	timestamp: number,
+	stopReason: "error" | "aborted",
+): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
@@ -17,7 +22,7 @@ function createSetupErrorMessage(model: Model<Api>, error: unknown, timestamp: n
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "error",
+		stopReason,
 		errorMessage: error instanceof Error ? error.message : String(error),
 		timestamp,
 	};
@@ -62,6 +67,7 @@ export function lazyStream(
 	model: Model<Api>,
 	setup: () => Promise<AsyncIterable<AssistantMessageEvent>>,
 	observer?: LazyStreamObserver,
+	signal?: AbortSignal,
 ): AssistantMessageEventStream {
 	const startedAt = Date.now();
 	const outer = new AssistantMessageEventStream();
@@ -75,8 +81,9 @@ export function lazyStream(
 	setup()
 		.then((inner) => forwardStream(outer, inner, observer, observeResult))
 		.catch((error) => {
-			const message = createSetupErrorMessage(model, error, startedAt);
-			const event: AssistantMessageEvent = { type: "error", reason: "error", error: message };
+			const reason = signal?.aborted ? "aborted" : "error";
+			const message = createSetupErrorMessage(model, error, startedAt, reason);
+			const event: AssistantMessageEvent = { type: "error", reason, error: message };
 			outer.push(event);
 			observer?.onEvent?.(event);
 			outer.end(message);
@@ -101,24 +108,39 @@ export function lazyApi(load: () => Promise<ProviderStreams>, capabilities?: Laz
 		// Refuse later system updates on models that cannot render them, before the module loads
 		// and before any payload is built (no provider request, no before_provider_request).
 		stream: (model, context, options) =>
-			lazyStream(model, async () => {
-				assertSystemUpdatesSupported(model, context);
-				return (await load()).stream(model, context, options);
-			}),
+			lazyStream(
+				model,
+				async () => {
+					assertSystemUpdatesSupported(model, context);
+					return (await load()).stream(model, context, options);
+				},
+				undefined,
+				options?.signal,
+			),
 		streamSimple: (model, context, options) =>
-			lazyStream(model, async () => {
-				assertSystemUpdatesSupported(model, context);
-				return (await load()).streamSimple(model, context, options);
-			}),
+			lazyStream(
+				model,
+				async () => {
+					assertSystemUpdatesSupported(model, context);
+					return (await load()).streamSimple(model, context, options);
+				},
+				undefined,
+				options?.signal,
+			),
 	};
 
 	if (capabilities?.fetchDeferred) {
 		api.fetchDeferred = (model, handle, options) =>
-			lazyStream(model, async () => {
-				const implementation = await load();
-				if (!implementation.fetchDeferred) throw new Error("API does not support deferred responses");
-				return implementation.fetchDeferred(model, handle, options);
-			});
+			lazyStream(
+				model,
+				async () => {
+					const implementation = await load();
+					if (!implementation.fetchDeferred) throw new Error("API does not support deferred responses");
+					return implementation.fetchDeferred(model, handle, options);
+				},
+				undefined,
+				options?.signal,
+			);
 	}
 	if (capabilities?.cancelDeferred) {
 		api.cancelDeferred = async (model, handle, options) => {

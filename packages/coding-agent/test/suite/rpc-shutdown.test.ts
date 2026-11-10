@@ -282,29 +282,192 @@ describe("RPC shutdown on stdin EOF", () => {
 		expect(dispose).toHaveBeenCalledTimes(1);
 	});
 
-	it("escalates SIGTERM during an EOF drain: skips remaining phases and exits 143", async () => {
-		let handlerCalls = 0;
-		const { harness, sigterm, dispose } = await setup((pi) => {
+	it("keeps cleanup running after the first SIGTERM during an EOF drain, within the original budget", async () => {
+		const handlerGate = gate();
+		const handlerStarted = gate();
+		releases.push(handlerGate.open);
+		const { sigterm, dispose } = await setup((pi) => {
 			pi.on("session_shutdown", async () => {
-				handlerCalls++;
+				handlerStarted.open();
+				await handlerGate.promise;
 			});
+		});
+
+		const at = eof();
+		await handlerStarted.promise;
+		sigterm();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(exits).toHaveLength(0);
+		expect(dispose).not.toHaveBeenCalled();
+		handlerGate.open();
+		const exit = await waitForExit();
+
+		expect(exit.code).toBe(143);
+		expect(exit.at - at).toBeLessThan(RPC_SHUTDOWN_BUDGET_MS);
+		expect(dispose).toHaveBeenCalledWith({ handlersDispatched: true });
+		expect(exits).toHaveLength(1);
+	});
+
+	it("bounds a SIGTERM-triggered drain even when the provider ignores abort", async () => {
+		const { harness, sigterm, dispose } = await setup();
+		const started = heldResponse(harness, { cooperative: false });
+		harness.send({ id: "p1", type: "prompt", message: "work" });
+		await started;
+		const at = Date.now();
+		sigterm();
+		eof();
+		const exit = await waitForExit();
+
+		expect(exit.code).toBe(143);
+		expect(exit.at - at).toBeGreaterThanOrEqual(RPC_SHUTDOWN_BUDGET_MS - 50);
+		expect(exit.at - at).toBeLessThan(RPC_SHUTDOWN_BUDGET_MS + 1000);
+		expect(dispose).toHaveBeenCalledWith({ handlersDispatched: true });
+		expect(exits).toHaveLength(1);
+	});
+
+	it("exits immediately on a second signal during cleanup", async () => {
+		const handlerGate = gate();
+		const handlerStarted = gate();
+		releases.push(handlerGate.open);
+		const { sigterm } = await setup((pi) => {
+			pi.on("session_shutdown", async () => {
+				handlerStarted.open();
+				await handlerGate.promise;
+			});
+		});
+		eof();
+		await handlerStarted.promise;
+		sigterm();
+		expect(exits).toHaveLength(0);
+		const at = Date.now();
+		sigterm();
+		expect(exits).toEqual([{ code: 143, at: expect.any(Number) }]);
+		expect(exits[0]!.at - at).toBeLessThan(500);
+		// process.exit is mocked: let the suspended cleanup finish and remove its listeners.
+		handlerGate.open();
+		await vi.waitFor(() => expect(exits).toHaveLength(2));
+	});
+
+	it("starts shutdown from an idle context without another command", async () => {
+		let requestShutdown = () => {};
+		await setup((pi) => {
+			pi.on("session_start", (_event, ctx) => {
+				requestShutdown = () => ctx.shutdown();
+			});
+		});
+		requestShutdown();
+		expect((await waitForExit()).code).toBe(0);
+	});
+
+	it("writes an extension command's prompt response before shutdown handlers", async () => {
+		let responseWasWritten = false;
+		const { harness } = await setup((pi) => {
+			pi.registerCommand("quit-now", { handler: async (_args, ctx) => ctx.shutdown() });
+			pi.on("session_shutdown", () => {
+				responseWasWritten = rpcIo.outputLines.some((line) => JSON.parse(line).id === "quit");
+			});
+		});
+		harness.send({ id: "quit", type: "prompt", message: "/quit-now" });
+		expect(await harness.waitForResponse("quit")).toMatchObject({ success: true });
+		await waitForExit();
+		expect(responseWasWritten).toBe(true);
+	});
+
+	it("keeps the request's original deadline when an extension command never returns", async () => {
+		const commandGate = gate();
+		const requested = gate();
+		releases.push(commandGate.open);
+		const { harness } = await setup((pi) => {
+			pi.registerCommand("quit-hung", {
+				handler: async (_args, ctx) => {
+					ctx.shutdown();
+					requested.open();
+					await commandGate.promise;
+				},
+			});
+		});
+		const at = Date.now();
+		harness.send({ id: "quit", type: "prompt", message: "/quit-hung" });
+		await requested.promise;
+		harness.send({ id: "late", type: "get_state" });
+		expect(await harness.waitForResponse("late")).toMatchObject({ success: false, error: "shutting down" });
+		const exit = await waitForExit();
+		expect(exit.at - at).toBeGreaterThanOrEqual(RPC_SHUTDOWN_BUDGET_MS - 50);
+		expect(exit.at - at).toBeLessThan(RPC_SHUTDOWN_BUDGET_MS + 1000);
+		expect(() => harness.runtime.session.queueDeveloperMessage("late")).toThrow(/disposed/);
+	});
+
+	it("writes a delayed command response before cleanup without restarting the request's budget", async () => {
+		const requested = gate();
+		const commandGate = gate();
+		releases.push(commandGate.open);
+		let responseWasWritten = false;
+		const { harness } = await setup((pi) => {
+			pi.registerCommand("quit-delayed", {
+				handler: async (_args, ctx) => {
+					ctx.shutdown();
+					requested.open();
+					await commandGate.promise;
+				},
+			});
+			pi.on("session_shutdown", () => {
+				responseWasWritten = harness.responses("quit").length === 1;
+			});
+		});
+		harness.send({ id: "quit", type: "prompt", message: "/quit-delayed" });
+		await requested.promise;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(exits).toHaveLength(0);
+		expect(responseWasWritten).toBe(false);
+		commandGate.open();
+		await waitForExit();
+		expect(responseWasWritten).toBe(true);
+	});
+
+	it("bounds shutdown requested during an active run instead of waiting forever for settlement", async () => {
+		const { harness } = await setup((pi) => {
+			pi.on("agent_start", (_event, ctx) => ctx.shutdown());
 		});
 		const started = heldResponse(harness, { cooperative: false });
 		harness.send({ id: "p1", type: "prompt", message: "work" });
 		await started;
-
-		eof();
-		await new Promise((resolve) => setTimeout(resolve, 20));
 		const at = Date.now();
-		sigterm();
-		const exit = await waitForExit();
-
-		expect(exit.code).toBe(143);
-		expect(exit.at - at).toBeLessThan(500);
-		expect(handlerCalls).toBe(0);
-		expect(dispose).toHaveBeenCalledWith({ handlersDispatched: true });
-		expect(exits).toHaveLength(1);
+		expect((await waitForExit()).at - at).toBeLessThan(RPC_SHUTDOWN_BUDGET_MS + 1000);
 	});
+
+	it("bounds credential-write settlement after synchronous session disposal", async () => {
+		const credentialGate = gate();
+		releases.push(credentialGate.open);
+		const { harness } = await setup();
+		vi.spyOn(harness.runtime.services.modelRuntime, "settleCredentialWrites").mockReturnValue(credentialGate.promise);
+		const at = eof();
+		const exit = await waitForExit();
+		expect(exit.at - at).toBeGreaterThanOrEqual(RPC_SHUTDOWN_BUDGET_MS - 50);
+		expect(exit.at - at).toBeLessThan(RPC_SHUTDOWN_BUDGET_MS + 1000);
+		expect(() => harness.runtime.session.queueDeveloperMessage("late")).toThrow(/disposed/);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"keeps cleanup running after SIGHUP during an EOF drain and exits 129",
+		async () => {
+			const handlerGate = gate();
+			const handlerStarted = gate();
+			releases.push(handlerGate.open);
+			await setup((pi) => {
+				pi.on("session_shutdown", async () => {
+					handlerStarted.open();
+					await handlerGate.promise;
+				});
+			});
+			eof();
+			await handlerStarted.promise;
+			process.emit("SIGHUP");
+			await new Promise((resolve) => setTimeout(resolve, 30));
+			expect(exits).toHaveLength(0);
+			handlerGate.open();
+			expect((await waitForExit()).code).toBe(129);
+		},
+	);
 
 	it("keeps a SIGTERM-triggered shutdown: handlers dispatched once, disposed, exit 143", async () => {
 		let handlerCalls = 0;

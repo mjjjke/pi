@@ -37,6 +37,7 @@ function fixture(showCosts = false) {
 	Object.assign(mode, {
 		isInitialized: true,
 		chatContainer: chat,
+		pendingMessagesContainer: new Container(),
 		pendingTools: new Map(),
 		entriesRenderedByBoundaryCompaction: new Set(),
 		footer: { invalidate: vi.fn() },

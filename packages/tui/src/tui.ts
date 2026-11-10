@@ -1554,7 +1554,9 @@ export abstract class TuiBase extends Container implements TUI {
 
 	protected applyLineResets(lines: string[], width: number): string[] {
 		lines = this.terminalLinkFilter.filter(lines, this.linkPolicy, width);
-		return lines.map((line) => (isImageLine(line) ? line : normalizeTerminalOutput(line) + SEGMENT_RESET));
+		return lines.map((line) =>
+			isImageLine(line) ? line : normalizeTerminalOutput(line.replaceAll(CURSOR_MARKER, "")) + SEGMENT_RESET,
+		);
 	}
 
 	private compositeLineAt(
@@ -1586,8 +1588,9 @@ export abstract class TuiBase extends Container implements TUI {
 				const beforeMarker = line.slice(0, markerIndex);
 				const col = visibleWidth(beforeMarker);
 
-				// Strip marker from the line
-				lines[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
+				// Strip all markers from the selected line. The first marker determines the
+				// hardware cursor position; any others are stale internal sentinels.
+				lines[row] = line.replaceAll(CURSOR_MARKER, "");
 
 				return { row, col };
 			}

@@ -133,7 +133,9 @@ describe("AgentSession bash_timeout", () => {
 		const descendant = Number(text.match(/bg:(\d+)/)?.[1]);
 		if (descendant) pids.add(descendant);
 		expect(result.isError).toBe(true);
-		expect(text).toMatch(/Command timed out after 0\.3 seconds$/);
+		expect(text).toMatch(
+			/Command timed out after 0\.3 seconds\. The shell exited with code 0 after 0(?:\.\d)? seconds, but background processes it started kept writing output until the timeout\.$/,
+		);
 	});
 
 	it("applies a tool_call timeout mutation to execution without changing the recorded arguments", async () => {

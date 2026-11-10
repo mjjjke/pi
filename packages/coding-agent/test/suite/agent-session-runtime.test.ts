@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -11,6 +11,7 @@ import {
 	createAgentSessionServices,
 } from "../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import { MissingSessionCwdError } from "../../src/core/session-cwd.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type {
 	AgentToolResult,
@@ -136,6 +137,32 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(() => runtime.session.queueDeveloperMessage("late")).toThrow(/disposed/);
 	});
 
+	it("the bounded caller can invalidate immediately after its abort budget, while credential writes settle", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		let release = () => {};
+		const credentials = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const abort = vi.spyOn(runtime.session, "abort");
+		const writes = vi.spyOn(runtime.services.modelRuntime, "settleCredentialWrites").mockReturnValue(credentials);
+		let settled = false;
+		const disposal = runtime.dispose({ handlersDispatched: true }).then(() => {
+			settled = true;
+		});
+		try {
+			expect(abort).not.toHaveBeenCalled();
+			expect(writes).toHaveBeenCalledOnce();
+			expect(() => runtime.session.queueDeveloperMessage("late")).toThrow(/disposed/);
+			expect(settled).toBe(false);
+		} finally {
+			release();
+			await disposal;
+			abort.mockRestore();
+			writes.mockRestore();
+		}
+		expect(settled).toBe(true);
+	});
+
 	it("persists message_end assistant replacements to the session manager", async () => {
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
 			pi.on("message_end", (event) => {
@@ -225,6 +252,31 @@ describe("AgentSessionRuntime characterization", () => {
 			"toolResult",
 			"assistant",
 		]);
+	});
+
+	// #11060
+	it("leaves no copy behind when an import fails on a missing session cwd", async () => {
+		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		const sessionDir = runtime.session.sessionManager.getSessionDir();
+		const importPath = join(tempDir, "import", "orphan.jsonl");
+		mkdirSync(join(tempDir, "import"), { recursive: true });
+		writeFileSync(
+			importPath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "orphan",
+				timestamp: new Date().toISOString(),
+				cwd: join(tempDir, "renamed-away"),
+			})}\n`,
+		);
+
+		await expect(runtime.importFromJsonl(importPath)).rejects.toBeInstanceOf(MissingSessionCwdError);
+		expect(existsSync(join(sessionDir, "orphan.jsonl"))).toBe(false);
+
+		await runtime.importFromJsonl(importPath, tempDir);
+		expect(runtime.session.sessionFile).toBe(join(sessionDir, "orphan.jsonl"));
+		expect(existsSync(join(sessionDir, "orphan-1.jsonl"))).toBe(false);
 	});
 
 	it("preserves an existing session when importing a file with the same name", async () => {

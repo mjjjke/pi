@@ -90,18 +90,18 @@ Clients must also handle child-process startup failures, unexpected exits, stder
 
 ## Shutdown
 
-Close the child's stdin to request an orderly shutdown. Pi disposes the active runtime before exiting. Clients should still handle process signals and unexpected exits.
+Close the child's stdin to request an orderly shutdown. Pi disposes the active runtime and waits for pending work to finish before exiting, so give it time to exit before killing it. Clients should still handle process signals and unexpected exits.
 
-Shutdown on stdin EOF (or an extension shutdown request) is bounded to 3 seconds from its trigger and runs once:
+Shutdown on stdin EOF, SIGTERM/SIGHUP, or an extension shutdown request is bounded to 3 seconds from its trigger and runs once:
 
-1. Pi stops reading input, answers any further command with `error: "shutting down"`, cancels pending extension dialogs, and cancels a `prompt` whose preflight is still running (its response is `error: "prompt cancelled: session shutting down"`; no run starts and nothing is queued).
+1. Pi stops admitting commands (`error: "shutting down"`), cancels a `prompt` whose preflight is still running (`error: "prompt cancelled: session shutting down"`; no run starts and nothing is queued), detaches input, and cancels pending extension dialogs.
 2. It aborts the active run. A provider stream that honors the abort ends with an aborted assistant message, which is persisted.
 3. It dispatches `session_shutdown` handlers once. A handler still running at the deadline is abandoned.
-4. It always disposes the session, kills tracked detached child processes, flushes stdout with whatever budget remains, and exits.
+4. It always invalidates the session and kills tracked detached child processes. Pending credential writes and stdout flushing get only the remaining budget, then Pi exits.
 
-Messages persisted at their `message_end` are recoverable; the aborted partial message is best-effort within the budget. SIGTERM or SIGHUP during this drain skips the remaining steps, disposes and exits with 143 or 129.
+Messages persisted at their `message_end` are recoverable; the aborted partial message and pending credential writes are best-effort within the budget. Repeated stdin EOF does not interrupt cleanup. A first SIGTERM or SIGHUP during the drain also lets cleanup finish within the original budget (exit 143 or 129); a second signal exits immediately with that signal's code. Closing stdin and sending SIGTERM together is safe.
 
-An extension can also request shutdown through its extension context. Pi completes shutdown after the current command or after the active run emits `agent_settled`.
+An extension can request shutdown with `ctx.shutdown()`. Admission closes immediately. If no command response is outstanding, the drain starts on the next tick. An extension command's prompt response is written before cleanup when the command completes within the budget. A hung command cannot extend the request's original 3-second deadline. An active model run is aborted instead of waiting indefinitely for `agent_settled`.
 
 ## Minimal client
 

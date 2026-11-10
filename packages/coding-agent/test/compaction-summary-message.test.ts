@@ -18,7 +18,7 @@ const message = createCompactionSummaryMessage(
 
 describe("compaction summary display", () => {
 	test.each([undefined, 62104])("one quiet row collapsed with after=%s; expanded header and Markdown", (after) => {
-		const component = new CompactionSummaryMessageComponent(message, undefined, 1, after);
+		const component = new CompactionSummaryMessageComponent(message, undefined, 1, [], undefined, undefined, after);
 		const lines = component.render(100).map((line) => stripAnsi(line).trimEnd());
 		expect(lines).toEqual([
 			` ✓ compaction  14:05  ${after === undefined ? "168k" : "168k → ~62k"} tokens  (ctrl+o to expand)`,
@@ -31,13 +31,13 @@ describe("compaction summary display", () => {
 	});
 
 	test("drops hint first, then time, then truncates rather than wrapping", () => {
-		const component = new CompactionSummaryMessageComponent(message, undefined, 1, 62104);
+		const component = new CompactionSummaryMessageComponent(message, undefined, 1, [], undefined, undefined, 62104);
 		expect(stripAnsi(component.render(50)[0]).trimEnd()).toBe(" ✓ compaction  14:05  168k → ~62k tokens");
 		expect(stripAnsi(component.render(34)[0]).trimEnd()).toBe(" ✓ compaction  168k → ~62k tokens");
 	});
 
 	test.each([0, 1, 3, 12, 20, 34, 40])("fits width %s in both states", (width) => {
-		const component = new CompactionSummaryMessageComponent(message, undefined, 1, 62104);
+		const component = new CompactionSummaryMessageComponent(message, undefined, 1, [], undefined, undefined, 62104);
 		expect(component.render(width)).toHaveLength(1);
 		expect(component.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
 		component.setExpanded(true);
@@ -47,7 +47,15 @@ describe("compaction summary display", () => {
 	test("uses configured expansion binding and output padding", () => {
 		setKeybindings(new KeybindingsManager({ "app.tools.expand": "ctrl+e" }));
 		try {
-			const component = new CompactionSummaryMessageComponent(message, undefined, 3, 62104);
+			const component = new CompactionSummaryMessageComponent(
+				message,
+				undefined,
+				3,
+				[],
+				undefined,
+				undefined,
+				62104,
+			);
 			expect(stripAnsi(component.render(100)[0])).toContain("   ✓ compaction");
 			expect(stripAnsi(component.render(100)[0])).toContain("(ctrl+e to expand)");
 			component.setOutputPad(0);
@@ -71,7 +79,7 @@ describe("compaction summary display", () => {
 		const fg = vi.spyOn(Theme.prototype, "fg");
 		const bg = vi.spyOn(Theme.prototype, "bg");
 		try {
-			new CompactionSummaryMessageComponent(message, undefined, 1, 62104).render(100);
+			new CompactionSummaryMessageComponent(message, undefined, 1, [], undefined, undefined, 62104).render(100);
 			for (const [key, text] of [
 				["success", "✓"],
 				["accent", "compaction"],

@@ -47,7 +47,7 @@ it("preserves the billing suffix algorithm, empty text and wrapper selection", a
 		]),
 	).toBe("System: final");
 	expect(buildBillingHeaderValue()).toBe(
-		"x-anthropic-billing-header: cc_version=2.1.280.000; cc_entrypoint=cli; cch=00000;",
+		"x-anthropic-billing-header: cc_version=2.1.322.000; cc_entrypoint=cli; cch=00000;",
 	);
 });
 async function signed(
@@ -70,6 +70,15 @@ async function signed(
 it("signs the golden serialized body", async () => {
 	const { received } = await signed(placeholder.replace("2.1.145.abc", "2.1.145.000"));
 	expect(received?.body).toBe(placeholder.replace("2.1.145.abc", "2.1.145.b21").replace("cch=00000", "cch=4b925"));
+});
+it("signs the recomputed 2.1.322 serialized golden body", async () => {
+	// SHA-256 suffix independently recomputed with node:crypto: dc6; xxHash64 cch: 85ee0.
+	const body = JSON.stringify({
+		system: [{ type: "text", text: buildBillingHeaderValue() }],
+		messages: [{ role: "user", content: "hello" }],
+	});
+	const { received } = await signed(body);
+	expect(received?.body).toBe(body.replace("2.1.322.000", "2.1.322.dc6").replace("cch=00000", "cch=85ee0"));
 });
 it("only edits system[0]; quoted billing text stays opaque", async () => {
 	const payload = {

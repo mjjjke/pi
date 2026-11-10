@@ -147,8 +147,12 @@ async function captureAnthropic(
 	oauth: boolean,
 	rewriteWire = (body: string) => body,
 	bootstrap = false,
+	threads = false,
 ): Promise<string[]> {
-	const model = bootstrap ? withInstructions(anthropicModel) : anthropicModel;
+	const model = {
+		...(bootstrap ? withInstructions(anthropicModel) : anthropicModel),
+		...(threads ? { compat: { supportsMessageThreads: true } } : {}),
+	};
 	const bodies: string[] = [];
 	const onPayload = vi.fn(async (value: unknown) => {
 		const payload = value as { system: { text: string }[] };
@@ -160,6 +164,7 @@ async function captureAnthropic(
 			apiKey: oauth ? "sk-ant-oat-offline-test" : "sk-ant-offline-test",
 			maxRetries: 0,
 			cacheRetention: "short",
+			...(threads ? { sessionId: "offline-thread-create-prefix-stability" } : {}),
 			env: { PI_ANTHROPIC_CLAUDE_CODE_VERSION: "2.1.280", PI_ANTHROPIC_CCH_SEED: CLAUDE_CODE_CCH_SEED },
 			onPayload,
 			fetch: async (input, init) => {
@@ -206,6 +211,15 @@ describe("final-wire prompt prefix stability", () => {
 		expect(newPayload.messages.at(-1).content[0].cache_control).toEqual({ type: "ephemeral" });
 		if (oauth) expect(oldPayload.system[0].text).not.toBe(newPayload.system[0].text);
 		expectPromptPrefixStable(before!, after!, anthropicPrefix(oauth));
+	});
+
+	it("preserves every cached OAuth byte on successive thread creates, except cch and the moving breakpoint", async () => {
+		// The mock has no responseId, so neither reply can be continued: both requests create.
+		const [before, after] = await captureAnthropic(true, undefined, true, true);
+		expect(JSON.parse(before!).thread).toEqual({ type: "create" });
+		expect(JSON.parse(after!).thread).toEqual({ type: "create" });
+		expect(JSON.parse(after!).messages[3].content[0].content).toBe(adversarial);
+		expectPromptPrefixStable(before!, after!, anthropicPrefix(true));
 	});
 
 	it.each([false, true])("keeps the folded v4 bootstrap prefix byte-stable on Anthropic (OAuth=%s)", async (oauth) => {

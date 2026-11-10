@@ -37,6 +37,8 @@ const openAICompletionsCompat: Omit<Required<OpenAICompletionsCompat>, "thinking
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
+	requiresNonNullAssistantContent: false,
+	requiresToolsWithToolHistory: false,
 	requiresThinkingAsText: false,
 	requiresReasoningContentOnAssistantMessages: false,
 	thinkingFormat: "openai",
@@ -54,6 +56,7 @@ const openAICompletionsCompat: Omit<Required<OpenAICompletionsCompat>, "thinking
 	cacheControlFormat: "anthropic",
 	sendSessionAffinityHeaders: false,
 	sessionAffinityFormat: "openai",
+	promptCacheKeyMode: "auto",
 	supportsLongCacheRetention: true,
 };
 

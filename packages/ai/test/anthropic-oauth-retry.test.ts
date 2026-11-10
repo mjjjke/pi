@@ -43,7 +43,7 @@ it("signs every provider retry from fresh placeholders without modifying reusabl
 	expect(result.stopReason).toBe("stop");
 	expect(bodies).toHaveLength(2);
 	expect(bodies[0]).toBe(bodies[1]);
-	expect(placeholder).toContain("cc_version=2.1.280.000;");
+	expect(placeholder).toContain("cc_version=2.1.322.000;");
 	const payload = JSON.parse(bodies[0]!);
 	const cch = payload.system[0].text.slice(-6, -1);
 	payload.system[0].text = `${payload.system[0].text.slice(0, -6)}00000;`;

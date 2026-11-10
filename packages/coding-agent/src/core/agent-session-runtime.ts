@@ -1,4 +1,4 @@
-import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { basename, join, parse } from "node:path";
 import { pathsEqual, resolvePath } from "../utils/paths.ts";
 import type { AgentSession, CwdCarry } from "./agent-session.ts";
@@ -551,7 +551,13 @@ export class AgentSessionRuntime {
 		}
 
 		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
-		assertSessionCwdExists(sessionManager, this.cwd);
+		try {
+			assertSessionCwdExists(sessionManager, this.cwd);
+		} catch (error) {
+			// The import did not happen; drop the copy so a retry with a cwd override or a fork leaves no stray file.
+			if (!sourceAlreadyStored) rmSync(destinationPath, { force: true });
+			throw error;
+		}
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(
 			await this.createRuntime({
@@ -566,14 +572,16 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * Emit `session_shutdown` and dispose the session. With `handlersDispatched`, the caller has
-	 * already dispatched `session_shutdown` (for example with a time limit): dispose without
-	 * running the handlers again.
+	 * Dispose the session for process exit, waiting for active tools before shutdown handlers and
+	 * for credential writes before exit (#9126, #11692). With `handlersDispatched`, the caller has
+	 * already attempted abort and shutdown handlers within its own budget: invalidate without
+	 * repeating either phase, then settle credential writes within the caller's remaining budget.
 	 */
 	async dispose(options?: { handlersDispatched?: boolean }): Promise<void> {
 		this.session.closeAdmission();
 		this.session.cancelCwdChange();
 		if (!options?.handlersDispatched) {
+			await this.session.abort();
 			await emitSessionShutdownEvent(this.session.extensionRunner, {
 				type: "session_shutdown",
 				reason: "quit",
@@ -581,6 +589,7 @@ export class AgentSessionRuntime {
 		}
 		this.beforeSessionInvalidate?.();
 		this.session.dispose();
+		await this.services.modelRuntime.settleCredentialWrites();
 	}
 }
 

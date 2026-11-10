@@ -292,7 +292,7 @@ describe("AgentSession readiness barrier", () => {
 			(error: Error) => error.message,
 		);
 		gate.resolve();
-		expect(await reload).toMatch(/Cannot reload while a run is active/);
+		expect(await reload).toMatch(/Wait for the current response to finish before reloading\./);
 		await run;
 		expect(phases).toEqual(["preflight:ready"]);
 		expect(harness.session.messages.map((m) => m.role)).toEqual(["system", "custom", "assistant"]);
@@ -436,7 +436,7 @@ describe("AgentSession readiness barrier", () => {
 		const run = harness.session.prompt("hello");
 		await tick();
 		await expect(harness.session.reload()).rejects.toThrow(
-			"Cannot reload while a run is active, compaction is running, or extensions are binding",
+			"Wait for the current response to finish before reloading.",
 		);
 		gate.resolve();
 		await run;
@@ -863,9 +863,7 @@ describe("AgentSession readiness barrier", () => {
 						.some(
 							(record) =>
 								record.type === "extension_error" &&
-								String(record.error).includes(
-									"Cannot reload while a run is active, compaction is running, or extensions are binding",
-								),
+								String(record.error).includes("Wait for the current response to finish before reloading."),
 						),
 				).toBe(true),
 			);
@@ -900,9 +898,7 @@ describe("AgentSession readiness barrier", () => {
 		const compaction = harness.session.compact().catch(() => {});
 		await vi.waitFor(() => expect(compacting).toBe(true));
 		expect(harness.session.isCompacting).toBe(true);
-		await expect(harness.session.reload()).rejects.toThrow(
-			"Cannot reload while a run is active, compaction is running, or extensions are binding",
-		);
+		await expect(harness.session.reload()).rejects.toThrow("Wait for compaction to finish before reloading.");
 		gate.resolve();
 		await compaction;
 		await expect(harness.session.reload()).resolves.toBeUndefined();

@@ -2,7 +2,7 @@
 import type { Model, ProviderEnv } from "../types.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 
-export const CLAUDE_CODE_VERSION = "2.1.280";
+export const CLAUDE_CODE_VERSION = "2.1.322";
 export const CLAUDE_CODE_ENTRYPOINT = "cli";
 export const CLAUDE_CODE_CCH_SEED = "0x4d659218e32a3268";
 const BILLING_HEADER_SALT = "59cf53e54c78";
@@ -51,9 +51,29 @@ export async function computeBillingVersionSuffix(messageText: string, version =
 		.slice(0, 3);
 }
 
-/** Both placeholders are filled from the final SDK body, after onPayload. */
+/** The suffix is filled after onPayload, before thread trimming; cch after SDK serialization. */
 export function buildBillingHeaderValue(version = CLAUDE_CODE_VERSION): string {
 	return `x-anthropic-billing-header: cc_version=${version}.000; cc_entrypoint=${CLAUDE_CODE_ENTRYPOINT}; cch=00000;`;
+}
+
+const BILLING_HEADER_PATTERN =
+	/^x-anthropic-billing-header: cc_version=([A-Za-z0-9][A-Za-z0-9._+-]*)\.([0-9a-f]{3}); cc_entrypoint=cli; cch=00000;$/;
+
+/** Prepare only the owned placeholder, using the whole conversation rather than a thread delta. */
+export async function prepareBillingHeaderValue(
+	header: string,
+	messages: readonly BillingMessage[],
+): Promise<string | undefined> {
+	try {
+		const match = BILLING_HEADER_PATTERN.exec(header);
+		if (!match || match[2] !== "000") return header;
+		const version = match[1]!;
+		const suffix = await computeBillingVersionSuffix(extractFirstUserMessageText(messages), version);
+		return `x-anthropic-billing-header: cc_version=${version}.${suffix}; cc_entrypoint=${CLAUDE_CODE_ENTRYPOINT}; cch=00000;`;
+	} catch {
+		// The caller must keep the full body when no conversation suffix could be prepared.
+		return undefined;
+	}
 }
 
 const UINT64_MASK = 0xffff_ffff_ffff_ffffn;
@@ -203,16 +223,16 @@ export function signAnthropicOAuthFetch(
 				const block = payload?.system?.[0];
 				const match =
 					Array.isArray(payload?.system) && block?.type === "text" && typeof block.text === "string"
-						? /^x-anthropic-billing-header: cc_version=([A-Za-z0-9][A-Za-z0-9._+-]*)\.000; cc_entrypoint=cli; cch=00000;$/.exec(
-								block.text,
-							)
+						? BILLING_HEADER_PATTERN.exec(block.text)
 						: null;
+				const threaded = payload?.thread?.type === "create" || payload?.thread?.type === "continue";
 				if (match) {
 					const version = match[1]!;
-					const suffix = await computeBillingVersionSuffix(
-						extractFirstUserMessageText(payload.messages ?? []),
-						version,
-					);
+					// Threads already carry the suffix of the full post-onPayload conversation.
+					// A full-request fallback has no thread and follows the original signing path.
+					const suffix = threaded
+						? match[2]!
+						: await computeBillingVersionSuffix(extractFirstUserMessageText(payload.messages ?? []), version);
 					block.text = `x-anthropic-billing-header: cc_version=${version}.${suffix}; cc_entrypoint=${CLAUDE_CODE_ENTRYPOINT}; cch=00000;`;
 					const cch = computeClaudeCodeCch(JSON.stringify(payload), seed);
 					block.text = `${block.text.slice(0, -6)}${cch};`;

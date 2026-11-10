@@ -57,7 +57,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 			const { body, headers, payload } = await capture({ systemPrompt, messages: [user] });
 			expect(payload.system).toHaveLength(2);
 			expect(payload.system?.[0]?.text).toMatch(
-				/^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
+				/^x-anthropic-billing-header: cc_version=2\.1\.322\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
 			);
 			expect(payload.system?.[0]?.text).not.toContain("cch=00000");
 			expect(payload.system?.[0]?.cache_control).toBeUndefined();
@@ -67,7 +67,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 				cache_control: { type: "ephemeral" },
 			});
 			expect(body).not.toContain("Claude Code");
-			expect(headers.get("user-agent")).toBe("claude-cli/2.1.280");
+			expect(headers.get("user-agent")).toBe("claude-cli/2.1.322");
 			expect(headers.get("x-app")).toBe("cli");
 			expect(headers.get("authorization")).toBe("Bearer sk-ant-oat-test");
 			expect(headers.has("x-api-key")).toBe(false);
@@ -110,7 +110,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 		const seed = "0x1234567890abcdef";
 		let reusable: Payload | undefined;
 		const originalFetch = globalThis.fetch;
-		const quoted = "x-anthropic-billing-header: cc_version=2.1.280.abc; cc_entrypoint=cli; cch=00000;";
+		const quoted = "x-anthropic-billing-header: cc_version=2.1.322.abc; cc_entrypoint=cli; cch=00000;";
 		const { body, payload } = await capture(
 			{ messages: [user] },
 			{
@@ -127,7 +127,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 			},
 		);
 		expect(globalThis.fetch).toBe(originalFetch);
-		expect(reusable?.system?.[0]?.text).toContain("cc_version=2.1.280.000;");
+		expect(reusable?.system?.[0]?.text).toContain("cc_version=2.1.322.000;");
 		expect(reusable?.system?.[0]?.text).toContain("cch=00000;");
 		expect(payload.system?.[1]?.text).toContain("Extension mutation");
 		expect(payload.messages).toEqual([
@@ -178,7 +178,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 				payload.messages as Parameters<typeof extractFirstUserMessageText>[0],
 			);
 			expect(payload.system?.[0]?.text).toContain(
-				`cc_version=2.1.280.${await computeBillingVersionSuffix(finalText)};`,
+				`cc_version=2.1.322.${await computeBillingVersionSuffix(finalText)};`,
 			);
 			expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		},
@@ -198,7 +198,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 			],
 		]) {
 			const { payload } = await capture({ messages });
-			expect(payload.system?.[0]?.text).toContain(`cc_version=2.1.280.${await computeBillingVersionSuffix("")};`);
+			expect(payload.system?.[0]?.text).toContain(`cc_version=2.1.322.${await computeBillingVersionSuffix("")};`);
 		}
 	});
 	it.each(["user-agent", "User-Agent", "USER-AGENT"])(
@@ -211,7 +211,7 @@ describe("Anthropic OAuth compatibility on the serialized wire", () => {
 			);
 			expect(headers.get("user-agent")).toBe("custom-UA");
 			expect(headers.get("x-app")).toBe("custom-app");
-			expect(payload.system?.[0]?.text).toContain("cc_version=2.1.280.");
+			expect(payload.system?.[0]?.text).toContain("cc_version=2.1.322.");
 		},
 	);
 	it("adds effort beta for managed effort and fast mode", async () => {

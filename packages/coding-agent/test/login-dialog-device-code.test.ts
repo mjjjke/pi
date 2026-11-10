@@ -164,11 +164,15 @@ describe("login URLs", () => {
 		const output = dialog.render(120).join("\n");
 
 		expect(output).not.toContain("\x1b]52");
-		expect(render(dialog)).toContain("https://example.com/device%07%1B]52;c;Zm9v");
-		expect(render(dialog)).toContain("Help: https://example.com/help%07%1B]52;c;Zm9v");
+		expect(output).not.toContain("\x1b]8;");
+		expect(render(dialog)).toContain("https://example.com/device (Not opened: unsupported URL scheme)");
+		expect(render(dialog)).toContain("Help: https://example.com/help (Not opened: unsupported URL scheme)");
+		vi.mocked(copyToClipboard).mockResolvedValue(undefined);
+		dialog.handleInput("\r");
+		expect(openBrowser).not.toHaveBeenCalled();
 	});
 
-	it("replaces control characters in URLs that are not web URLs", () => {
+	it("strips terminal controls and rejects URLs that are not web URLs", () => {
 		const injected = "x\x07\x1b]52;c;Zm9v\x07";
 		const { dialog } = createDialog();
 		dialog.showAuth(`file:///tmp/${injected}`);
@@ -176,11 +180,13 @@ describe("login URLs", () => {
 
 		dialog.showDeviceCode({ ...device, verificationUri: injected });
 		expect(dialog.render(120).join("\n")).not.toContain("\x1b]52");
-		expect(render(dialog)).toContain("x ]52;c;Zm9v");
+		expect(dialog.render(120).join("\n")).not.toContain("\x1b]8;");
+		expect(render(dialog)).toContain("x (Not opened: unsupported URL scheme)");
 
 		dialog.showInfo("Docs", [{ label: "Help", url: injected }]);
 		expect(dialog.render(120).join("\n")).not.toContain("\x1b]52");
-		expect(render(dialog)).toContain("Help: x ]52;c;Zm9v");
+		expect(dialog.render(120).join("\n")).not.toContain("\x1b]8;");
+		expect(render(dialog)).toContain("Help: x (Not opened: unsupported URL scheme)");
 		expect(openBrowser).not.toHaveBeenCalled();
 	});
 });

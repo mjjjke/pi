@@ -21,6 +21,7 @@ import {
 import { calculateCost } from "../models.ts";
 import { instructionContentToText } from "../providers/instruction-messages.ts";
 import { supportsProgressUpdates, THINKING_DISPLAY_UPDATES_BETA } from "../providers/progress-updates.ts";
+import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -40,7 +41,9 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
+import { withCauseDetail } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { parseJsonWithRepair } from "../utils/json-parse.ts";
@@ -69,17 +72,22 @@ import {
 	CLAUDE_CODE_ENTRYPOINT,
 	getClaudeCodeCchSeed,
 	getClaudeCodeVersion,
+	prepareBillingHeaderValue,
 	signAnthropicOAuthFetch,
 } from "./anthropic-oauth.ts";
 import {
 	getJsonSchemaToolParameters,
-	isStrictToolLimitErrorMessage,
 	prefersJsonSchemaStrictSampling,
 	resolveJsonSchemaStrictSampling,
 	type UnsupportedStrictSchemaKeywordCheck,
 } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
+import {
+	hasExceededStrictToolLimits,
+	isStrictToolLimitErrorMessage,
+	markStrictToolLimitsExceeded,
+} from "./strict-tool-limits.ts";
 import { splitErrorToolResultImages, transformMessages } from "./transform-messages.ts";
 
 /**
@@ -266,6 +274,7 @@ function withAnthropicFastModeHeaders<T extends object>(
 		},
 	};
 }
+const MESSAGE_THREADS_BETA = "message-threads-2026-08-12";
 
 /**
  * Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
@@ -298,7 +307,258 @@ function getAnthropicCompat(model: Model<"anthropic-messages">) {
 		supportsStrictTools: model.compat?.supportsStrictTools ?? false,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsMidConvoToolChanges: model.compat?.supportsMidConvoToolChanges ?? false,
+		// Gateways that drop unknown request fields would silently turn a `continue` into a request
+		// without the earlier conversation, so the default is limited to Anthropic's own endpoint.
+		// Widen or remove this restriction once proxies generally forward the `thread` field.
+		supportsMessageThreads:
+			model.compat?.supportsMessageThreads ??
+			(model.provider === "anthropic" && model.baseUrl.includes("api.anthropic.com")),
 	};
+}
+
+/**
+ * Message threads: the server keeps the conversation of a thread, so a request can continue
+ * from the previous reply and send only the new messages. pi still builds the full request;
+ * `prepareThreadRequest()` compares it with the previous request of the session and sends
+ * only the new part when nothing earlier changed.
+ */
+type ThreadParam = { type: "create" } | { type: "continue"; previous_message_id: string };
+
+/** The pinned SDK types do not include the `thread` request field yet. */
+type ThreadedParams = MessageCreateParamsStreaming & { thread?: ThreadParam };
+
+interface ThreadEntry {
+	/** Number of messages in the last full request as sent plus the converted reply. */
+	prefixCount: number;
+	/** `hashThreadPrefix()` of the request's settings and those messages. */
+	prefixHash: string;
+	/** Id of the reply to continue from. */
+	replyId: string;
+}
+
+/** Per session: where the next request can continue, or "off" after the endpoint rejected threads. */
+const threadState = new Map<string, ThreadEntry | "off">();
+const MAX_THREAD_STATE_ENTRIES = 10_000;
+
+/** Rejections of a `continue` that a new thread fixes: expired, raced, or a fixed setting changed. */
+const NEW_THREAD_ERRORS: ReadonlySet<string> = new Set([
+	"thread_not_found",
+	"thread_already_continued",
+	"thread_continue_in_flight",
+	"thread_fingerprint_mismatch",
+]);
+
+/**
+ * Sets a session's thread state, keeping at most `MAX_THREAD_STATE_ENTRIES` sessions.
+ *
+ * State is normally freed by `cleanupSessionResources(sessionId)` when a session ends, as pi's
+ * coding agent does. The cap bounds memory for library users that never call it, for example a
+ * server passing a new `sessionId` per conversation. Dropping the least recently updated session
+ * is cheap: its thread has most likely expired on the server already (after a few minutes idle),
+ * and otherwise its next request just starts a new thread.
+ */
+function setThreadState(sessionId: string, value: ThreadEntry | "off"): void {
+	// Re-insert so Map order stays oldest-first for the cap.
+	threadState.delete(sessionId);
+	threadState.set(sessionId, value);
+	if (threadState.size > MAX_THREAD_STATE_ENTRIES) {
+		const oldest = threadState.keys().next().value;
+		if (oldest !== undefined) threadState.delete(oldest);
+	}
+}
+
+registerSessionResourceCleanup((sessionId) => {
+	if (sessionId) threadState.delete(sessionId);
+	else threadState.clear();
+});
+
+/**
+ * Hash of everything a `continue` builds on: the settings that must stay the same within a thread
+ * and the messages the server already holds.
+ *
+ * - Settings, as sent: the endpoint (a thread exists on one endpoint only), and the fixed request
+ *   fields. A `continue` omits `tools` and all non-billing `system` blocks, so only
+ *   this check can notice a change to them, including their cache markers. The server rejects
+ *   changes to the other fields with `thread_fingerprint_mismatch`; checking them here saves that
+ *   rejected request. A fixed field missing here costs only that rejection, which also starts a
+ *   new thread.
+ * - Messages, normalized so messages that mean the same to the API hash the same.
+ */
+function hashThreadPrefix(
+	model: Model<"anthropic-messages">,
+	params: MessageCreateParamsStreaming,
+	messages: readonly unknown[],
+): string {
+	const { system, tools, thinking, output_config, tool_choice, betas, fallbacks } = params;
+	const settings = JSON.stringify([
+		model.provider,
+		model.baseUrl,
+		params.model,
+		system,
+		tools,
+		thinking,
+		output_config,
+		tool_choice,
+		betas,
+		fallbacks,
+	]);
+	const conversation = JSON.stringify(messages.map(normalizeThreadMessage));
+	return shortHash(settings + conversation);
+}
+
+/**
+ * Normalizes only the wire-protocol positions where two forms mean the same to the API. Tool inputs
+ * and other payloads stay intact: a `content` or `cache_control` key inside them is tool data, and
+ * normalizing it would let a changed argument hash like the old one and continue without it.
+ * - Cache markers don't change what a message means, but they move: pi puts one on the newest
+ *   message, so the message that had it in the last request has none in this one. Extensions may
+ *   add markers to any content block, including blocks nested in a tool result.
+ * - To attach that marker, the newest user message's string content is sent as one text block; the
+ *   next request sends the same message as a string: "hi" vs [{ type: "text", text: "hi" }].
+ */
+function normalizeThreadMessage(message: unknown): unknown {
+	if (!isPlainRecord(message)) return message;
+	const { cache_control: _marker, ...rest } = message;
+	return "content" in rest ? { ...rest, content: normalizeThreadContent(rest.content) } : rest;
+}
+
+function normalizeThreadContent(content: unknown): unknown {
+	if (typeof content === "string") return [{ type: "text", text: content }];
+	if (!Array.isArray(content)) return content;
+	return content.map((block) => {
+		if (!isPlainRecord(block)) return block;
+		const { cache_control: _marker, ...rest } = block;
+		return rest.type === "tool_result" && "content" in rest
+			? { ...rest, content: normalizeThreadContent(rest.content) }
+			: rest;
+	});
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface PreparedThreadRequest {
+	sessionId: string;
+	body: ThreadedParams;
+}
+
+function createThreadRequest(sessionId: string, params: MessageCreateParamsStreaming): PreparedThreadRequest {
+	return { sessionId, body: { ...params, thread: { type: "create" } } };
+}
+
+function prepareThreadRequest(
+	model: Model<"anthropic-messages">,
+	sessionId: string,
+	params: MessageCreateParamsStreaming,
+	isOAuth: boolean,
+): PreparedThreadRequest | undefined {
+	const state = threadState.get(sessionId);
+	if (state === "off") return undefined;
+	if (
+		state !== undefined &&
+		params.messages.length > state.prefixCount &&
+		hashThreadPrefix(model, params, params.messages.slice(0, state.prefixCount)) === state.prefixHash
+	) {
+		// Each reply can be continued once; deleting also keeps a concurrent request from trying.
+		threadState.delete(sessionId);
+		const { system, tools: _tools, ...rest } = params;
+		return {
+			body: {
+				...rest,
+				// Claude Code continues resend billing only, so final-body signing still runs.
+				...(isOAuth && Array.isArray(system) ? { system: system.slice(0, 1) } : {}),
+				messages: params.messages.slice(state.prefixCount),
+				thread: { type: "continue", previous_message_id: state.replyId },
+			},
+			sessionId,
+		};
+	}
+	return createThreadRequest(sessionId, params);
+}
+
+/** The `error_code` Anthropic puts in `error.details` of thread rejections. */
+function getThreadErrorCode(error: InstanceType<typeof Anthropic.APIError>): string | undefined {
+	const body = error.error as { error?: { details?: { error_code?: unknown } } } | undefined;
+	const code = body?.error?.details?.error_code;
+	return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Sends a thread request. A rejection about the thread (never a started stream) is resent once in
+ * full: as a new thread when the old one can't be continued, or without `thread` when the endpoint
+ * can't use threads, which also turns threads off for the session. Other errors are passed on.
+ * Returns the response and the thread request that produced it, if any.
+ */
+async function sendThreadRequest(
+	thread: PreparedThreadRequest,
+	params: MessageCreateParamsStreaming,
+	send: (body: ThreadedParams) => Promise<Response>,
+	output: AssistantMessage,
+	signal: AbortSignal | undefined,
+): Promise<{ response: Response; thread: PreparedThreadRequest | undefined }> {
+	try {
+		return { response: await send(thread.body), thread };
+	} catch (error) {
+		if (signal?.aborted || !(error instanceof Anthropic.APIError)) throw error;
+		const errorCode = getThreadErrorCode(error);
+		const startNewThread = errorCode !== undefined && NEW_THREAD_ERRORS.has(errorCode);
+		// The endpoint can't use threads: it can't thread this request, or it doesn't know the
+		// `thread` field and rejects it without a code ("thread: Extra inputs are not permitted"),
+		// e.g. with an `anthropic-beta` header that lacks the threads beta.
+		const threadsUnsupported =
+			errorCode === "thread_unsupported_request" ||
+			(errorCode === undefined && error.status === 400 && error.message.includes("thread"));
+		// Any other error (prompt too long, unknown model, strict tool limits, ...) is not about the
+		// thread, and resending would only fail again.
+		if (!startNewThread && !threadsUnsupported) throw error;
+		// Recorded before the resend, so a failed resend keeps it.
+		appendAssistantMessageDiagnostic(output, {
+			type: "anthropic_thread_fallback",
+			timestamp: Date.now(),
+			error: { message: error.message },
+			details: { reason: errorCode ?? String(error.status) },
+		});
+		if (startNewThread) {
+			const created = createThreadRequest(thread.sessionId, params);
+			return { response: await send(created.body), thread: created };
+		}
+		// With the threads beta, a request without `thread` is a normal request.
+		const response = await send(params);
+		setThreadState(thread.sessionId, "off");
+		return { response, thread: undefined };
+	}
+}
+
+/**
+ * Records where the session's next request can continue: after `output`, the clean reply to the
+ * thread request `thread`, whose full request was `params`.
+ */
+function recordThreadReply(
+	model: Model<"anthropic-messages">,
+	thread: PreparedThreadRequest,
+	params: MessageCreateParamsStreaming,
+	output: AssistantMessage,
+	isOAuth: boolean,
+	allowEmptySignature: boolean,
+): void {
+	// `responseModel` is set only when a fallback model answered; the server does not store those
+	// replies, so they cannot be continued.
+	if (output.responseId === undefined || output.responseModel !== undefined) return;
+	// Convert the reply like the next request will, keeping only the assistant message
+	// (transformMessages adds placeholder results for trailing tool calls).
+	const reply = convertMessages(
+		transformMessages([output], model, normalizeToolCallId),
+		isOAuth,
+		undefined,
+		allowEmptySignature,
+	).messages.filter((message) => message.role === "assistant");
+	const prefix = [...params.messages, ...reply];
+	setThreadState(thread.sessionId, {
+		prefixCount: prefix.length,
+		prefixHash: hashThreadPrefix(model, params, prefix),
+		replyId: output.responseId,
+	});
 }
 
 export interface AnthropicOptions extends StreamOptions {
@@ -648,6 +908,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const compat = getAnthropicCompat(model);
 	const normalizedContext = context;
 	const currentTools = getCurrentTools(normalizedContext.messages);
 
@@ -675,6 +936,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let isOAuth: boolean;
 			let usageModel = model;
 			let inputTransformations: BetaInputTransformation[] | undefined;
+			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+			// Session whose requests may use threads; undefined when threads don't apply. Sessions where
+			// the endpoint rejected threads ("off") still send the threads beta, which the resend that
+			// turned them off was accepted with; `prepareThreadRequest()` just sends no `thread`.
+			const threadSessionId = compat.supportsMessageThreads ? cacheSessionId : undefined;
 
 			if (options?.client) {
 				client = options.client;
@@ -692,9 +959,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						hasImages,
 					});
 				}
-
-				const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
-				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
 				const created = createClient(
 					model,
@@ -715,14 +979,37 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
-			let disablePreferredStrictTools = false;
+			const send = (body: ThreadedParams) =>
+				retryProviderRequest(
+					() =>
+						client.beta.messages
+							.create(
+								body,
+								usesAnthropicFastMode(body)
+									? withAnthropicFastModeHeaders(requestOptions, body, model, options?.headers)
+									: requestOptions,
+							)
+							.asResponse(),
+					{
+						maxRetries: options?.maxRetries,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
+						signal: options?.signal,
+					},
+				);
+			let disablePreferredStrictTools = hasExceededStrictToolLimits(options?.sessionId);
 			let marksProgressUpdates = false;
 			let response: Response;
+			let params: MessageCreateParamsStreaming;
+			// The thread request that produced the response; undefined when no `thread` was sent.
+			let thread: PreparedThreadRequest | undefined;
 			for (;;) {
 				options?.signal?.throwIfAborted();
-				const built = buildParams(model, normalizedContext, isOAuth, options, disablePreferredStrictTools);
+				const built = buildParams(model, normalizedContext, isOAuth, options, {
+					disablePreferredStrictTools,
+					messageThreads: threadSessionId !== undefined,
+				});
 				if (built.providerThinkingLevel) output.providerThinkingLevel = built.providerThinkingLevel;
-				let params = built.params;
+				params = built.params;
 				const nextParams = await options?.onPayload?.(params, model);
 				if (nextParams !== undefined) {
 					params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
@@ -733,23 +1020,29 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				}
 				marksProgressUpdates =
 					params.thinking !== undefined && "display" in params.thinking && params.thinking.display === "updates";
+				let billingPrepared = true;
+				if (isOAuth && threadSessionId !== undefined && Array.isArray(params.system)) {
+					const billing = params.system[0];
+					if (billing?.type === "text") {
+						// Hash the stable suffix, not the request-specific cch. Copy the owned block
+						// so an onPayload observer's reusable params retain their placeholders.
+						const text = await prepareBillingHeaderValue(billing.text, params.messages);
+						billingPrepared = text !== undefined;
+						if (text !== undefined) {
+							params = { ...params, system: [{ ...billing, text }, ...params.system.slice(1)] };
+						}
+					}
+				}
+				const prepared =
+					threadSessionId !== undefined && options?.disableContinuation !== true && billingPrepared
+						? prepareThreadRequest(model, threadSessionId, params, isOAuth)
+						: undefined;
 				try {
-					response = await retryProviderRequest(
-						() =>
-							client.beta.messages
-								.create(
-									params,
-									usesAnthropicFastMode(params)
-										? withAnthropicFastModeHeaders(requestOptions, params, model, options?.headers)
-										: requestOptions,
-								)
-								.asResponse(),
-						{
-							maxRetries: options?.maxRetries,
-							maxRetryDelayMs: options?.maxRetryDelayMs,
-							signal: options?.signal,
-						},
-					);
+					const sent = prepared
+						? await sendThreadRequest(prepared, params, send, output, options?.signal)
+						: { response: await send(params), thread: undefined };
+					response = sent.response;
+					thread = sent.thread;
 					break;
 				} catch (error) {
 					// Only downgrade a rejected request, never an already-started stream.
@@ -765,6 +1058,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						throw error;
 					}
 					disablePreferredStrictTools = true;
+					markStrictToolLimitsExceeded(options?.sessionId);
 					appendAssistantMessageDiagnostic(output, {
 						type: "anthropic_strict_tools_fallback",
 						timestamp: Date.now(),
@@ -986,6 +1280,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
+			if (thread) recordThreadReply(model, thread, params, output, isOAuth, compat.allowEmptySignature);
 			if (inputTransformations && inputTransformations.length > 0) {
 				appendAssistantMessageDiagnostic(output, {
 					type: "anthropic_input_transformations",
@@ -1004,7 +1299,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			stream.end();
 		} catch (error) {
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			output.errorMessage = error instanceof Error ? withCauseDetail(error) : JSON.stringify(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -1196,13 +1491,20 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
+interface BetaFeatureFlags {
+	isOAuthToken: boolean;
+	/** Tool changes are sent as native `tool_addition` / `tool_removal` blocks. */
+	nativeToolChanges: boolean;
+	/** The session uses message threads. */
+	messageThreads: boolean;
+	thinkingDisplayUpdates: boolean;
+}
+
 function getBetaFeatures(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
-	isOAuthToken: boolean,
-	nativeToolChanges: boolean,
-	thinkingDisplayUpdates: boolean,
-	options?: AnthropicOptions,
+	options: AnthropicOptions | undefined,
+	{ isOAuthToken, nativeToolChanges, messageThreads, thinkingDisplayUpdates }: BetaFeatureFlags,
 ): NonNullable<MessageCreateParamsStreaming["betas"]> {
 	let configuredFeatures: string | null | undefined;
 	for (const headers of [model.headers, options?.headers]) {
@@ -1239,15 +1541,23 @@ function getBetaFeatures(
 	}
 	if (nativeToolChanges) features.push(INLINE_TOOLS_BETA);
 	if (thinkingDisplayUpdates) features.push(THINKING_DISPLAY_UPDATES_BETA);
+	if (messageThreads) features.push(MESSAGE_THREADS_BETA);
 	return [...new Set(features)];
+}
+
+interface BuildParamsFlags {
+	/** Send `strict: "prefer"` tools without strict schemas, after Anthropic rejected them in this request or session. */
+	disablePreferredStrictTools: boolean;
+	/** The session uses message threads, so the threads beta is sent. */
+	messageThreads: boolean;
 }
 
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
 	isOAuthToken: boolean,
-	options?: AnthropicOptions,
-	disablePreferredStrictTools = false,
+	options: AnthropicOptions | undefined,
+	flags: BuildParamsFlags,
 ): {
 	params: MessageCreateParamsStreaming;
 	hasPreferredStrictTools: boolean;
@@ -1285,7 +1595,7 @@ function buildParams(
 			compat.supportsEagerToolInputStreaming,
 			compat.supportsStrictTools,
 			toolCacheControl,
-			disablePreferredStrictTools,
+			flags.disablePreferredStrictTools,
 		);
 		if (
 			definitions.some(
@@ -1319,14 +1629,12 @@ function buildParams(
 		options?.thinkingDisplay === "updates" && !supportsProgressUpdates(model)
 			? "summarized"
 			: (options?.thinkingDisplay ?? "summarized");
-	const betaFeatures = getBetaFeatures(
-		model,
-		context,
+	const betaFeatures = getBetaFeatures(model, context, options, {
 		isOAuthToken,
 		nativeToolChanges,
-		sendsThinking && requestedDisplay === "updates",
-		options,
-	);
+		messageThreads: flags.messageThreads,
+		thinkingDisplayUpdates: sendsThinking && requestedDisplay === "updates",
+	});
 	// A configured anthropic-beta header replaces the computed list; without the beta the
 	// API rejects display "updates", so fall back to summaries.
 	const display: AnthropicThinkingDisplay =
@@ -1803,11 +2111,20 @@ function convertTools(
 				? undefined
 				: resolveJsonSchemaStrictSampling(tool, supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
 		const parameters = getJsonSchemaToolParameters(tool, strict);
-		const schema = parameters as { properties?: unknown; required?: string[] };
+		const schema = parameters as {
+			properties?: unknown;
+			required?: string[];
+			$defs?: unknown;
+			definitions?: unknown;
+		};
+		// Keep shared definitions so property $refs still resolve. Other root keywords stay out:
+		// Anthropic rejects root anyOf/oneOf/allOf with a 400.
 		const legacyInputSchema = {
 			type: "object" as const,
 			properties: schema.properties ?? {},
 			required: schema.required ?? [],
+			...(schema.$defs === undefined ? {} : { $defs: schema.$defs }),
+			...(schema.definitions === undefined ? {} : { definitions: schema.definitions }),
 		};
 		const inputSchema =
 			strict === true
