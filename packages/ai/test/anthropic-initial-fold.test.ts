@@ -132,7 +132,8 @@ describe("Anthropic initial instruction fold", () => {
 	);
 
 	it("folds nothing and drops developers on a model without the developer capability", async () => {
-		const target = model({ capabilities: undefined });
+		// An unset capability resolves by rule (Opus 5.5 is capable), so state the absence explicitly.
+		const target = model({ capabilities: { midConversationInstructionMessages: false } });
 		const folded = await capture([snapshot, mask, prompt], false, target);
 		const plain = await capture([snapshot, prompt], false, target);
 		expect(folded).toEqual(plain);
