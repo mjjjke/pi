@@ -13,20 +13,45 @@ import { anthropicSupportsProgressUpdates } from "./progress-updates.ts";
 
 const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
 
-/** Apply fork defaults to runtime catalog reads, without changing provider-owned models. */
+/** Fill fork defaults on a runtime model without changing caller-owned data. */
+export function withForkModel<T extends AnyModel>(model: T): T {
+	if (!isModelType(model, "chat")) return model;
+	// Only physical transports covered by this policy qualify. In particular, a virtual
+	// alias must not gain compat flags merely by sharing a first-party model's name.
+	switch (model.api) {
+		case "anthropic-messages":
+		case "openai-completions":
+		case "openai-responses":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			break;
+		default:
+			return model;
+	}
+	const patched = { ...model };
+	applyForkModelData(patched);
+	return patched;
+}
+
+/** Apply fork defaults to runtime catalogs and exposed provider requests without changing caller-owned models. */
 export function withForkModelData(provider: Provider): Provider {
 	// No fork policy applies to other provider identities. Preserve their native behavior.
 	if (provider.id !== "anthropic" && !FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(provider.id)) return provider;
-	const patch = <T extends AnyModel>(model: T): T => {
-		if (!isModelType(model, "chat")) return model;
-		const patched = { ...model };
-		applyForkModelData(patched);
-		return patched;
-	};
 	return {
 		...provider,
-		getModels: () => provider.getModels().map(patch),
-		...(provider.getAllModels ? { getAllModels: () => provider.getAllModels!().map(patch) } : {}),
+		getModels: () => provider.getModels().map(withForkModel),
+		...(provider.getAllModels ? { getAllModels: () => provider.getAllModels!().map(withForkModel) } : {}),
+		stream: (model, context, options) => provider.stream(withForkModel(model), context, options),
+		streamSimple: (model, context, options) => provider.streamSimple(withForkModel(model), context, options),
+		...(provider.fetchDeferred
+			? { fetchDeferred: (model, handle, options) => provider.fetchDeferred!(withForkModel(model), handle, options) }
+			: {}),
+		...(provider.cancelDeferred
+			? {
+					cancelDeferred: (model, handle, options) =>
+						provider.cancelDeferred!(withForkModel(model), handle, options),
+				}
+			: {}),
 	};
 }
 

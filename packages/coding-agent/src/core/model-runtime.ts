@@ -58,7 +58,7 @@ import {
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
-import { withForkModelData } from "@earendil-works/pi-ai/providers/fork-model-capabilities";
+import { withForkModel, withForkModelData } from "@earendil-works/pi-ai/providers/fork-model-capabilities";
 import { personalizeOpenRouterCatalog } from "@earendil-works/pi-ai/providers/openrouter";
 import {
 	assertChatModel,
@@ -678,6 +678,9 @@ export class ModelRuntime implements Models {
 		model: TModel;
 		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 	}> {
+		// Direct model objects bypass catalog composition. All physical request APIs converge here,
+		// including deferred responses; non-chat models are unchanged by the fork policy.
+		model = withForkModel(model);
 		const provider = this.models.getProvider(model.provider);
 		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
 		const resolution = await this.getAuth(model, {

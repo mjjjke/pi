@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+import { withForkModel } from "@earendil-works/pi-ai/providers/fork-model-capabilities";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession, type CwdCarry, markRuntimeStreamFunction } from "./agent-session.ts";
@@ -254,6 +255,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 		}
 	}
+
+	// Normalize explicit SDK models before capability-dependent setup, not only before streaming.
+	if (model) model = withForkModel(model);
 
 	let thinkingLevel = options.carry?.thinkingLevel ?? options.thinkingLevel;
 

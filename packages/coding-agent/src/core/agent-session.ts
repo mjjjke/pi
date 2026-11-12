@@ -65,6 +65,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { withForkModel } from "@earendil-works/pi-ai/providers/fork-model-capabilities";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
@@ -766,9 +767,12 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		// Also cover callers constructing AgentSession around their own Agent, outside the SDK.
+		if (this.agent.state.model) this.agent.state.model = withForkModel(this.agent.state.model);
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
-		this._scopedModels = config.scopedModels ?? [];
+		this._scopedModels = [];
+		this.setScopedModels(config.scopedModels ?? []);
 		this._resourceLoader = config.resourceLoader;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
@@ -3123,7 +3127,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
-		this._scopedModels = scopedModels;
+		this._scopedModels = scopedModels.map((scoped) => ({ ...scoped, model: withForkModel(scoped.model) }));
 	}
 
 	/** File-based prompt templates */
@@ -4848,6 +4852,7 @@ export class AgentSession {
 	 * @throws Error if no auth is configured for the model
 	 */
 	async setModel(model: Model<any>, options: ModelMutationOptions = {}): Promise<void> {
+		model = withForkModel(model);
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
