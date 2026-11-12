@@ -31,5 +31,10 @@ export function anthropicSupportsProgressUpdates(id: string | undefined): boolea
 
 /** Whether the model accepts `thinking.display: "updates"` and writes progress updates. */
 export function supportsProgressUpdates(model: Model<Api>): boolean {
-	return model.capabilities?.progressUpdates === true;
+	return (
+		model.capabilities?.progressUpdates ??
+		(model.api === "anthropic-messages" &&
+			model.provider === "anthropic" &&
+			anthropicSupportsProgressUpdates(model.id.split("/").at(-1)))
+	);
 }

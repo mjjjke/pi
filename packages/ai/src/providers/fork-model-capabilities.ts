@@ -4,12 +4,9 @@
 import type { Provider } from "../models.ts";
 import type { AnyModel, Api, Model, ModelCapabilities } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
-import {
-	anthropicSupportsMidConversationInstructions,
-	openAiSupportsMidConversationInstructions,
-} from "./instruction-messages.ts";
-import { getAnthropicFastModeCapability, getCodexFastModeCapability } from "./pi-fast-mode.ts";
-import { anthropicSupportsProgressUpdates } from "./progress-updates.ts";
+import { supportsMidConversationInstructionMessages } from "./instruction-messages.ts";
+import { getFastModeCapability } from "./pi-fast-mode.ts";
+import { supportsProgressUpdates } from "./progress-updates.ts";
 
 const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
 
@@ -28,12 +25,13 @@ export function withForkModel<T extends AnyModel>(model: T): T {
 		default:
 			return model;
 	}
-	const patched = { ...model };
-	applyForkModelData(patched);
-	return patched;
+	const compat = getGeneratedCompat(model);
+	const capabilities = getGeneratedCapabilities(model);
+	if (compat === model.compat && capabilities === model.capabilities) return model;
+	return { ...model, ...(compat ? { compat } : {}), ...(capabilities ? { capabilities } : {}) };
 }
 
-/** Apply fork defaults to runtime catalogs and exposed provider requests without changing caller-owned models. */
+/** Apply fork defaults to catalog state without changing caller-owned models. Requests resolve at read. */
 export function withForkModelData(provider: Provider): Provider {
 	// No fork policy applies to other provider identities. Preserve their native behavior.
 	if (provider.id !== "anthropic" && !FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(provider.id)) return provider;
@@ -41,74 +39,26 @@ export function withForkModelData(provider: Provider): Provider {
 		...provider,
 		getModels: () => provider.getModels().map(withForkModel),
 		...(provider.getAllModels ? { getAllModels: () => provider.getAllModels!().map(withForkModel) } : {}),
-		stream: (model, context, options) => provider.stream(withForkModel(model), context, options),
-		streamSimple: (model, context, options) => provider.streamSimple(withForkModel(model), context, options),
-		...(provider.fetchDeferred
-			? { fetchDeferred: (model, handle, options) => provider.fetchDeferred!(withForkModel(model), handle, options) }
-			: {}),
-		...(provider.cancelDeferred
-			? {
-					cancelDeferred: (model, handle, options) =>
-						provider.cancelDeferred!(withForkModel(model), handle, options),
-				}
-			: {}),
 	};
 }
 
-function getNativeModelId(modelId: string): string {
-	return modelId.split("/").at(-1) ?? modelId;
-}
-
 export function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities | undefined {
-	const capabilities: ModelCapabilities = { ...model.capabilities };
-	switch (model.api) {
-		case "anthropic-messages": {
-			const nativeModelId = getNativeModelId(model.id);
-			if (
-				capabilities.midConversationInstructionMessages === undefined &&
-				model.provider === "anthropic" &&
-				nativeModelId.startsWith("claude-") &&
-				anthropicSupportsMidConversationInstructions(nativeModelId)
-			) {
-				capabilities.midConversationInstructionMessages = true;
-			}
-			if (
-				capabilities.fastMode === undefined &&
-				model.provider === "anthropic" &&
-				nativeModelId.startsWith("claude-")
-			) {
-				const fastMode = getAnthropicFastModeCapability(nativeModelId);
-				if (fastMode) capabilities.fastMode = fastMode;
-			}
-			if (
-				capabilities.progressUpdates === undefined &&
-				model.provider === "anthropic" &&
-				anthropicSupportsProgressUpdates(nativeModelId)
-			) {
-				capabilities.progressUpdates = true;
-			}
-			break;
-		}
-		case "openai-completions":
-		case "openai-responses":
-		case "azure-openai-responses":
-		case "openai-codex-responses":
-			if (
-				capabilities.midConversationInstructionMessages === undefined &&
-				FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(model.provider) &&
-				openAiSupportsMidConversationInstructions(model.id)
-			) {
-				capabilities.midConversationInstructionMessages = true;
-			}
-			if (capabilities.fastMode === undefined) {
-				const fastMode = getCodexFastModeCapability(model.provider, model.api);
-				if (fastMode) capabilities.fastMode = fastMode;
-			}
-			break;
-		default:
-			break;
-	}
-	return Object.values(capabilities).some((value) => value !== undefined) ? capabilities : undefined;
+	const previous = model.capabilities;
+	const instructions = supportsMidConversationInstructionMessages(model);
+	const progress = supportsProgressUpdates(model);
+	const fastMode = getFastModeCapability(model);
+	if (
+		(!instructions || previous?.midConversationInstructionMessages !== undefined) &&
+		(!progress || previous?.progressUpdates !== undefined) &&
+		fastMode === previous?.fastMode
+	)
+		return previous;
+	return {
+		...previous,
+		...(instructions ? { midConversationInstructionMessages: true } : {}),
+		...(progress ? { progressUpdates: true } : {}),
+		...(fastMode ? { fastMode } : {}),
+	};
 }
 
 // First-party OpenAI models whose upstream data lacks `supportsMidConvoSystemMessages` although
@@ -123,6 +73,11 @@ const FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS = new Set([
 /** Fork compat patch: flags the fork sets on top of the upstream data. */
 export function getGeneratedCompat(model: Model<Api>): Model<Api>["compat"] {
 	if (!FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS.has(`${model.provider}:${model.id}`)) return model.compat;
+	if (
+		(model.compat as { supportsMidConvoSystemMessages?: boolean } | undefined)?.supportsMidConvoSystemMessages ===
+		true
+	)
+		return model.compat;
 	return { ...model.compat, supportsMidConvoSystemMessages: true } as Model<Api>["compat"];
 }
 

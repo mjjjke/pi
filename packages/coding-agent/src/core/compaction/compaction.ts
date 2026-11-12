@@ -24,7 +24,6 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
-import { withForkModel } from "@earendil-works/pi-ai/providers/fork-model-capabilities";
 import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionProjection,
@@ -628,8 +627,6 @@ export async function completeSummarization(
 	callbacks?: RetryCallbacks,
 	onUsage?: (usage: Usage) => void,
 ): Promise<AssistantMessage> {
-	// Exported standalone summary helpers can bypass ModelRuntime entirely.
-	model = withForkModel(model);
 	// Avoid cache writes for one-off summaries. Reuse caller-supplied routing when available;
 	// callers without a session ID, including branch summaries, receive a fresh routing ID.
 	const requestOptions: SimpleStreamOptions = {

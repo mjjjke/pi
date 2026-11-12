@@ -45,8 +45,31 @@ export function anthropicSupportsMidConversationInstructions(id: string | undefi
 	return true;
 }
 
-export function supportsMidConversationInstructionMessages(model: Model<Api>): boolean {
-	return model.capabilities?.midConversationInstructionMessages === true;
+const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
+
+/** Resolve explicit instruction support first, otherwise first-party fork defaults. */
+export function supportsMidConversationInstructionMessages(
+	model: Partial<Pick<Model<Api>, "id" | "provider" | "api" | "capabilities">>,
+): boolean {
+	if (model.capabilities?.midConversationInstructionMessages !== undefined)
+		return model.capabilities.midConversationInstructionMessages;
+	if (model.api === "anthropic-messages" && model.provider === "anthropic") {
+		const id = model.id?.split("/").at(-1);
+		return !!id?.startsWith("claude-") && anthropicSupportsMidConversationInstructions(id);
+	}
+	switch (model.api) {
+		case "openai-completions":
+		case "openai-responses":
+		case "azure-openai-responses":
+		case "openai-codex-responses":
+			return (
+				!!model.provider &&
+				FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(model.provider) &&
+				openAiSupportsMidConversationInstructions(model.id)
+			);
+		default:
+			return false;
+	}
 }
 
 export function assertSupportsMidConversationInstructionMessages(model: Model<Api>): void {

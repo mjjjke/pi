@@ -38,6 +38,20 @@ export function anthropicSupportsFastMode(id: string | undefined): boolean {
 	);
 }
 
+/** Resolve explicit fast payloads first, otherwise first-party fork defaults. */
+export function getFastModeCapability<
+	T extends { provider: string; body: Record<string, unknown> } = FastModeCapability,
+>(
+	model: Partial<Pick<Model<Api>, "id" | "provider" | "api">> & { capabilities?: { fastMode?: T } },
+): FastModeCapability | T | undefined {
+	if (model.capabilities?.fastMode !== undefined) return model.capabilities.fastMode;
+	if (model.api === "anthropic-messages" && model.provider === "anthropic") {
+		const id = model.id?.split("/").at(-1);
+		return id?.startsWith("claude-") ? getAnthropicFastModeCapability(id) : undefined;
+	}
+	return model.api && model.provider ? getCodexFastModeCapability(model.provider, model.api) : undefined;
+}
+
 /** The first-party OpenAI Codex backend advertises the `priority` service tier. */
 export function codexSupportsFastMode(provider: Model<Api>["provider"], api: Api): boolean {
 	return provider === "openai-codex" && api === "openai-codex-responses";

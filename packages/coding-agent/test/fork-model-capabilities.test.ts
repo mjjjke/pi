@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import {
+	type AnthropicOptions,
 	createProvider,
 	InMemoryCredentialStore,
 	InMemoryModelsStore,
@@ -12,6 +13,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { stream as streamAnthropic } from "../../ai/src/api/anthropic-messages.ts";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { completeSummarization } from "../src/core/compaction/compaction.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
@@ -108,55 +110,147 @@ describe("runtime fork capabilities", () => {
 		},
 	);
 
-	it.each(["stream", "streamSimple", "providerStream", "providerStreamSimple", "summary"] as const)(
-		"normalizes raw %s requests deterministically without changing the caller",
-		async (method) => {
-			const runtime = await createRuntime();
-			const source = { ...model("anthropic"), id: "claude-fable-6" };
-			const context = normalizeContext({
-				systemPrompt: "Stable system",
-				messages: [
-					{ role: "developer", content: "Persisted standing value", timestamp: 0 },
-					{ role: "user", content: "hi", timestamp: 1 },
-				],
-			});
-			const bodies: string[] = [];
-			const fetch: typeof globalThis.fetch = async (input, init) => {
-				bodies.push(await new Request(input, init).text());
-				return new Response(
-					'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
-					{ headers: { "content-type": "text/event-stream" } },
-				);
+	it.each([
+		"stream",
+		"streamSimple",
+		"providerStream",
+		"providerStreamSimple",
+		"registeredProvider",
+		"summary",
+	] as const)("resolves raw %s requests deterministically without changing the caller", async (method) => {
+		const runtime = await createRuntime();
+		const source = { ...model("anthropic"), id: "claude-fable-6" };
+		if (method === "registeredProvider") {
+			runtime.registerNativeProvider(
+				createProvider({
+					id: "anthropic",
+					models: [source],
+					auth: {},
+					api: { stream: streamAnthropic, streamSimple: streamAnthropic },
+				}),
+			);
+		}
+		const context = normalizeContext({
+			systemPrompt: "Stable system",
+			messages: [
+				{ role: "developer", content: "Persisted standing value", timestamp: 0 },
+				{ role: "user", content: "hi", timestamp: 1 },
+			],
+		});
+		const bodies: string[] = [];
+		const fetch: typeof globalThis.fetch = async (input, init) => {
+			bodies.push(await new Request(input, init).text());
+			return new Response(
+				'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		};
+		for (let i = 0; i < 3; i++) {
+			const options = {
+				fetch,
+				apiKey: "test-key",
+				maxRetries: 0,
+				cacheRetention: "short" as const,
+				maxTokens: 2048,
+				thinkingEnabled: true,
+				thinkingDisplay: "updates" as const,
+				reasoning: "low" as const,
+				sessionId: "stable",
 			};
-			for (let i = 0; i < 3; i++) {
-				const options = {
-					fetch,
-					apiKey: "test-key",
-					maxRetries: 0,
-					cacheRetention: "short" as const,
-					maxTokens: 2048,
-					thinkingEnabled: true,
-					thinkingDisplay: "updates" as const,
-					reasoning: "low" as const,
-					sessionId: "stable",
-				};
-				const provider = runtime.getProvider("anthropic")!;
-				const result =
-					method === "summary"
-						? await completeSummarization(source, context, options)
-						: await (method === "providerStream"
-								? provider.stream(source, context, options)
-								: method === "providerStreamSimple"
-									? provider.streamSimple(source, context, options)
-									: runtime[method](source, context, options)
-							).result();
-				expect(result.stopReason, result.errorMessage).toBe("stop");
+			const provider =
+				method === "registeredProvider"
+					? runtime.getRegisteredNativeProvider("anthropic")!
+					: runtime.getProvider("anthropic")!;
+			const result =
+				method === "summary"
+					? await completeSummarization(source, context, options)
+					: await (method === "providerStream" || method === "registeredProvider"
+							? provider.stream(source, context, options)
+							: method === "providerStreamSimple"
+								? provider.streamSimple(source, context, options)
+								: runtime[method](source, context, options)
+						).result();
+			expect(result.stopReason, result.errorMessage).toBe("stop");
+		}
+		const body = JSON.parse(bodies[0]);
+		expect(body.thinking.display).toBe("updates");
+		expect(body.system.some((block: { text: string }) => block.text === "Persisted standing value")).toBe(true);
+		expect(new Set(bodies).size).toBe(1);
+		expect(source.capabilities).toBeUndefined();
+	});
+
+	it.each(["prepareRequest", "availability"] as const)(
+		"resolves raw models from %s at transport read",
+		async (ingress) => {
+			const cwd = mkdtempSync(join(tmpdir(), "pi-fork-bypass-"));
+			const runtime = await createRuntime();
+			const raw = { ...model("anthropic"), id: "claude-fable-6" };
+			const other = { ...raw, id: "claude-opus-4-8" };
+			if (ingress === "availability") {
+				runtime.registerNativeProvider({
+					id: "anthropic",
+					name: "Test Anthropic",
+					auth: { apiKey: { name: "Test", resolve: async () => ({ auth: { apiKey: "test-key" } }) } },
+					getModels: () => [raw, other],
+					getAllModels: () => [raw, other],
+					filterModels: () => [raw],
+					filterAllModels: () => [raw],
+					// This fixture only dispatches its Anthropic models.
+					stream: (m, context, options) =>
+						streamAnthropic(m as Model<"anthropic-messages">, context, options as AnthropicOptions),
+					streamSimple: (m, context, options) =>
+						streamAnthropic(m as Model<"anthropic-messages">, context, options),
+				});
+				await runtime.refresh({ allowNetwork: false, providers: ["anthropic"] });
+				// Accepted exclusion: native filters may expose raw state; requests must still resolve it.
+				expect((await runtime.getAvailable("anthropic"))[0]).toBe(raw);
+				expect((await runtime.getAllAvailable("anthropic"))[0]).toBe(raw);
+				await runtime.getAvailable();
 			}
-			const body = JSON.parse(bodies[0]);
-			expect(body.thinking.display).toBe("updates");
-			expect(body.system.some((block: { text: string }) => block.text === "Persisted standing value")).toBe(true);
-			expect(new Set(bodies).size).toBe(1);
-			expect(source.capabilities).toBeUndefined();
+			const bodies: string[] = [];
+			const settingsManager = SettingsManager.inMemory({});
+			const resourceLoader = new DefaultResourceLoader({ cwd, agentDir: cwd, settingsManager });
+			await resourceLoader.reload();
+			const agent = new Agent({
+				initialState: { model: other, thinkingLevel: "low" },
+				prepareRequest: ingress === "prepareRequest" ? (request) => ({ ...request, model: raw }) : undefined,
+				streamFn: (m, context, options) =>
+					streamAnthropic(m as Model<"anthropic-messages">, context, {
+						...options,
+						apiKey: "test-key",
+						maxRetries: 0,
+						thinkingEnabled: true,
+						thinkingDisplay: "updates",
+						fetch: async (input, init) => {
+							bodies.push(await new Request(input, init).text());
+							return new Response(
+								'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+								{ headers: { "content-type": "text/event-stream" } },
+							);
+						},
+					}),
+			});
+			const session = new AgentSession({
+				cwd,
+				agent,
+				modelRuntime: runtime,
+				settingsManager,
+				resourceLoader,
+				sessionManager: SessionManager.inMemory(cwd),
+				allowedToolNames: [],
+			});
+			try {
+				if (ingress === "availability") await session.cycleModel();
+				session.appendDeveloperMessage("Persisted standing value");
+				await session.prompt("hi");
+				expect(bodies).toHaveLength(1);
+				expect(bodies[0]).toContain("Persisted standing value");
+				expect(JSON.parse(bodies[0]).thinking.display).toBe("updates");
+				expect(raw.capabilities).toBeUndefined();
+			} finally {
+				session.dispose();
+				rmSync(cwd, { recursive: true, force: true });
+			}
 		},
 	);
 
