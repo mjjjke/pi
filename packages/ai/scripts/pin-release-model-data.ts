@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, Model } from "../src/types.ts";
-import { applyForkModelData } from "./fork-model-capabilities.ts";
+import { applyForkModelData } from "../src/providers/fork-model-capabilities.ts";
 import {
 	assertExactModelIds,
 	createModelDataManifest,

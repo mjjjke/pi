@@ -12,7 +12,6 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyForkModelData } from "../scripts/fork-model-capabilities.ts";
 import {
 	createModelDataManifest,
 	groupProviderModelData,
@@ -22,6 +21,7 @@ import {
 	validateGeneratedModelData,
 	validateModelDataDirectory,
 } from "../scripts/model-data.ts";
+import { applyForkModelData } from "../src/providers/fork-model-capabilities.ts";
 import type {
 	AnyModel,
 	Api,

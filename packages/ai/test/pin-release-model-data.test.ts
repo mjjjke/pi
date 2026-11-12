@@ -2,9 +2,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyForkModelData, getGeneratedCapabilities } from "../scripts/fork-model-capabilities.ts";
 import { MODEL_DATA_MANIFEST_FILE, validateModelDataDirectory } from "../scripts/model-data.ts";
 import { buildPinnedModelData, writePinnedModelData } from "../scripts/pin-release-model-data.ts";
+import { getModels, getProviders } from "../src/compat.ts";
+import { applyForkModelData, getGeneratedCapabilities } from "../src/providers/fork-model-capabilities.ts";
 import type { Api, Model } from "../src/types.ts";
 
 function model(overrides: Partial<Model<Api>> & Pick<Model<Api>, "id" | "provider" | "api">): Model<Api> {
@@ -56,6 +57,21 @@ describe("pin-release-model-data", () => {
 		] as const) {
 			const expected = getGeneratedCapabilities(structuredClone(source));
 			expect(read(file)[api][`chat:${source.id}`].capabilities).toEqual(expected);
+		}
+	});
+
+	it("preserves explicit pinned capabilities and applies the policy idempotently", () => {
+		for (const provider of getProviders()) {
+			for (const source of getModels(provider)) {
+				const patched = structuredClone(source);
+				applyForkModelData(patched);
+				if (source.capabilities) {
+					expect(patched.capabilities, `${provider}/${source.id}`).toMatchObject(source.capabilities);
+				}
+				const twice = structuredClone(patched);
+				applyForkModelData(twice);
+				expect(twice).toEqual(patched);
+			}
 		}
 	});
 

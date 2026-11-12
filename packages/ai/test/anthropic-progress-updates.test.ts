@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getGeneratedCapabilities } from "../scripts/fork-model-capabilities.ts";
 import { convertMessages, stream, streamSimple } from "../src/api/anthropic-messages.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
+import { getGeneratedCapabilities } from "../src/providers/fork-model-capabilities.ts";
 import {
 	anthropicSupportsProgressUpdates,
 	supportsProgressUpdates,
@@ -142,6 +142,7 @@ describe("Anthropic progress updates capability", () => {
 	it("gates progress updates to the documented models", () => {
 		for (const id of [
 			"claude-fable-5-1",
+			"claude-fable-5-10",
 			"claude-fable-5.1",
 			"claude-mythos-5-1",
 			"claude-opus-5-5",
@@ -159,7 +160,6 @@ describe("Anthropic progress updates capability", () => {
 			"claude-mythos-5",
 			"claude-opus-4-8",
 			"claude-opus-5-1",
-			"claude-fable-5-10",
 			"claude-haiku-4-5",
 			undefined,
 		]) {

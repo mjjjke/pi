@@ -1,16 +1,34 @@
-// Fork-only: model capabilities and compat flags the fork adds to generated model data
-// (fast mode, mid-conversation developer instructions, progress updates, mid-conversation
-// system messages). Shared by catalog/generate.ts and pin-release-model-data.ts so live
-// generation and release pinning produce the same metadata. See FORK.md.
+// Fork-only model capabilities and compat flags, shared by catalog generation,
+// release pinning and runtime model composition. Explicit capabilities win. See FORK.md.
+
+import type { Provider } from "../models.ts";
+import type { AnyModel, Api, Model, ModelCapabilities } from "../types.ts";
+import { isModelType } from "../utils/model-operations.ts";
 import {
 	anthropicSupportsMidConversationInstructions,
 	openAiSupportsMidConversationInstructions,
-} from "../src/providers/instruction-messages.ts";
-import { getAnthropicFastModeCapability, getCodexFastModeCapability } from "../src/providers/pi-fast-mode.ts";
-import { anthropicSupportsProgressUpdates } from "../src/providers/progress-updates.ts";
-import type { Api, Model, ModelCapabilities } from "../src/types.ts";
+} from "./instruction-messages.ts";
+import { getAnthropicFastModeCapability, getCodexFastModeCapability } from "./pi-fast-mode.ts";
+import { anthropicSupportsProgressUpdates } from "./progress-updates.ts";
 
 const FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS = new Set(["openai", "azure-openai-responses", "openai-codex"]);
+
+/** Apply fork defaults to runtime catalog reads, without changing provider-owned models. */
+export function withForkModelData(provider: Provider): Provider {
+	// No fork policy applies to other provider identities. Preserve their native behavior.
+	if (provider.id !== "anthropic" && !FIRST_PARTY_OPENAI_INSTRUCTION_PROVIDERS.has(provider.id)) return provider;
+	const patch = <T extends AnyModel>(model: T): T => {
+		if (!isModelType(model, "chat")) return model;
+		const patched = { ...model };
+		applyForkModelData(patched);
+		return patched;
+	};
+	return {
+		...provider,
+		getModels: () => provider.getModels().map(patch),
+		...(provider.getAllModels ? { getAllModels: () => provider.getAllModels!().map(patch) } : {}),
+	};
+}
 
 function getNativeModelId(modelId: string): string {
 	return modelId.split("/").at(-1) ?? modelId;
@@ -29,7 +47,11 @@ export function getGeneratedCapabilities(model: Model<Api>): ModelCapabilities |
 			) {
 				capabilities.midConversationInstructionMessages = true;
 			}
-			if (capabilities.fastMode === undefined && model.provider === "anthropic" && nativeModelId.startsWith("claude-")) {
+			if (
+				capabilities.fastMode === undefined &&
+				model.provider === "anthropic" &&
+				nativeModelId.startsWith("claude-")
+			) {
 				const fastMode = getAnthropicFastModeCapability(nativeModelId);
 				if (fastMode) capabilities.fastMode = fastMode;
 			}
@@ -79,7 +101,7 @@ export function getGeneratedCompat(model: Model<Api>): Model<Api>["compat"] {
 	return { ...model.compat, supportsMidConvoSystemMessages: true } as Model<Api>["compat"];
 }
 
-/** Apply every fork patch (capabilities and compat) to one generated or pinned model, in place. */
+/** Apply every fork patch (capabilities and compat) to one model, in place. */
 export function applyForkModelData(model: Model<Api>): void {
 	const compat = getGeneratedCompat(model);
 	if (compat !== undefined) model.compat = compat;

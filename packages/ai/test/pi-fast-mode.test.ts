@@ -17,7 +17,7 @@ function generatedModel(provider: BuiltinProvider, id: string): Model<Api> {
 
 describe("pi-fast-mode capability detection", () => {
 	// https://platform.claude.com/docs/en/build-with-claude/fast-mode#supported-models
-	it("gates Anthropic fast mode to Opus 4.8, 5 and 5.5", () => {
+	it("gates Anthropic fast mode by family minimum versions", () => {
 		expect(anthropicSupportsFastMode("claude-opus-4-8")).toBe(true);
 		expect(anthropicSupportsFastMode("claude-opus-4.8")).toBe(true);
 		expect(anthropicSupportsFastMode("claude-opus-4-8-20260101")).toBe(true);
@@ -28,8 +28,8 @@ describe("pi-fast-mode capability detection", () => {
 		// 4.7 rejects speed=fast with an error; 4.6 silently runs at standard speed.
 		expect(anthropicSupportsFastMode("claude-opus-4-7")).toBe(false);
 		expect(anthropicSupportsFastMode("claude-opus-4-6")).toBe(false);
-		expect(anthropicSupportsFastMode("claude-opus-5-1")).toBe(false);
-		expect(anthropicSupportsFastMode("claude-opus-4-80")).toBe(false);
+		expect(anthropicSupportsFastMode("claude-opus-5-1")).toBe(true);
+		expect(anthropicSupportsFastMode("claude-opus-4-80")).toBe(true);
 		expect(anthropicSupportsFastMode("claude-opus-4-5")).toBe(false);
 		expect(anthropicSupportsFastMode("claude-opus-4")).toBe(false);
 		expect(anthropicSupportsFastMode("claude-sonnet-4-6")).toBe(false);
