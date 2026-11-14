@@ -96,6 +96,57 @@ describe("generateSummary reasoning options", () => {
 		});
 	});
 
+	it("pins current-state update instructions", async () => {
+		await generateSummaryWithUsage(
+			messages,
+			createModel(false),
+			undefined,
+			"test-key",
+			undefined,
+			undefined,
+			undefined,
+			"previous checkpoint",
+		);
+		const context = completeSimpleMock.mock.calls[0][1] as TranscriptContext;
+		const instructions = `Update the existing structured summary to describe the current state, not accumulate history. RULES:
+- KEEP constraints, preferences, open work, and decisions that still affect how the work continues
+- REPLACE facts that newer messages supersede
+- DROP finished items that no longer change what to do next
+- UPDATE progress and next steps based on the current state
+- KEEP exact file paths, function names, and error messages that are still needed
+
+Use this EXACT format:
+
+## Goal
+[Current goals]
+
+## Constraints & Preferences
+- [Constraints and preferences that still apply]
+
+## Progress
+### Done
+- [x] [Completed items that still affect what to do next]
+
+### In Progress
+- [ ] [Current open work]
+
+### Blocked
+- [Current blockers, or "(none)"]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale for a decision that still affects how work continues]
+
+## Next Steps
+1. [What should happen next based on the current state]
+
+## Critical Context
+- [Context still needed to continue, or "(none)"]
+
+Keep each section concise. Keep exact file paths, function names, and error messages that are still needed.`;
+		expect(JSON.stringify(context.messages)).toContain(JSON.stringify(instructions).slice(1, -1));
+		expect(JSON.stringify(context.messages)).not.toContain("PRESERVE all existing information");
+	});
+
 	it("preserves the string result from generateSummary", async () => {
 		await expect(generateSummary(messages, createModel(false), undefined, "test-key")).resolves.toBe(
 			"## Goal\nTest summary",

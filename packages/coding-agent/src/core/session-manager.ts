@@ -58,6 +58,11 @@ import {
 } from "./messages.ts";
 export const CURRENT_SESSION_VERSION = 4;
 
+/** Neutralize closing envelope tags only when creating new summary entries, never on replay. */
+function neutralizeSummaryClosingTags(summary: string): string {
+	return summary.replace(/<\s*\/\s*summary\s*>/gi, (tag) => `&lt;${tag.slice(1)}`);
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -2476,7 +2481,7 @@ export class SessionManager {
 			id,
 			parentId: this.leafId,
 			timestamp,
-			summary,
+			summary: neutralizeSummaryClosingTags(summary),
 			firstKeptEntryId: firstKeptEntryId ?? id,
 			tokensBefore,
 			details,
@@ -2522,7 +2527,7 @@ export class SessionManager {
 						usage,
 						options,
 					)
-				: summaryOrCandidate;
+				: { ...summaryOrCandidate, summary: neutralizeSummaryClosingTags(summaryOrCandidate.summary) };
 		if (entry.parentId !== this.leafId || this.byId.has(entry.id)) {
 			throw new Error("stale compaction candidate");
 		}
@@ -2910,7 +2915,7 @@ export class SessionManager {
 			parentId: branchFromId,
 			timestamp,
 			fromId,
-			summary,
+			summary: neutralizeSummaryClosingTags(summary),
 			details,
 			usage,
 			fromHook,

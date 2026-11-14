@@ -31,7 +31,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("<tools>\n(none)\n");
 		});
 
-		test("shows file paths guideline even with no tools", () => {
+		test("omits default style guidelines even with no tools", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: [],
 				contextFiles: [],
@@ -39,7 +39,8 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Show file paths clearly");
+			expect(prompt).not.toContain("Show file paths clearly");
+			expect(prompt).not.toContain("Be concise in your responses");
 		});
 	});
 
@@ -57,7 +58,7 @@ describe("buildSystemPrompt", () => {
 			expect(defaultPrompt).toBe(
 				"You are an expert coding assistant.\nUse the available tools to answer the user's request.\n\n" +
 					"<tools>\n(none)\n</tools>\n\n" +
-					"<rules>\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n" +
+					"<rules>\n\n</rules>\n\n" +
 					"<cwd>\n/tmp\n</cwd>",
 			);
 			expect(customPrompt.startsWith("You are Exact.\n\n<cwd>")).toBe(true);
@@ -127,7 +128,6 @@ describe("buildSystemPrompt", () => {
 			[["bash", "edit"], true],
 			[["bash", "write"], true],
 			[["powershell", "edit"], true],
-			[["read", "bash"], false],
 			[["read", "edit", "write"], false],
 			[[], false],
 		] as const)(
@@ -144,6 +144,23 @@ describe("buildSystemPrompt", () => {
 				else expect(prompt).not.toContain("start concurrently");
 			},
 		);
+
+		test.each([["read", "bash"], ["powershell"], ["bash", "powershell"]])(
+			"describes concurrent read-only shell calls (%j)",
+			(...selectedTools) => {
+				const prompt = buildSystemPrompt({ cwd: "/tmp", selectedTools });
+				expect(prompt).toContain(
+					"- In one message, tool calls (shell commands, reads, searches) start concurrently in no guaranteed order: a command that needs another command's effect goes in the same command with && or in a later message.",
+				);
+				expect(prompt).not.toContain("edit/write calls run alone");
+			},
+		);
+
+		test("keeps explicit user style preferences", () => {
+			const prompt = buildSystemPrompt({ cwd: "/tmp", promptGuidelines: ["Be concise in your responses"] });
+			expect(prompt).toContain("- Be concise in your responses");
+			expect(prompt).not.toContain("Show file paths clearly when working with files");
+		});
 
 		test("lists snippets without filler or a trailing blank line", () => {
 			const sections = buildSystemPromptSections({ cwd: "/tmp", toolSnippets: { read: "Read files" } });

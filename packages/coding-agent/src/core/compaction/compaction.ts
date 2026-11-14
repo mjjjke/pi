@@ -540,42 +540,41 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
-const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
-- ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
-- UPDATE "Next Steps" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
+const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summary to describe the current state, not accumulate history. RULES:
+- KEEP constraints, preferences, open work, and decisions that still affect how the work continues
+- REPLACE facts that newer messages supersede
+- DROP finished items that no longer change what to do next
+- UPDATE progress and next steps based on the current state
+- KEEP exact file paths, function names, and error messages that are still needed
 
 Use this EXACT format:
 
 ## Goal
-[Preserve existing goals, add new ones if the task expanded]
+[Current goals]
 
 ## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
+- [Constraints and preferences that still apply]
 
 ## Progress
 ### Done
-- [x] [Include previously done items AND newly completed items]
+- [x] [Completed items that still affect what to do next]
 
 ### In Progress
-- [ ] [Current work - update based on progress]
+- [ ] [Current open work]
 
 ### Blocked
-- [Current blockers - remove if resolved]
+- [Current blockers, or "(none)"]
 
 ## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+- **[Decision]**: [Brief rationale for a decision that still affects how work continues]
 
 ## Next Steps
-1. [Update based on current state]
+1. [What should happen next based on the current state]
 
 ## Critical Context
-- [Preserve important context, add new if needed]
+- [Context still needed to continue, or "(none)"]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Keep exact file paths, function names, and error messages that are still needed.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 

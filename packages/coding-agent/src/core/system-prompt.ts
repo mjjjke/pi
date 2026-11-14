@@ -115,6 +115,10 @@ function buildRules(
 		addRule(
 			"In one message, edit/write calls run alone in message order: later calls see their effect. Other calls (shell commands, reads, searches) start concurrently in no guaranteed order: a command that needs another command's effect (e.g. git add then commit) goes in the same command with && or in a later message.",
 		);
+	} else if (hasShell) {
+		addRule(
+			"In one message, tool calls (shell commands, reads, searches) start concurrently in no guaranteed order: a command that needs another command's effect goes in the same command with && or in a later message.",
+		);
 	}
 
 	// Rendering is a session fact, not a static declaration. Codemode's nested calls show
@@ -135,8 +139,6 @@ function buildRules(
 		for (const rule of toolGuidelines[name] ?? []) addRule(rule);
 	}
 	for (const rule of promptGuidelines) addRule(rule);
-	addRule("Be concise in your responses");
-	addRule("Show file paths clearly when working with files");
 	return rules.map((rule) => `- ${rule}`).join("\n");
 }
 

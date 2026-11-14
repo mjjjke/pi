@@ -99,7 +99,7 @@ describe("approved core tool texts rev 3.2", () => {
 			};
 			const sections = buildSystemPromptSections(options);
 			expect(sections.rules.includes(fact)).toBe(rendersToolCalls);
-			expect(sections.rules.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(rendersToolCalls ? 5 : 4);
+			expect(sections.rules.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(rendersToolCalls ? 3 : 2);
 			expect(sections.rules).toContain("In one message, edit/write calls run alone in message order:");
 			expect(sections.rules).not.toMatch(
 				/Use (bash|PowerShell|read|edit|write)|Keep edits|When changing|Each edits|Put changes/,
