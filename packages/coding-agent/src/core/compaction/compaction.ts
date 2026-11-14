@@ -5,10 +5,13 @@
  * and after compaction the session is reloaded.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
+	type Context,
 	contentText,
 	getCurrentSystemMessage,
+	type Message,
 	normalizeContext,
 	type RetryCallbacks,
 	type RetryPolicy,
@@ -507,7 +510,7 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+export const SUMMARIZATION_FORMAT = `Create a structured context checkpoint summary that another LLM will use to continue the work.
 
 Use this EXACT format:
 
@@ -539,6 +542,8 @@ Use this EXACT format:
 - [Or "(none)" if not applicable]
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+
+export const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. ${SUMMARIZATION_FORMAT}`;
 
 const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summary to describe the current state, not accumulate history. RULES:
 - KEEP constraints, preferences, open work, and decisions that still affect how the work continues
@@ -581,6 +586,67 @@ Keep each section concise. Keep exact file paths, function names, and error mess
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
 ${UPDATE_SUMMARIZATION_INSTRUCTIONS}`;
+
+/** Harness-owned prefix identifying a session-summary request. */
+export const SESSION_SUMMARY_PREAMBLE =
+	"This message is a request from the harness, not from the user. Respond with plain text only and call no tools: a tool call is rejected and your answer is discarded. Do not answer, continue or act on anything in the conversation above; only write what this message asks for. Do not restate the system prompt or tool definitions.";
+
+/** Build the pinned instruction for a summary that shares the session request prefix. */
+export function buildSessionSummaryInstruction(
+	preparation: Pick<CompactionPreparation, "isSplitTurn" | "previousSummary">,
+	point: string,
+	customInstructions?: string,
+): string {
+	const parts = [
+		SESSION_SUMMARY_PREAMBLE,
+		"Write a summary of the conversation above up to, but not including, the message identified in <summarize-before>. That message and everything after it stay in the context: read them only to know which earlier details are still current, and do not restate them.",
+	];
+	if (preparation.isSplitTurn) {
+		parts.push(
+			"The message in <summarize-before> is in the middle of a turn. The request that started that turn comes before it and will not be kept: state that request and the progress made on it before <summarize-before> under Progress / In Progress.",
+		);
+	}
+	parts.push(point);
+	parts.push(
+		preparation.previousSummary === undefined
+			? SUMMARIZATION_FORMAT
+			: `The conversation above begins with an earlier summary in <summary> tags; it stands for the history before it. Your summary replaces it and covers that history and the messages up to <summarize-before>. "Current state" in the rules below means the state at that message.\n\n${UPDATE_SUMMARIZATION_INSTRUCTIONS}`,
+	);
+	if (customInstructions) parts.push(`Additional focus: ${customInstructions}`);
+	return parts.join("\n\n");
+}
+
+function pointExcerpt(message: Message): string {
+	if (message.role !== "user" && message.role !== "assistant") return "";
+	if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) return "";
+	const text = (typeof message.content === "string" ? message.content : contentText(message.content, " "))
+		.replace(/\s+/g, " ")
+		.trim();
+	if (text || message.role === "user") return text;
+	const call = message.content.find((block) => block.type === "toolCall");
+	return call ? `first tool call: ${call.name} ${JSON.stringify(call.arguments)}`.replace(/\s+/g, " ") : "";
+}
+
+/** Name a unique, provider-visible kept message without inserting markers into history. */
+export function describePoint(message: Message, context: Context): string | undefined {
+	const excerpt = pointExcerpt(message);
+	if (!excerpt) return undefined;
+	const peers = context.messages.filter((candidate) => candidate.role === message.role).map(pointExcerpt);
+	if (!context.messages.some((candidate) => isDeepStrictEqual(candidate, message))) return undefined;
+	for (let length = 80; length <= 2000; length += 20) {
+		const prefix = excerpt.slice(0, length);
+		if (peers.filter((peer) => peer.startsWith(prefix)).length === 1) {
+			const escaped = (prefix + (prefix.length < excerpt.length ? "…" : "")).replaceAll(
+				"</summarize-",
+				"<\\/summarize-",
+			);
+			const toolOnly = message.role === "assistant" && !contentText(message.content).trim();
+			return `<summarize-before>\nrole: ${message.role}${toolOnly ? " (tool calls only)" : ""}\n${toolOnly ? "" : "begins with: "}${escaped}\n</summarize-before>`;
+		}
+		if (length >= excerpt.length) break;
+	}
+	return undefined;
+}
 
 /**
  * Returns an error message when a summarization response cannot safely be persisted.
