@@ -260,8 +260,9 @@ export function verifySystemPrompt(
 	options: Pick<PiCodingAgentHarnessOptions, "name" | "expectedPiDocumentation">,
 ): string {
 	if (options.expectedPiDocumentation === undefined) return systemPrompt;
-	if (!systemPrompt.includes("\n<rules>\n")) {
-		throw new Error(`Pi system prompt lost its rules in the ${options.name} eval variant.`);
+	// The eval tool set has no shell, so the prompt has no rules section; cwd is always present.
+	if (!systemPrompt.includes("\n<cwd>\n")) {
+		throw new Error(`Pi system prompt lost its cwd section in the ${options.name} eval variant.`);
 	}
 	const hasDocumentation = systemPrompt.includes("\n<docs>\nPi documentation (read only");
 	if (hasDocumentation !== options.expectedPiDocumentation) {

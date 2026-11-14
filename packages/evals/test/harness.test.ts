@@ -91,12 +91,11 @@ describe("documentation variant", () => {
 			}),
 		);
 		expect(prompt).toContain("\n<docs>\nPi documentation (read only");
-		expect(prompt).toContain("\n<rules>\n");
+		expect(prompt).not.toContain("<rules>");
 		expect(prompt).toContain("\n<cwd>\n/workspace\n</cwd>");
 		expect(prompt).toContain("docs/models.md");
 
 		const stripped = excludePiDocumentation(prompt);
-		expect(stripped).toContain("\n<rules>\n");
 		expect(stripped).toContain("\n<cwd>\n/workspace\n</cwd>");
 		expect(stripped).not.toContain("<docs>");
 		expect(stripped).not.toContain("Pi documentation");
