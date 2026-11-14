@@ -36,6 +36,7 @@ import {
 import {
 	contentText,
 	getCurrentSystemMessage,
+	getPromptCacheTtlMs,
 	getToolStateChanges,
 	normalizeContext,
 	retryDelayMs,
@@ -5124,6 +5125,21 @@ export class AgentSession {
 		policy = this._captureSessionSummaryPolicy(),
 	): Promise<SessionSummaryRequest | undefined> {
 		if (model.api !== "anthropic-messages" || isVirtualModel(model) || reason === "overflow") return undefined;
+		const ttl = getPromptCacheTtlMs(model, policy.options);
+		const latest = branch.findLast((entry) => {
+			if (entry.type !== "message" || entry.message.role !== "assistant") return false;
+			const { stopReason, usage } = entry.message;
+			return (
+				stopReason !== "error" && stopReason !== "aborted" && usage.input + usage.cacheRead + usage.cacheWrite > 0
+			);
+		});
+		if (latest?.type !== "message" || latest.message.role !== "assistant" || ttl === undefined) return undefined;
+		if (
+			latest.message.provider !== model.provider ||
+			latest.message.model !== model.id ||
+			Date.now() - latest.message.timestamp >= ttl
+		)
+			return undefined;
 		try {
 			signal.throwIfAborted();
 			const projection = buildSessionProjection(branch);
