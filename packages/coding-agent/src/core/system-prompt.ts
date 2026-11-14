@@ -187,12 +187,8 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		const tools =
 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
 		promptSections.tools = tools;
-		promptSections.rules = buildRules(
-			declaredTools,
-			toolGuidelines,
-			promptGuidelines,
-			options.rendersToolCalls === true,
-		);
+		const rules = buildRules(declaredTools, toolGuidelines, promptGuidelines, options.rendersToolCalls === true);
+		if (rules) promptSections.rules = rules;
 		if (customSections.docs) promptSections.docs = customSections.docs;
 	}
 

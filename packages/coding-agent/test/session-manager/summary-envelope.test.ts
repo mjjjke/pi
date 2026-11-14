@@ -9,9 +9,9 @@ import {
 import { type BranchSummaryEntry, type CompactionEntry, SessionManager } from "../../src/core/session-manager.ts";
 
 const summary =
-	"Keep <summary> and </other>, but not </summary>, </SUMMARY > or < / SuMmArY\t >. Already &lt;/summary> stays.";
+	"Keep <summary> and </other>, but not </summary>, </SUMMARY >, </ Summary > or < / SuMmArY\t >. Already <\\/summary> and &lt;/summary> stay.";
 const neutralized =
-	"Keep <summary> and </other>, but not &lt;/summary>, &lt;/SUMMARY > or &lt; / SuMmArY\t >. Already &lt;/summary> stays.";
+	"Keep <summary> and </other>, but not <\\/summary>, <\\/SUMMARY >, <\\/ Summary > or < \\/ SuMmArY\t >. Already <\\/summary> and &lt;/summary> stay.";
 
 describe("new summary envelopes", () => {
 	it.each([false, true])("neutralizes blocking compaction text before storage (fromHook=%s)", (fromHook) => {
@@ -27,6 +27,17 @@ describe("new summary envelopes", () => {
 		const bytes = JSON.stringify(candidate);
 		manager.appendCompaction(candidate);
 		expect(JSON.stringify(manager.getEntry(candidate.id))).toBe(bytes);
+	});
+
+	it("keeps an already neutralized summary byte-identical across repeated creation", () => {
+		const manager = SessionManager.inMemory("/project");
+		const first = manager.buildCompactionEntry(summary, null, 100);
+		expect(first.summary).toBe(neutralized);
+		const candidate = manager.buildCompactionEntry(first.summary, null, 100);
+		expect(candidate.summary).toBe(neutralized);
+		manager.appendCompaction(candidate);
+		const id = manager.branchWithSummary(null, candidate.summary);
+		expect((manager.getEntry(id) as BranchSummaryEntry).summary).toBe(neutralized);
 	});
 
 	it("neutralizes caller-provided new candidates without mutating the caller", () => {

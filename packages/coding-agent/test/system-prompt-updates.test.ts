@@ -249,6 +249,57 @@ describe("system prompt updates", () => {
 		}
 	});
 
+	test.each(["tools", "guidelines"] as const)(
+		"adds, removes and restores rules on %s changes without rewriting sent messages",
+		async (source) => {
+			let withRules = false;
+			const extension: ExtensionFactory = (pi) => {
+				pi.on("before_agent_start", (event) => {
+					if (source === "guidelines" && withRules) {
+						event.systemPromptOptions.promptGuidelines.push("Keep the active guideline.");
+					}
+				});
+			};
+			const harness = await createHarness({ extensionFactories: [extension], initialActiveToolNames: ["read"] });
+			try {
+				const requests: TranscriptContext[] = [];
+				harness.setResponses(
+					[false, true, false, true].map(() => (context: TranscriptContext) => {
+						requests.push(structuredClone(context));
+						return fauxAssistantMessage("ok");
+					}),
+				);
+				let sentBytes = "";
+				for (withRules of [false, true, false, true]) {
+					if (source === "tools") harness.session.setActiveToolsByName(withRules ? ["read", "bash"] : ["read"]);
+					await harness.session.prompt("next");
+					const request = requests.at(-1)!;
+					if (sentBytes) {
+						const previousLength = requests.at(-2)!.messages.length;
+						expect(JSON.stringify(request.messages.slice(0, previousLength))).toBe(sentBytes);
+					}
+					sentBytes = JSON.stringify(request.messages);
+					const current = getCurrentSystemMessage(request.messages);
+					if (withRules)
+						expect(current?.sections?.rules).toContain(
+							source === "tools" ? "start concurrently" : "Keep the active guideline.",
+						);
+					else expect(current?.sections).not.toHaveProperty("rules");
+					// Replayed sections keep insertion order: newly added rules can follow cwd.
+					expect(getCurrentSystemPrompt(request.messages).includes("<rules>")).toBe(withRules);
+				}
+				const patches = requests.at(-1)!.messages.filter((message) => message.role === "system");
+				expect(patches).toHaveLength(4);
+				expect(patches[0].sections).not.toHaveProperty("rules");
+				expect(patches[1].sections?.rules).toEqual(expect.any(String));
+				expect(patches[2].sections?.rules).toBeNull();
+				expect(patches[3].sections?.rules).toBe(patches[1].sections?.rules);
+			} finally {
+				harness.cleanup();
+			}
+		},
+	);
+
 	test("setActiveTools in before_agent_start controls the same request", async () => {
 		const extension: ExtensionFactory = (pi) => {
 			for (const name of ["first", "second"]) {

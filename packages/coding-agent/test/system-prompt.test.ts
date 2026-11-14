@@ -58,7 +58,6 @@ describe("buildSystemPrompt", () => {
 			expect(defaultPrompt).toBe(
 				"You are an expert coding assistant.\nUse the available tools to answer the user's request.\n\n" +
 					"<tools>\n(none)\n</tools>\n\n" +
-					"<rules>\n\n</rules>\n\n" +
 					"<cwd>\n/tmp\n</cwd>",
 			);
 			expect(customPrompt.startsWith("You are Exact.\n\n<cwd>")).toBe(true);
@@ -178,6 +177,12 @@ describe("buildSystemPrompt", () => {
 			expect(docs).toContain("Before implementing harness changes, read the relevant docs and examples in full");
 			expect(buildSystemPromptSections({ cwd: "/tmp", sections: { docs } }).docs).toBe(`<docs>\n${docs}\n</docs>`);
 			expect(buildSystemPromptSections({ cwd: "/tmp" }).docs).toBeUndefined();
+		});
+
+		test.each([[], ["read"], ["edit", "write"]])("omits empty rules for tools %j", (...selectedTools) => {
+			const options = { cwd: "/tmp", selectedTools, promptGuidelines: ["  "], toolGuidelines: { read: [""] } };
+			expect(buildSystemPromptSections(options)).not.toHaveProperty("rules");
+			expect(buildSystemPrompt(options)).not.toContain("<rules>");
 		});
 
 		test("preserves custom section overrides, including an explicit docs section", () => {

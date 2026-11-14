@@ -554,6 +554,7 @@ Use this EXACT format:
 
 ## Constraints & Preferences
 - [Constraints and preferences that still apply]
+- [Or "(none)" if none apply]
 
 ## Progress
 ### Done
@@ -563,7 +564,7 @@ Use this EXACT format:
 - [ ] [Current open work]
 
 ### Blocked
-- [Current blockers, or "(none)"]
+- [Issues preventing progress, if any]
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale for a decision that still affects how work continues]
@@ -572,7 +573,8 @@ Use this EXACT format:
 1. [What should happen next based on the current state]
 
 ## Critical Context
-- [Context still needed to continue, or "(none)"]
+- [Context still needed to continue]
+- [Or "(none)" if not applicable]
 
 Keep each section concise. Keep exact file paths, function names, and error messages that are still needed.`;
 

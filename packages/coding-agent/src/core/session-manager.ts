@@ -60,7 +60,7 @@ export const CURRENT_SESSION_VERSION = 4;
 
 /** Neutralize closing envelope tags only when creating new summary entries, never on replay. */
 function neutralizeSummaryClosingTags(summary: string): string {
-	return summary.replace(/<\s*\/\s*summary\s*>/gi, (tag) => `&lt;${tag.slice(1)}`);
+	return summary.replace(/<\s*\/\s*summary\s*>/gi, (tag) => tag.replace("/", "\\/"));
 }
 
 export interface SessionHeader {

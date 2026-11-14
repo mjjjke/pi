@@ -120,9 +120,9 @@ describe("approved core tool texts rev 3.2", () => {
 			},
 			{ selectedTools: ["read", "edit", "write"] },
 		]) {
-			expect(buildSystemPromptSections({ cwd: "/tmp", rendersToolCalls: true, ...options }).rules).not.toContain(
-				fact,
-			);
+			expect(
+				buildSystemPromptSections({ cwd: "/tmp", rendersToolCalls: true, ...options }).rules ?? "",
+			).not.toContain(fact);
 		}
 		expect(
 			buildSystemPromptSections({
