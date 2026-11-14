@@ -201,6 +201,23 @@ describe("createAgentSession stream options", () => {
 		}
 	});
 
+	it("does not restart warming for a disableContinuation request", async () => {
+		const fixture = await createCacheWarmingSession();
+		try {
+			await fixture.session.prompt("test");
+			const before = fixture.session.cacheWarmingStatus;
+			await (
+				await fixture.session.agent.streamFunction(fixture.session.model!, normalizeContext({ messages: [] }), {
+					sessionId: fixture.session.sessionId,
+					disableContinuation: true,
+				})
+			).result();
+			expect(fixture.session.cacheWarmingStatus).toEqual(before);
+		} finally {
+			fixture.dispose();
+		}
+	});
+
 	it("waits for the next request instead of restoring cache warming", async () => {
 		const fixture = await createCacheWarmingSession((manager, model) => {
 			manager.appendModelChange(model.provider, model.id);

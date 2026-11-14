@@ -20,9 +20,17 @@ Pi has two summarization mechanisms:
 | Compaction | Explicit background request, or hard-threshold safety net | Summarize old messages to free up context |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
-Both use closely related structured formats and track file operations cumulatively. Summarization requests disable prompt-cache writes because these one-off prompts are unlikely to be reused.
+Both use closely related structured formats and track file operations cumulatively. Standalone serialized summaries disable prompt-cache writes. Eligible compactions instead share the session's cached request prefix (see below).
 
 ## Compaction
+
+### Prefix-sharing summaries (local fork)
+
+For a non-virtual `anthropic-messages` selection, manual and threshold compaction can reuse the session's request: the projected branch passes through the same context hooks, LLM conversion and normalization, then receives one harness-owned user instruction. System messages, tool declarations, thinking, images and full tool results remain as the session sends them. The kept start must be identifiable by a unique text or first-tool-call excerpt; removed, ambiguous, aborted/error or textless points fall back. Overflow recovery and other APIs (including Codex) keep the serialized path. Extension-provided summaries bypass both built-in paths.
+
+The detached call uses the session id and request-shaping options with `disableContinuation: true`, without response observers, agent execution or warmer replacement. Tool calls, non-stop replies, blank text or missing `## Goal` / `## Next Steps` are unusable. A build/send exception or unusable reply falls back to the entire existing serialized path; billed usage is combined. Abort cancels without fallback. There is no setting or context-size precheck. A failed fork can add request cost and latency before fallback.
+
+Background jobs build from the launch branch and captured request policy, not later turns. Installation and the persisted entry/kept tail are unchanged.
 
 ### When It Triggers
 
@@ -135,7 +143,9 @@ Split user-message span (one span exceeds budget):
   turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
 ```
 
-For split user-message spans, Pi generates two summaries and merges them:
+The prefix-sharing path generates one summary, placing the turn's request and progress under Progress / In Progress; it has no `**Turn Context (split turn):**` block.
+
+On the serialized path, Pi generates two summaries and merges them:
 1. **History summary**: Previous context (if any)
 2. **User-message-span prefix summary**: The early part of the split user-message span
 
@@ -289,7 +299,7 @@ path/to/changed.ts
 
 ### Message Serialization
 
-Before summarization, messages are serialized to text via [`serializeConversation()`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/compaction/utils.ts):
+On the standalone/fallback path, messages are serialized to text via [`serializeConversation()`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/compaction/utils.ts):
 
 ```
 [User]: What they said

@@ -37,7 +37,9 @@ import {
 	contentText,
 	getCurrentSystemMessage,
 	getToolStateChanges,
+	normalizeContext,
 	retryDelayMs,
+	type SimpleStreamOptions,
 	supportsMidConversationSystemMessages,
 } from "@earendil-works/pi-ai";
 import type {
@@ -86,11 +88,13 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	describePoint,
 	estimateContextTokens,
 	estimateProjectedContextTokens,
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	type SessionSummaryRequest,
 	shouldCompact,
 } from "./compaction/index.ts";
 import { type CompactionJobStartResult, createCompactionJobTarget } from "./compaction-job.ts";
@@ -161,6 +165,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.t
 import { exportSessionToJsonl } from "./session-export.ts";
 import {
 	type BranchSummaryEntry,
+	buildSessionProjection,
 	type CompactionEntry,
 	type ContextEditEntry,
 	getLatestCompactionEntry,
@@ -457,8 +462,16 @@ interface PreparedRun {
 /** One delivered standing value (keyed developer). */
 type CompactionCarry = "desired" | "delivered";
 
+/** Session request shaping captured by the compaction owner, never response observers. */
+interface SessionSummaryPolicy {
+	transformContext: Agent["transformContext"];
+	convertToLlm: Agent["convertToLlm"];
+	options: SimpleStreamOptions;
+}
+
 /** Detached launch policy. Auth is deliberately absent and resolved for each physical call. */
 interface SummarizationRequestContext {
+	sessionSummary: SessionSummaryPolicy;
 	messages: AgentMessage[];
 	thinkingLevel: ThinkingLevel;
 	streamFunction: StreamFn;
@@ -5085,6 +5098,55 @@ export class AgentSession {
 	// Compaction
 	// =========================================================================
 
+	private _captureSessionSummaryPolicy(): SessionSummaryPolicy {
+		return {
+			transformContext: this.agent.transformContext,
+			convertToLlm: this.agent.convertToLlm,
+			options: {
+				reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
+				sessionId: this.agent.sessionId,
+				onPayload: this.agent.onPayload,
+				transport: this.agent.transport,
+				thinkingBudgets: structuredClone(this.agent.thinkingBudgets),
+				maxRetryDelayMs: this.agent.maxRetryDelayMs,
+				disableContinuation: true,
+			},
+		};
+	}
+
+	/** Build the request the session would send, without the request-boundary write hooks. */
+	private async _buildSessionSummaryRequest(
+		branch: SessionEntry[],
+		preparation: CompactionPreparation,
+		model: Model<any>,
+		reason: "manual" | "threshold" | "overflow",
+		signal: AbortSignal,
+		policy = this._captureSessionSummaryPolicy(),
+	): Promise<SessionSummaryRequest | undefined> {
+		if (model.api !== "anthropic-messages" || isVirtualModel(model) || reason === "overflow") return undefined;
+		try {
+			signal.throwIfAborted();
+			const projection = buildSessionProjection(branch);
+			const messages = policy.transformContext
+				? await policy.transformContext(projection.messages, signal)
+				: projection.messages;
+			const context = normalizeContext({ messages: await policy.convertToLlm(messages) });
+			const firstKeptIndex = branch.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
+			const keptIds = new Set(branch.slice(firstKeptIndex).map((entry) => entry.id));
+			const first = projection.entries.find(
+				(entry) => keptIds.has(entry.sourceEntry.id) && entry.messages.length > 0,
+			)?.messages[0];
+			const keptStart = first && (await policy.convertToLlm([first]))[0];
+			signal.throwIfAborted();
+			if (!keptStart || !describePoint(keptStart, context)) return undefined;
+			return { context, keptStart, options: { ...policy.options, signal } };
+		} catch (error) {
+			signal.throwIfAborted();
+			if (error instanceof Error && error.name === "AbortError") throw error;
+			return undefined;
+		}
+	}
+
 	/** Start only on explicit request. The job owns its detached request policy until terminal. */
 	startBackgroundCompaction(options: {
 		source: "user" | "model";
@@ -5094,6 +5156,7 @@ export class AgentSession {
 		if (!selected) return { status: "unavailable", reason: "no-model" };
 		const model = structuredClone(selected);
 		const captured: SummarizationRequestContext = {
+			sessionSummary: this._captureSessionSummaryPolicy(),
 			messages: structuredClone(this.messages),
 			thinkingLevel: this.thinkingLevel,
 			streamFunction: this.agent.streamFunction,
@@ -5180,6 +5243,14 @@ export class AgentSession {
 					undefined,
 					undefined,
 					request.onUsage,
+					await this._buildSessionSummaryRequest(
+						request.branch,
+						request.preparation,
+						model,
+						"manual",
+						request.signal,
+						captured.sessionSummary,
+					),
 				);
 			},
 		});
@@ -5366,6 +5437,8 @@ export class AgentSession {
 			this.settingsManager.getRetrySettings(),
 			this._summarizationRetryCallbacks({ source: "compaction", reason }),
 			undefined, // sessionId
+			undefined, // onUsage
+			await this._buildSessionSummaryRequest(this.sessionManager.getBranch(), preparation, model, reason, signal),
 		);
 	}
 
