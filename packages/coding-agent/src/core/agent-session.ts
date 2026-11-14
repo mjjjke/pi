@@ -89,7 +89,6 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
-	describePoint,
 	estimateContextTokens,
 	estimateProjectedContextTokens,
 	estimateTokens,
@@ -5110,7 +5109,6 @@ export class AgentSession {
 				transport: this.agent.transport,
 				thinkingBudgets: structuredClone(this.agent.thinkingBudgets),
 				maxRetryDelayMs: this.agent.maxRetryDelayMs,
-				disableContinuation: true,
 			},
 		};
 	}
@@ -5150,11 +5148,14 @@ export class AgentSession {
 			const firstKeptIndex = branch.findIndex((entry) => entry.id === preparation.firstKeptEntryId);
 			const keptIds = new Set(branch.slice(firstKeptIndex).map((entry) => entry.id));
 			const first = projection.entries.find(
-				(entry) => keptIds.has(entry.sourceEntry.id) && entry.messages.length > 0,
+				(entry) =>
+					entry.sourceEntry.type !== "compaction" &&
+					keptIds.has(entry.sourceEntry.id) &&
+					entry.messages.length > 0,
 			)?.messages[0];
 			const keptStart = first && (await policy.convertToLlm([first]))[0];
 			signal.throwIfAborted();
-			if (!keptStart || !describePoint(keptStart, context)) return undefined;
+			if (!keptStart) return undefined;
 			return { context, keptStart, options: { ...policy.options, signal } };
 		} catch (error) {
 			signal.throwIfAborted();

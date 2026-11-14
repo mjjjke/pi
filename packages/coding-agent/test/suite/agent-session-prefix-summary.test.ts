@@ -80,7 +80,8 @@ describe("session prefix-sharing compaction", () => {
 		).toBe(false);
 	});
 	it("matches every session request option except an explicit non-request allowlist", async () => {
-		const { h, calls } = await setup();
+		const { h, calls } = await setup({ models: [{ id: "reasoning-faux", reasoning: true }] });
+		h.session.setThinkingLevel("medium");
 		h.session.agent.thinkingBudgets = { medium: 2048 };
 		h.session.agent.maxRetryDelayMs = 987;
 		h.session.agent.transport = "sse";
@@ -119,8 +120,12 @@ describe("session prefix-sharing compaction", () => {
 			"hasQueuedMessages",
 		]);
 		for (const key of Object.keys(sessionOptions) as Array<keyof SimpleStreamOptions>) {
-			if (!excluded.has(key)) expect(forkOptions[key], key).toEqual(sessionOptions[key]);
+			if (!excluded.has(key)) {
+				expect(forkOptions, key).toHaveProperty(key);
+				expect(forkOptions[key], key).toEqual(sessionOptions[key]);
+			}
 		}
+		expect(sessionOptions.reasoning).toBe("medium");
 		expect(forkOptions.disableContinuation).toBe(true);
 		expect(forkOptions).not.toHaveProperty("cacheRetention");
 	});
@@ -158,6 +163,26 @@ describe("session prefix-sharing compaction", () => {
 		expect(JSON.stringify(h.session.messages)).toContain("LATER-INPUT");
 		expect(JSON.stringify(h.session.messages)).toContain("later answer");
 	});
+	it("forks again when the new cut lies inside the previous compaction's kept range", async () => {
+		const { h, calls } = await setup({
+			settings: { compaction: { enabled: false, keepRecentTokens: 60 } },
+		});
+		h.setResponses([fauxAssistantMessage(SUMMARY)]);
+		await h.session.compact();
+		expect(isFork(calls[2].context)).toBe(true);
+		h.setResponses([fauxAssistantMessage("small answer"), fauxAssistantMessage(SUMMARY)]);
+		await h.session.prompt("small input");
+		const settings = { ...h.settingsManager.getCompactionSettings(h.session.model), keepRecentTokens: 8 };
+		vi.spyOn(h.settingsManager, "getCompactionSettings").mockReturnValue(settings);
+		const branch = h.sessionManager.getBranch();
+		const prep = prepareCompaction(branch, settings)!;
+		expect(prep).toBeDefined();
+		const previousIndex = branch.findIndex((entry) => entry.type === "compaction");
+		expect(branch.findIndex((entry) => entry.id === prep.firstKeptEntryId)).toBeLessThan(previousIndex);
+		await h.session.compact();
+		expect(isFork(calls[4].context)).toBe(true);
+		expect(calls).toHaveLength(5);
+	});
 	it("rejects a faux tool-call summary without invoking execution or tool_call hooks", async () => {
 		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "executed" }], details: {} }));
 		const hook = vi.fn();
@@ -182,42 +207,54 @@ describe("session prefix-sharing compaction", () => {
 		expect(hook).not.toHaveBeenCalled();
 		expect(h.sessionManager.getBranch()).toHaveLength(before + 1);
 	});
-	it("the actual last session Anthropic body is a byte prefix of the fork body", async () => {
-		const { h, calls } = await setup();
-		h.setResponses([fauxAssistantMessage(SUMMARY)]);
-		await h.session.compact();
-		expect(isFork(calls[2].context)).toBe(true);
-		const bodies: string[] = [];
-		for (const call of [calls[1], calls[2]]) {
-			const response = await streamAnthropic(
-				{ ...h.session.model!, api: "anthropic-messages", compat: undefined, baseUrl: "https://offline.invalid" },
-				normalizeContext(call.context),
-				{
-					...call.options,
-					apiKey: "offline-test",
-					disableContinuation: true,
-					maxRetries: 0,
-					cacheRetention: "short",
-					fetch: async (input, init) => {
-						bodies.push(await new Request(input, init).text());
-						return new Response(
-							'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
-							{ headers: { "content-type": "text/event-stream" } },
-						);
+	it.each(["blocking", "background"])(
+		"the actual last session Anthropic body is a byte prefix of the %s fork body",
+		async (mode) => {
+			const { h, calls } = await setup();
+			h.setResponses([fauxAssistantMessage(SUMMARY)]);
+			if (mode === "blocking") await h.session.compact();
+			else {
+				expect(h.session.startBackgroundCompaction({ source: "user" }).status).toBe("started");
+				await vi.waitFor(() => expect(h.session.getBackgroundCompaction()?.phase).toBe("ready"));
+			}
+			expect(isFork(calls[2].context)).toBe(true);
+			const bodies: string[] = [];
+			for (const call of [calls[1], calls[2]]) {
+				const response = await streamAnthropic(
+					{
+						...h.session.model!,
+						api: "anthropic-messages",
+						compat: undefined,
+						baseUrl: "https://offline.invalid",
 					},
-				},
-			).result();
-			expect(response.stopReason, response.errorMessage).toBe("stop");
-		}
-		expectPromptPrefixStable(bodies[0], bodies[1], {
-			fixed: ["system", "tools"],
-			history: "messages",
-			normalize: (raw, path, previousLength) =>
-				path === `messages[${previousLength - 1}]`
-					? raw.replace(/,"cache_control":\{"type":"ephemeral"\}(\}\]\})$/, "$1")
-					: raw,
-		});
-	});
+					normalizeContext(call.context),
+					{
+						...call.options,
+						apiKey: "offline-test",
+						disableContinuation: true,
+						maxRetries: 0,
+						cacheRetention: "short",
+						fetch: async (input, init) => {
+							bodies.push(await new Request(input, init).text());
+							return new Response(
+								'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+								{ headers: { "content-type": "text/event-stream" } },
+							);
+						},
+					},
+				).result();
+				expect(response.stopReason, response.errorMessage).toBe("stop");
+			}
+			expectPromptPrefixStable(bodies[0], bodies[1], {
+				fixed: ["system", "tools"],
+				history: "messages",
+				normalize: (raw, path, previousLength) =>
+					path === `messages[${previousLength - 1}]`
+						? raw.replace(/,"cache_control":\{"type":"ephemeral"\}(\}\]\})$/, "$1")
+						: raw,
+			});
+		},
+	);
 	it("normalizes a build exception concurrent with cancellation to AbortError", async () => {
 		const { h, calls } = await setup();
 		const controller = new AbortController();
