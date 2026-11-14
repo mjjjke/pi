@@ -1019,6 +1019,13 @@ Create a concise checkpoint of the user's request and the progress shown above. 
 
 Only summarize information explicitly present above. Do not infer or recreate later messages.`;
 
+/** The session request captured before appending the summary instruction. */
+export interface SessionSummaryRequest {
+	context: Context;
+	keptStart: Message;
+	options: SimpleStreamOptions;
+}
+
 /**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
@@ -1041,6 +1048,7 @@ export async function compact(
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
 	onUsage?: (usage: Usage) => void,
+	sessionRequest?: SessionSummaryRequest,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -1052,11 +1060,74 @@ export async function compact(
 		fileOps,
 	} = preparation;
 
+	let forkUsage: Usage | undefined;
+	let forkText: string | undefined;
+	if (sessionRequest) {
+		try {
+			signal?.throwIfAborted();
+			const point = describePoint(sessionRequest.keptStart, sessionRequest.context);
+			if (point) {
+				const context: Context = {
+					...sessionRequest.context,
+					messages: [
+						...sessionRequest.context.messages,
+						{
+							role: "user",
+							content: [
+								{ type: "text", text: buildSessionSummaryInstruction(preparation, point, customInstructions) },
+							],
+							timestamp: Date.now(),
+						},
+					],
+				};
+				const options: SimpleStreamOptions = {
+					...sessionRequest.options,
+					apiKey,
+					headers,
+					env,
+					signal,
+					disableContinuation: true,
+				};
+				const response = await retryAssistantCall(
+					async () => {
+						const reply = await (streamFn
+							? (await streamFn(model, normalizeContext(context), options)).result()
+							: completeSimple(model, normalizeContext(context), options));
+						forkUsage = forkUsage ? combineUsage(forkUsage, reply.usage) : reply.usage;
+						onUsage?.(reply.usage);
+						return reply;
+					},
+					retry,
+					signal,
+					undefined,
+				);
+				signal?.throwIfAborted();
+				if (response.stopReason === "aborted") throw new DOMException("Compaction cancelled", "AbortError");
+				const text = contentText(response.content);
+				if (
+					response.stopReason === "stop" &&
+					!response.content.some((block) => block.type === "toolCall") &&
+					text.trim() &&
+					/^## Goal\r?$/m.test(text) &&
+					/^## Next Steps\r?$/m.test(text)
+				)
+					forkText = text;
+			}
+		} catch (error) {
+			signal?.throwIfAborted();
+			if (error instanceof Error && error.name === "AbortError") throw error;
+			// A failed or unusable fork falls back to the complete serialized path below.
+		}
+	}
+
 	// Generate summaries and merge into one
 	let summary: string;
 	let summaryUsage: Usage;
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
+	if (forkText !== undefined) {
+		summary = forkText;
+		summaryUsage = forkUsage!;
+	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
 		let historyText = previousSummary ?? "No prior history.";
 		let historyUsage: Usage | undefined;
 		if (messagesToSummarize.length > 0) {
@@ -1120,6 +1191,8 @@ export async function compact(
 		summary = result.text;
 		summaryUsage = result.usage;
 	}
+
+	if (forkText === undefined && forkUsage) summaryUsage = combineUsage(forkUsage, summaryUsage);
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
