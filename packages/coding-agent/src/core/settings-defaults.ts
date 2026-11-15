@@ -60,6 +60,7 @@ export const SETTINGS_DEFAULTS = {
 		inlineBudget: 3000,
 	},
 	cacheWarming: "idle",
+	cacheWarmingMaxIdleHours: 16,
 	tuiMode: "fullscreen",
 	editorLinks: "file",
 	linkOpenModifier: "ctrl",

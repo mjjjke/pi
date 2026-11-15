@@ -319,7 +319,10 @@ export interface AgentSessionConfig {
 	/** Canonical model/auth runtime used by coding-agent internals. */
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
-	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	cacheWarmer?: Pick<
+		CacheWarmer,
+		"cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed" | "hasWarmCache"
+	>;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
 	/**
@@ -753,7 +756,10 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
-	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	private _cacheWarmer?: Pick<
+		CacheWarmer,
+		"cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed" | "hasWarmCache"
+	>;
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -5135,7 +5141,7 @@ export class AgentSession {
 		if (
 			latest.message.provider !== model.provider ||
 			latest.message.model !== model.id ||
-			Date.now() - latest.message.timestamp >= ttl
+			(Date.now() - latest.message.timestamp >= ttl && !this._cacheWarmer?.hasWarmCache(model, ttl))
 		)
 			return undefined;
 		try {

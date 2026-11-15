@@ -701,6 +701,12 @@
       "description": "Cache-warming profile. \"idle\" also warms between agent runs. Global only because each refresh costs money.",
       "default": "idle"
     },
+    "cacheWarmingMaxIdleHours": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Maximum idle warming hours since the last real request. Global only; invalid values use the default.",
+      "default": 16
+    },
     "websocketConnectTimeoutMs": {
       "anyOf": [
         {

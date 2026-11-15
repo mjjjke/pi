@@ -9,7 +9,7 @@ import {
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
@@ -32,6 +32,7 @@ describe("createAgentSession stream options", () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -147,7 +148,10 @@ describe("createAgentSession stream options", () => {
 		}
 	}
 
-	async function createCacheWarmingSession(populate?: (manager: SessionManager, model: Model<Api>) => void) {
+	async function createCacheWarmingSession(
+		populate?: (manager: SessionManager, model: Model<Api>) => void,
+		settings: Partial<Settings> = {},
+	) {
 		const model: Model<Api> = {
 			...createModel("anthropic-messages"),
 			cost: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
@@ -171,7 +175,7 @@ describe("createAgentSession stream options", () => {
 			agentDir,
 			model,
 			modelRuntime: getModelRuntime(modelRegistry),
-			settingsManager: SettingsManager.inMemory({ cacheWarming: "idle" }),
+			settingsManager: SettingsManager.inMemory({ cacheWarming: "idle", ...settings }),
 			sessionManager,
 		});
 		return {
@@ -196,6 +200,27 @@ describe("createAgentSession stream options", () => {
 			expect(fixture.session.cacheWarmingStatus?.nextWarmAt).toBeGreaterThan(Date.now());
 			fixture.session.agent.state.messages = fixture.session.agent.state.messages.slice(1);
 			expect(fixture.session.cacheWarmingStatus?.reason).toBe("conversation context changed");
+		} finally {
+			fixture.dispose();
+		}
+	});
+
+	it("wires the configured idle hours into repeated refreshes", async () => {
+		const fixture = await createCacheWarmingSession(undefined, { cacheWarmingMaxIdleHours: 0.15 });
+		try {
+			vi.useFakeTimers();
+			await fixture.session.prompt("test");
+			expect(fixture.providerCalls()).toBe(1);
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(fixture.providerCalls()).toBe(2);
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(fixture.providerCalls()).toBe(3);
+			expect(fixture.session.cacheWarmingStatus).toMatchObject({
+				state: "inactive",
+				reason: "0.15-hour idle limit reached",
+			});
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(fixture.providerCalls()).toBe(3);
 		} finally {
 			fixture.dispose();
 		}

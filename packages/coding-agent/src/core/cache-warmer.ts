@@ -84,10 +84,18 @@ interface ActiveRun extends CacheWarmRequest {
 /**
  * Keeps one prompt cache entry alive by re-sending its request with a
  * one-token output cap before the entry expires. `start` replaces any
- * previous run; warm requests never extend the fixed safety windows.
+ * previous run; warm requests never extend the limits measured from the real request.
  */
 export class CacheWarmer {
 	private run?: ActiveRun;
+	private lastWarm?: {
+		provider: string;
+		model: string;
+		at: number;
+		ttlMs: number;
+		isCurrent: () => boolean;
+	};
+	private readonly getMaxIdleHours: () => number;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
 	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
@@ -102,11 +110,13 @@ export class CacheWarmer {
 		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
+		getMaxIdleHours: () => number = () => CACHE_WARMING_MAX_IDLE_AGE_MS / 3_600_000,
 	) {
 		this.models = models;
 		this.sessionManager = sessionManager;
 		this.getMode = getMode;
 		this.decide = decide;
+		this.getMaxIdleHours = getMaxIdleHours;
 		this.inactive = { state: "inactive", reason: "waiting for first request" };
 	}
 
@@ -128,8 +138,21 @@ export class CacheWarmer {
 		};
 	}
 
+	/** Successful refresh evidence for this model and still-current prefix, bounded by both retention TTLs. */
+	hasWarmCache(model: Model<Api>, ttlMs: number): boolean {
+		const warm = this.lastWarm;
+		return (
+			warm !== undefined &&
+			warm.provider === model.provider &&
+			warm.model === model.id &&
+			warm.isCurrent() &&
+			Date.now() - warm.at < Math.min(ttlMs, warm.ttlMs)
+		);
+	}
+
 	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
 	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
+		this.lastWarm = undefined;
 		this.clearRun();
 		const mode = this.getMode();
 		if (mode === "off") {
@@ -177,9 +200,10 @@ export class CacheWarmer {
 			return;
 		}
 		run.phase = "idle";
-		const deadline = run.startedAt + CACHE_WARMING_MAX_IDLE_AGE_MS;
+		const hours = this.getMaxIdleHours();
+		const deadline = run.startedAt + hours * 3_600_000;
 		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
-			this.stop("30-minute idle safety limit reached");
+			this.stop(`${hours}-hour idle limit reached`);
 		}
 	}
 
@@ -192,6 +216,7 @@ export class CacheWarmer {
 	}
 
 	cancel(): void {
+		this.lastWarm = undefined;
 		this.stop("inactive");
 	}
 
@@ -215,10 +240,10 @@ export class CacheWarmer {
 		// the planned pre-expiry margin for that delay and request dispatch; a
 		// late refresh is likely a full-price cache write, not a cache warm.
 		run.refreshDeadlineAt = run.nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2);
-		const deadline =
-			run.startedAt + (run.phase === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : CACHE_WARMING_MAX_AGE_MS);
+		const hours = this.getMaxIdleHours();
+		const deadline = run.startedAt + (run.phase === "idle" ? hours * 3_600_000 : CACHE_WARMING_MAX_AGE_MS);
 		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
-			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
+			this.stop(run.phase === "idle" ? `${hours}-hour idle limit reached` : "one-hour safety limit reached");
 			return;
 		}
 		run.timer = setTimeout(() => void this.refresh(run), Math.max(0, run.nextWarmAt - Date.now()));
@@ -262,6 +287,13 @@ export class CacheWarmer {
 				.result();
 			if (!this.validateRun(run)) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+				this.lastWarm = {
+					provider: message.provider,
+					model: message.responseModel ?? message.model,
+					at: Date.now(),
+					ttlMs: run.ttlMs,
+					isCurrent: run.isCurrent,
+				};
 				const entry = this.sessionManager.appendUsage(
 					"cache_warm",
 					message.provider,

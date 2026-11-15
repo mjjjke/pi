@@ -86,6 +86,7 @@ function fakeRuntime(
 		result?: (model: Model<Api>) => Promise<AssistantMessage>;
 		decide?: (event: CacheWarmingDecisionEvent) => CacheWarmingAction | Promise<CacheWarmingAction>;
 		mode?: CacheWarmingMode;
+		maxIdleHours?: number;
 		branch?: SessionEntry[];
 	} = {},
 ) {
@@ -110,6 +111,7 @@ function fakeRuntime(
 			events.push(event);
 			return options.decide?.(event) ?? event.action;
 		},
+		options.maxIdleHours === undefined ? undefined : () => options.maxIdleHours!,
 	);
 	warmer.onWarmed = (entry) => warmedEntries.push(entry);
 	return { warmer, calls, events, warmedEntries, appendUsage, state };
@@ -184,6 +186,72 @@ describe("cache warming", () => {
 		await vi.advanceTimersByTimeAsync(270_000);
 		expect(calls).toHaveLength(2);
 		warmer.cancel();
+	});
+
+	it.each([16, 2.7])("warms idle hourly caches at every delay through the %sh cap", async (hours) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const { warmer, calls, events, warmedEntries } = fakeRuntime({
+			maxIdleHours: hours === 16 ? undefined : hours,
+			branch: branchWithPrompt(400_000),
+		});
+		warmer.start(request(adaptiveModel, { cacheRetention: "long" }), current);
+		warmer.onAgentSettled();
+		const delay = 54 * 60_000;
+		const count = Math.floor((hours * 3_600_000) / delay);
+		for (let i = 1; i <= count; i++) {
+			await vi.advanceTimersByTimeAsync(delay - 1);
+			expect(calls).toHaveLength(i - 1);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(calls).toHaveLength(i);
+		}
+		expect(events.every((event) => event.continuationProbability === 0.15)).toBe(true);
+		expect(warmedEntries).toHaveLength(count);
+		expect(warmer.status).toMatchObject({ state: "inactive", reason: `${hours}-hour idle limit reached` });
+		expect(formatCacheWarmingStatus(warmer.status)).toBe(`Inactive (${hours}-hour idle limit reached)`);
+		await vi.advanceTimersByTimeAsync(3_600_000);
+		expect(calls).toHaveLength(count);
+	});
+
+	it("bounds successful warm evidence by model, prefix and retention even after the idle cap", async () => {
+		vi.useFakeTimers();
+		const { warmer } = fakeRuntime({ maxIdleHours: 0.9, branch: branchWithPrompt(400_000) });
+		let matches = true;
+		warmer.start(request(adaptiveModel, { cacheRetention: "long" }), () => matches);
+		warmer.onAgentSettled();
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(false);
+		await vi.advanceTimersByTimeAsync(54 * 60_000);
+		expect(warmer.status.reason).toBe("0.9-hour idle limit reached");
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(true);
+		expect(warmer.hasWarmCache(budgetModel, 3_600_000)).toBe(false);
+		matches = false;
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(false);
+		matches = true;
+		vi.setSystemTime(Date.now() + 300_000);
+		expect(warmer.hasWarmCache(adaptiveModel, 300_000)).toBe(false);
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(true);
+		vi.setSystemTime(Date.now() + 3_300_000);
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(false);
+		warmer.start(request(), current);
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(false);
+		warmer.cancel();
+	});
+
+	it("keeps the one-hour streaming limit and rejects small idle contexts", async () => {
+		vi.useFakeTimers();
+		const streaming = fakeRuntime({ maxIdleHours: 16 });
+		streaming.warmer.start(request(adaptiveModel, { cacheRetention: "long" }), current);
+		await vi.advanceTimersByTimeAsync(54 * 60_000);
+		expect(streaming.calls).toHaveLength(1);
+		expect(streaming.warmer.status.reason).toBe("one-hour safety limit reached");
+		expect(streaming.events[0].continuationProbability).toBe(1);
+
+		const small = fakeRuntime({ branch: branchWithPrompt(5_000) });
+		small.warmer.start(request(adaptiveModel, { cacheRetention: "long" }), current);
+		small.warmer.onAgentSettled();
+		await vi.advanceTimersByTimeAsync(54 * 60_000);
+		expect(small.calls).toHaveLength(0);
+		expect(small.warmer.status.reason).toBe("expected savings below threshold");
 	});
 
 	it("does not issue refreshes after their safe deadline", async () => {
@@ -311,6 +379,7 @@ describe("cache warming", () => {
 		failed.warmer.start(request(), current);
 		await vi.advanceTimersByTimeAsync(270_000);
 		expect(failed.appendUsage).not.toHaveBeenCalled();
+		expect(failed.warmer.hasWarmCache(adaptiveModel, 300_000)).toBe(false);
 		failed.warmer.cancel();
 	});
 

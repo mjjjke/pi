@@ -966,6 +966,14 @@ export class SettingsManager {
 		return mode !== undefined && CACHE_WARMING_MODES.includes(mode) ? mode : SETTINGS_DEFAULTS.cacheWarming;
 	}
 
+	/** Global-only limit; settings JSON is not schema-validated when loaded. */
+	getCacheWarmingMaxIdleHours(): number {
+		const hours: unknown = this.globalSettings.cacheWarmingMaxIdleHours;
+		return typeof hours === "number" && Number.isFinite(hours) && hours > 0
+			? hours
+			: SETTINGS_DEFAULTS.cacheWarmingMaxIdleHours;
+	}
+
 	setCacheWarmingMode(mode: CacheWarmingMode): void {
 		this.globalSettings.cacheWarming = mode;
 		this.markModified("cacheWarming");

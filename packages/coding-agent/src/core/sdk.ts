@@ -345,6 +345,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager,
 		() => settingsManager.getCacheWarmingMode(),
 		async (event) => extensionRunnerRef.current?.emitCacheWarmingDecision(event) ?? event.action,
+		() => settingsManager.getCacheWarmingMaxIdleHours(),
 	);
 	const buildRequestOptions = (options: ModelsSimpleStreamOptions = {}): ModelsSimpleStreamOptions => {
 		const providerRetrySettings = settingsManager.getProviderRetrySettings();
