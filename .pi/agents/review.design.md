@@ -1,4 +1,4 @@
 ---
 name: review.design
-add_skills: agent-harness-development
+skills: +agent-harness-development
 ---
