@@ -7,6 +7,7 @@ import {
 	type CacheWarmingDecision,
 	type Context,
 	evaluateCacheWarming,
+	getCacheRetention,
 	getCacheWarmingDelayMs,
 	getCacheWarmingRequestOptions,
 	getPromptCacheTtlMs,
@@ -16,6 +17,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
 import type { SessionEntry, SessionManager, UsageEntry } from "./session-manager.ts";
+import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 import type { CacheWarmingMode } from "./settings-manager.ts";
 
 export type { CacheWarmingAction, CacheWarmingDecision };
@@ -110,7 +112,7 @@ export class CacheWarmer {
 		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
-		getMaxIdleHours: () => number = () => CACHE_WARMING_MAX_IDLE_AGE_MS / 3_600_000,
+		getMaxIdleHours: () => number = () => SETTINGS_DEFAULTS.cacheWarmingMaxIdleHours,
 	) {
 		this.models = models;
 		this.sessionManager = sessionManager;
@@ -200,7 +202,7 @@ export class CacheWarmer {
 			return;
 		}
 		run.phase = "idle";
-		const hours = this.getMaxIdleHours();
+		const hours = this.getIdleLimitHours(run);
 		const deadline = run.startedAt + hours * 3_600_000;
 		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop(`${hours}-hour idle limit reached`);
@@ -240,7 +242,7 @@ export class CacheWarmer {
 		// the planned pre-expiry margin for that delay and request dispatch; a
 		// late refresh is likely a full-price cache write, not a cache warm.
 		run.refreshDeadlineAt = run.nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2);
-		const hours = this.getMaxIdleHours();
+		const hours = this.getIdleLimitHours(run);
 		const deadline = run.startedAt + (run.phase === "idle" ? hours * 3_600_000 : CACHE_WARMING_MAX_AGE_MS);
 		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop(run.phase === "idle" ? `${hours}-hour idle limit reached` : "one-hour safety limit reached");
@@ -248,6 +250,12 @@ export class CacheWarmer {
 		}
 		run.timer = setTimeout(() => void this.refresh(run), Math.max(0, run.nextWarmAt - Date.now()));
 		run.timer.unref?.();
+	}
+
+	private getIdleLimitHours(run: ActiveRun): number {
+		return getCacheRetention(run.options) === "long"
+			? this.getMaxIdleHours()
+			: CACHE_WARMING_MAX_IDLE_AGE_MS / 3_600_000;
 	}
 
 	private async refresh(run: ActiveRun): Promise<void> {
@@ -331,7 +339,7 @@ export class CacheWarmer {
 	}
 
 	private evaluate(run: ActiveRun): CacheWarmingDecision {
-		return evaluateCacheWarming(run.model, lastPromptTokens(this.sessionManager.getBranch()), run.phase);
+		return evaluateCacheWarming(run.model, lastPromptTokens(this.sessionManager.getBranch()), run.phase, run.options);
 	}
 }
 

@@ -46,7 +46,7 @@ const REQUEST = {
 } satisfies ModelRequest;
 
 /** Warmers on mocked timers; `phase` is what the host reports, `sent` the refreshes the fake models received. */
-function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idle") {
+function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idle", model = MODEL) {
 	mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const state = {
 		mode,
@@ -84,7 +84,7 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 	) => {
 		const message = fauxAssistantMessage([]);
 		const usage = { ...message.usage, input: 2, cacheRead: promptTokens - 1002, cacheWrite: 1000 };
-		warmers.start(CONVERSATION, { ...message, stopReason, usage }, { ...REQUEST, options }, models);
+		warmers.start(CONVERSATION, { ...message, stopReason, usage }, { ...REQUEST, model, options }, models);
 	};
 	/** Advances the clock by `ms` and lets the refreshes it fired finish (they arm the next timer when done). */
 	const advance = async (ms: number) => {
@@ -134,6 +134,20 @@ test("warms up to an hour while streaming and 30 minutes while idle; mode stream
 	streamingOnly.state.phase = "idle";
 	streamingOnly.start(600_000);
 	assert.equal(await streamingOnly.runOut(), 0);
+});
+
+test("prices an idle miss using the request's long retention", async (t) => {
+	// Keep the refresh inside p2's 30-minute idle cap while exercising long-retention pricing.
+	const { state, start, advance } = setup(t, "idle", { ...MODEL, promptCache: { short: 300, long: 300 } });
+	const { input, output, cacheRead, cacheWrite } = MODEL.cost;
+	const threshold = (write: number) =>
+		((0.05 + output / 1_000_000) * 1_000_000) / (0.15 * (write - cacheRead) - cacheRead);
+	const promptTokens = Math.ceil((threshold(cacheWrite) + threshold(input * 2)) / 2);
+	state.phase = "idle";
+	start(promptTokens, "toolUse", { cacheRetention: "long" });
+	await advance(270_000);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.sent[0]!.cacheRetention, "long");
 });
 
 test("does not warm what is not worth it or cannot be repeated", async (t) => {

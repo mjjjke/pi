@@ -30,8 +30,8 @@ export interface CacheWarmingDecision {
 /** Streaming warming never continues past this long after the real request that started it. */
 export const CACHE_WARMING_MAX_AGE_MS = 60 * 60_000;
 
-/** Default idle horizon after the last real request; hosts may expose a configurable limit. */
-export const CACHE_WARMING_MAX_IDLE_AGE_MS = 16 * 60 * 60_000;
+/** Idle warming uses a shorter horizon because continuation estimates become less reliable with age. */
+export const CACHE_WARMING_MAX_IDLE_AGE_MS = 30 * 60_000;
 
 /** A refresh is sent only when it is expected to save at least this many dollars. */
 export const CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS = 0.05;
@@ -53,9 +53,7 @@ export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
  * request used. Undefined when the model has no lifetime for that tier or caching is off.
  */
 export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOptions | undefined): number | undefined {
-	const retention =
-		options?.cacheRetention ??
-		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
+	const retention = getCacheRetention(options);
 	if (retention === "none") return undefined;
 	const seconds = model.promptCache?.[retention];
 	return seconds === undefined ? undefined : seconds * 1000;
@@ -79,16 +77,19 @@ export function getCacheWarmingRequestOptions<T extends SimpleStreamOptions>(opt
 	return { ...options, maxTokens: 1, disableContinuation: true, maxRetries: 0, signal };
 }
 
-/** Decide whether refreshing the cache entry of a `promptTokens`-token request pays for itself in `phase`. */
+/** Decide whether a refresh pays for itself in `phase`, pricing a miss at the request's retention from `options`. */
 export function evaluateCacheWarming(
 	model: Model<Api>,
 	promptTokens: number,
 	phase: CacheWarmingPhase,
+	options: SimpleStreamOptions | undefined,
 ): CacheWarmingDecision {
 	const cacheHitCost = price(model, { cacheRead: promptTokens });
 	const cacheMissCost = price(
 		model,
-		model.cost.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens },
+		model.cost.cacheWrite > 0
+			? { cacheWrite: promptTokens, cacheWrite1h: getCacheRetention(options) === "long" ? promptTokens : 0 }
+			: { input: promptTokens },
 	);
 	const warmCost = price(model, { cacheRead: promptTokens, output: 1 });
 	const missCost = Math.max(0, cacheMissCost - cacheHitCost);
@@ -106,9 +107,16 @@ export function evaluateCacheWarming(
 	};
 }
 
+/** Resolve the request's retention, preferring its explicit option over its provider environment. */
+export function getCacheRetention(options: SimpleStreamOptions | undefined) {
+	return (
+		options?.cacheRetention ?? (getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short")
+	);
+}
+
 function price(
 	model: Model<Api>,
-	tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">>,
+	tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "cacheWrite1h">>,
 ): number {
 	const usage: Usage = {
 		input: 0,

@@ -188,14 +188,94 @@ describe("cache warming", () => {
 		warmer.cancel();
 	});
 
-	it.each([16, 2.7])("warms idle hourly caches at every delay through the %sh cap", async (hours) => {
+	it.each(["long", "short"] as const)("prices idle refreshes using the run's %s retention", async (cacheRetention) => {
+		vi.useFakeTimers();
+		const probability = 0.15;
+		const { input, output, cacheRead, cacheWrite } = adaptiveModel.cost;
+		const threshold = (write: number) =>
+			((0.05 + output / 1_000_000) * 1_000_000) / (probability * (write - cacheRead) - cacheRead);
+		const promptTokens = Math.ceil((threshold(cacheWrite) + threshold(input * 2)) / 2);
+		const { warmer, calls, events } = fakeRuntime({ branch: branchWithPrompt(promptTokens) });
+		warmer.start(request(adaptiveModel, { cacheRetention }), current);
+		warmer.onAgentSettled();
+		const action = cacheRetention === "long" ? "warm" : "stop";
+		expect(warmer.status.decision?.action).toBe(action);
+		const delay = getCacheWarmingDelayMs(getPromptCacheTtlMs(adaptiveModel, { cacheRetention })!)!;
+		await vi.advanceTimersByTimeAsync(delay);
+		expect(events[0].action).toBe(action);
+		expect(events[0].missCost).toBeCloseTo(
+			(((cacheRetention === "long" ? input * 2 : cacheWrite) - cacheRead) * promptTokens) / 1_000_000,
+		);
+		expect(calls).toHaveLength(cacheRetention === "long" ? 1 : 0);
+		if (cacheRetention === "long") expect(calls[0].options?.cacheRetention).toBe("long");
+		warmer.cancel();
+	});
+
+	it.each([
+		{ cacheRetention: "short" as const },
+		{},
+		{ cacheRetention: "short" as const, env: { PI_CACHE_RETENTION: "long" } },
+	])("caps short-retention idle warming at 30 minutes with a 16-hour setting: %j", async (options) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const { warmer, calls } = fakeRuntime({ maxIdleHours: 16, branch: branchWithPrompt(400_000) });
+		warmer.start(request(adaptiveModel, options), current);
+		warmer.onAgentSettled();
+		await vi.advanceTimersByTimeAsync(30 * 60_000);
+		expect(calls).toHaveLength(6);
+		expect(warmer.status).toMatchObject({ state: "inactive", reason: "0.5-hour idle limit reached" });
+		await vi.advanceTimersByTimeAsync(16 * 3_600_000);
+		expect(calls).toHaveLength(6);
+	});
+
+	it("applies the short idle cap when a streaming run settles after 30 minutes", async () => {
+		vi.useFakeTimers();
+		const { warmer, calls } = fakeRuntime({ maxIdleHours: 16, branch: branchWithPrompt(400_000) });
+		warmer.start(request(adaptiveModel, { cacheRetention: "short" }), current);
+		await vi.advanceTimersByTimeAsync(30 * 60_000);
+		expect(calls).toHaveLength(6);
+		expect(warmer.status.state).toBe("scheduled");
+		warmer.onAgentSettled();
+		expect(warmer.status.reason).toBe("0.5-hour idle limit reached");
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(calls).toHaveLength(6);
+	});
+
+	it("uses retention rather than the model TTL to choose the idle cap", async () => {
+		vi.useFakeTimers();
+		const { warmer, calls } = fakeRuntime({ maxIdleHours: 16, branch: branchWithPrompt(400_000) });
+		warmer.start(request({ ...adaptiveModel, promptCache: { short: 3600 } }), current);
+		warmer.onAgentSettled();
+		expect(warmer.status.reason).toBe("0.5-hour idle limit reached");
+		await vi.advanceTimersByTimeAsync(16 * 3_600_000);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("expires short refresh evidence even when the summary uses long retention", async () => {
+		vi.useFakeTimers();
+		const { warmer } = fakeRuntime({ branch: branchWithPrompt(400_000) });
+		warmer.start(request(adaptiveModel, { cacheRetention: "short" }), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(true);
+		vi.setSystemTime(Date.now() + 299_999);
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(true);
+		vi.setSystemTime(Date.now() + 1);
+		expect(warmer.hasWarmCache(adaptiveModel, 3_600_000)).toBe(false);
+		warmer.cancel();
+	});
+
+	it.each([
+		{ hours: 16, options: { cacheRetention: "long" as const } },
+		{ hours: 2.7, options: { cacheRetention: "long" as const } },
+		{ hours: 2.7, options: { env: { PI_CACHE_RETENTION: "long" } } },
+	])("warms idle hourly caches at every delay through the cap: %j", async ({ hours, options }) => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const { warmer, calls, events, warmedEntries } = fakeRuntime({
 			maxIdleHours: hours === 16 ? undefined : hours,
 			branch: branchWithPrompt(400_000),
 		});
-		warmer.start(request(adaptiveModel, { cacheRetention: "long" }), current);
+		warmer.start(request(adaptiveModel, options), current);
 		warmer.onAgentSettled();
 		const delay = 54 * 60_000;
 		const count = Math.floor((hours * 3_600_000) / delay);

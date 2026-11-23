@@ -16,12 +16,18 @@ describe("cache warming idle limit setting", () => {
 		});
 	});
 
-	it.each([undefined, null, 0, -1, "2", "invalid", false, {}, [], NaN, Infinity, -Infinity])(
-		"falls back for invalid JSON setting %j",
+	it.each([undefined, null, 0, -1, "2", "invalid", false, {}, []])(
+		"uses the default for missing or invalid settings.json value %j",
 		(value) => {
 			const storage = new InMemorySettingsStorage();
 			storage.withLock("global", () => JSON.stringify({ cacheWarmingMaxIdleHours: value }));
 			expect(SettingsManager.fromStorage(storage).getCacheWarmingMaxIdleHours()).toBe(16);
 		},
 	);
+
+	it.each(["1e400", "-1e400"])("uses the default for overflowing JSON number %s", (literal) => {
+		const storage = new InMemorySettingsStorage();
+		storage.withLock("global", () => `{"cacheWarmingMaxIdleHours":${literal}}`);
+		expect(SettingsManager.fromStorage(storage).getCacheWarmingMaxIdleHours()).toBe(16);
+	});
 });

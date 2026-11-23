@@ -428,7 +428,7 @@ export const SettingsSchema = Type.Object(
 			Type.Number({
 				exclusiveMinimum: 0,
 				description:
-					"Maximum idle warming hours since the last real request. Global only; invalid values use the default.",
+					"Maximum idle warming hours under long retention since the last real request. Short retention stops after 30 minutes regardless of this setting. Global only; invalid values use the default.",
 				default: SETTINGS_DEFAULTS.cacheWarmingMaxIdleHours,
 			}),
 		),

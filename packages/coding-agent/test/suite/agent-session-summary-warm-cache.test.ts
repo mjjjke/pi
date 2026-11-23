@@ -14,13 +14,14 @@ afterEach(() => {
 
 describe("summary warm-cache eligibility", () => {
 	it("uses successful same-prefix refreshes hours after the response, but not expired or replaced prefixes", async () => {
+		vi.stubEnv("PI_CACHE_RETENTION", "long");
 		const h = await createHarness({
 			api: "anthropic-messages",
 			settings: { compaction: { enabled: false, keepRecentTokens: 20 } },
 		});
 		fixtures.push(h);
 		h.session.agent.sessionId = h.session.sessionId;
-		h.session.agent.state.model = { ...h.session.model!, promptCache: { short: 3600 } };
+		h.session.agent.state.model = { ...h.session.model!, promptCache: { long: 3600 } };
 		h.setResponses([fauxAssistantMessage("old"), fauxAssistantMessage("tail")]);
 		await h.session.prompt(`old ${"x".repeat(5000)}`);
 		await h.session.prompt(`kept ${"y".repeat(200)}`);

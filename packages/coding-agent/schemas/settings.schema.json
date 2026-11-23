@@ -704,7 +704,7 @@
     "cacheWarmingMaxIdleHours": {
       "type": "number",
       "exclusiveMinimum": 0,
-      "description": "Maximum idle warming hours since the last real request. Global only; invalid values use the default.",
+      "description": "Maximum idle warming hours under long retention since the last real request. Short retention stops after 30 minutes regardless of this setting. Global only; invalid values use the default.",
       "default": 16
     },
     "websocketConnectTimeoutMs": {

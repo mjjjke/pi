@@ -155,7 +155,7 @@ describe("createAgentSession stream options", () => {
 		const model: Model<Api> = {
 			...createModel("anthropic-messages"),
 			cost: { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 },
-			promptCache: { short: 300 },
+			promptCache: { short: 300, long: 3600 },
 		};
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
 		await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "test-api-key" }));
@@ -205,21 +205,22 @@ describe("createAgentSession stream options", () => {
 		}
 	});
 
-	it("wires the configured idle hours into repeated refreshes", async () => {
-		const fixture = await createCacheWarmingSession(undefined, { cacheWarmingMaxIdleHours: 0.15 });
+	it("wires the configured idle hours into repeated long-retention refreshes", async () => {
+		vi.stubEnv("PI_CACHE_RETENTION", "long");
+		const fixture = await createCacheWarmingSession(undefined, { cacheWarmingMaxIdleHours: 1.8 });
 		try {
 			vi.useFakeTimers();
 			await fixture.session.prompt("test");
 			expect(fixture.providerCalls()).toBe(1);
-			await vi.advanceTimersByTimeAsync(270_000);
+			await vi.advanceTimersByTimeAsync(54 * 60_000);
 			expect(fixture.providerCalls()).toBe(2);
-			await vi.advanceTimersByTimeAsync(270_000);
+			await vi.advanceTimersByTimeAsync(54 * 60_000);
 			expect(fixture.providerCalls()).toBe(3);
 			expect(fixture.session.cacheWarmingStatus).toMatchObject({
 				state: "inactive",
-				reason: "0.15-hour idle limit reached",
+				reason: "1.8-hour idle limit reached",
 			});
-			await vi.advanceTimersByTimeAsync(270_000);
+			await vi.advanceTimersByTimeAsync(54 * 60_000);
 			expect(fixture.providerCalls()).toBe(3);
 		} finally {
 			fixture.dispose();

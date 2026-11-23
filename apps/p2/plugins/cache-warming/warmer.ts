@@ -130,7 +130,7 @@ export class ConversationWarmers {
 		if (phase === undefined || (phase === "idle" && mode === "streaming")) return false;
 		const maxAge = phase === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : CACHE_WARMING_MAX_AGE_MS;
 		if (Date.now() > run.startedAt + maxAge) return false;
-		const { action } = evaluateCacheWarming(run.request.model, run.promptTokens, phase);
+		const { action } = evaluateCacheWarming(run.request.model, run.promptTokens, phase, run.request.options);
 		return action === "warm" && this.#runs.get(conversationId) === run;
 	}
 }
