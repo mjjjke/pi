@@ -96,6 +96,46 @@ describe("system prompt updates", () => {
 		}
 	});
 
+	test("an extension preamble reaches the provider and survives an interrupted run", async () => {
+		let starts = 0;
+		const extension: ExtensionFactory = (pi) => {
+			pi.on("before_agent_start", (event) => {
+				starts++;
+				event.systemPromptOptions.preamble = "You are a reviewer.";
+			});
+		};
+		const harness = await createHarness({ extensionFactories: [extension] });
+		try {
+			const requests: TranscriptContext[] = [];
+			harness.setResponses([
+				(context) => {
+					requests.push(structuredClone(context));
+					return fauxAssistantMessage("interrupted", { stopReason: "aborted" });
+				},
+				(context) => {
+					requests.push(structuredClone(context));
+					return fauxAssistantMessage("done");
+				},
+			]);
+			await harness.session.prompt("review");
+			expect(await harness.session.continueInterrupted()).toBe(true);
+			expect(starts).toBe(1);
+			expect(requests).toHaveLength(2);
+			for (const request of requests) {
+				const current = getCurrentSystemMessage(request.messages);
+				expect(current?.sections?.preamble).toBe("You are a reviewer.");
+				expect(current?.sections?.tools).toContain("- read:");
+				expect(current?.sections?.rules).toContain("start concurrently");
+				expect(getCurrentSystemPrompt(request.messages)).toMatch(/^You are a reviewer\.\n\n<tools>/);
+			}
+			expect(getCurrentSystemMessage(requests[1].messages)?.sections).toEqual(
+				getCurrentSystemMessage(requests[0].messages)?.sections,
+			);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	test("diffs sections into a patch", () => {
 		const previous = buildSystemPromptSections({ cwd: "/tmp", sections: { plan_mode: "Plan only." } });
 		const current = buildSystemPromptSections({ cwd: "/tmp", sections: { plan_mode: "Implementation allowed." } });

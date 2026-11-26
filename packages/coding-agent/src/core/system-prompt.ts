@@ -9,6 +9,8 @@ import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 export interface BuildSystemPromptOptions {
 	/** Whether this session renders tool calls in the interactive TUI. Defaults to false. */
 	rendersToolCalls?: boolean;
+	/** Replaces the default preamble's text; tools, rules and docs stay. Ignored when customPrompt is set. */
+	preamble?: string;
 	/** Custom system prompt (replaces the default prefix). */
 	customPrompt?: string;
 	/** Exact full prompt replacement set by a before_agent_start handler. */
@@ -62,6 +64,7 @@ const SYSTEM_PROMPT_SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
 export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOptions): NormalizedBuildSystemPromptOptions {
 	return {
 		rendersToolCalls: input.rendersToolCalls ?? false,
+		preamble: input.preamble,
 		customPrompt: input.customPrompt,
 		forceSystemPrompt: input.forceSystemPrompt,
 		selectedTools: [...(input.selectedTools ?? ["read", "bash", "edit", "write"])],
@@ -182,6 +185,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		promptSections.preamble = customPrompt;
 	} else {
 		promptSections.preamble =
+			options.preamble ||
 			"You are an expert coding assistant.\nUse the available tools to answer the user's request.";
 		const visibleTools = declaredTools.filter((name) => !!toolSnippets[name]);
 		const tools =

@@ -680,6 +680,8 @@ pi.on("before_agent_start", async (event, ctx) => {
   // event.systemPrompt - current chained system prompt for this handler
   //   (includes changes from earlier before_agent_start handlers)
   // event.systemPromptOptions - structured options used to build the system prompt
+  //   .preamble - replaces only the default preamble; keeps tools, rules and docs
+  //     (empty string uses the default; ignored when customPrompt is set)
   //   .customPrompt - exact prompt prefix from --system-prompt, SYSTEM.md, or custom templates
   //   .forceSystemPrompt - optional exact replacement for the complete prompt
   //   .selectedTools - tools currently active in the prompt

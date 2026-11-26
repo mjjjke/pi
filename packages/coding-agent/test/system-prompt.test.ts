@@ -85,6 +85,43 @@ describe("buildSystemPrompt", () => {
 		});
 	});
 
+	describe("preamble override", () => {
+		const options = {
+			cwd: "/tmp",
+			toolSnippets: { read: "Read files" },
+			promptGuidelines: ["Keep this rule."],
+			sections: { docs: "Keep these docs." },
+		};
+
+		test("an explicit default preamble leaves every section unchanged", () => {
+			expect(
+				buildSystemPromptSections({
+					...options,
+					preamble: "You are an expert coding assistant.\nUse the available tools to answer the user's request.",
+				}),
+			).toEqual(buildSystemPromptSections(options));
+		});
+
+		test("replaces only the preamble, keeping tools, rules and docs", () => {
+			const defaults = buildSystemPromptSections(options);
+			expect(buildSystemPromptSections({ ...options, preamble: "You are a reviewer." })).toEqual({
+				...defaults,
+				preamble: "You are a reviewer.",
+			});
+		});
+
+		test("ignores the override when customPrompt is set", () => {
+			const custom = { ...options, customPrompt: "Custom prompt." };
+			expect(buildSystemPromptSections({ ...custom, preamble: "Ignored." })).toEqual(
+				buildSystemPromptSections(custom),
+			);
+		});
+
+		test("an empty preamble uses the default", () => {
+			expect(buildSystemPromptSections({ ...options, preamble: "" })).toEqual(buildSystemPromptSections(options));
+		});
+	});
+
 	describe("default tools", () => {
 		test("includes all default tools when snippets are provided", () => {
 			const prompt = buildSystemPrompt({
