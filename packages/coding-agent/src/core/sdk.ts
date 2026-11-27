@@ -376,7 +376,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Projections reconstruct custom/summary messages at turn boundaries. Snapshot the
 		// converted content, not their identities (or mutable objects), so an unchanged
 		// projection stays current and in-place edits still invalidate the cached prefix.
-		const messages = convertToLlmWithBlockImages(agent.state.messages).map((message) => JSON.stringify(message));
+		// Entry timestamps can differ from creation timestamps; providers do not send them.
+		const key = (message: Message) => JSON.stringify({ ...message, timestamp: undefined });
+		const messages = convertToLlmWithBlockImages(agent.state.messages).map(key);
 		return () => {
 			const currentModel = agent.state.model;
 			const currentMessages = convertToLlmWithBlockImages(agent.state.messages);
@@ -384,7 +386,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				currentModel.provider === requestModel.provider &&
 				currentModel.id === requestModel.id &&
 				messages.length <= currentMessages.length &&
-				messages.every((message, index) => JSON.stringify(currentMessages[index]) === message)
+				messages.every((message, index) => key(currentMessages[index]) === message)
 			);
 		};
 	};

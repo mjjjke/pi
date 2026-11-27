@@ -3,6 +3,7 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-work
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
+import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -16,15 +17,31 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-async function setup() {
+async function setup({
+	tool = true,
+	trigger = "custom",
+	notice = false,
+	advanceMs = 0,
+}: {
+	tool?: boolean;
+	trigger?: "custom" | "user";
+	notice?: boolean;
+	advanceMs?: number;
+} = {}) {
 	vi.stubEnv("PI_CACHE_RETENTION", "long");
 	const h = await createHarness({
 		api: "anthropic-messages",
 		settings: { cacheWarming: "idle", compaction: { enabled: false } },
 	});
+	let extensionApi!: ExtensionAPI;
 	const extensionsResult = await createTestExtensionsResult(
 		[
 			(pi) => {
+				extensionApi = pi;
+				pi.on("before_agent_start", () => {
+					// Model preflight takes time after the custom trigger was created.
+					if (advanceMs) vi.setSystemTime(Date.now() + advanceMs);
+				});
 				pi.on("turn_end", () => {
 					pi.appendEntry("turn-state", { settled: true });
 				});
@@ -51,7 +68,12 @@ async function setup() {
 				label: "probe",
 				description: "probe",
 				parameters: Type.Object({}),
-				execute: async () => ({ content: [{ type: "text", text: "tool result" }], details: {} }),
+				execute: async () => {
+					if (notice) extensionApi.sendMessage({ customType: "handoff-notice", content: "gauge", display: true });
+					// A notice can wait in the tool's delivery lane before its entry is written.
+					if (advanceMs) vi.setSystemTime(Date.now() + advanceMs);
+					return { content: [{ type: "text", text: "tool result" }], details: {} };
+				},
 			},
 		],
 	});
@@ -66,18 +88,22 @@ async function setup() {
 		return fauxAssistantMessage("done");
 	};
 	h.setResponses([
-		fauxAssistantMessage([fauxToolCall("probe", {})], { stopReason: "toolUse" }),
+		...(tool ? [fauxAssistantMessage([fauxToolCall("probe", {})], { stopReason: "toolUse" })] : []),
 		capture,
 		capture,
 		capture,
 		capture,
 	]);
 	vi.useFakeTimers();
-	await session.sendCustomMessage(
-		{ customType: "task-notification", content: "task completed", display: true },
-		{ triggerTurn: true },
-	);
-	expect(session.messages.some((m) => m.role === "toolResult")).toBe(true);
+	if (trigger === "custom") {
+		await session.sendCustomMessage(
+			{ customType: "task-notification", content: "task completed", display: true },
+			{ triggerTurn: true },
+		);
+	} else {
+		await session.prompt("hello");
+	}
+	expect(session.messages.some((m) => m.role === "toolResult")).toBe(tool);
 	return { h, session, requests, sentMessages };
 }
 
@@ -90,6 +116,28 @@ function stops(h: Harness) {
 }
 
 describe("idle warming after session projection refresh", () => {
+	it.each([
+		{ trigger: "custom", tool: false, notice: false },
+		{ trigger: "custom", tool: true, notice: true },
+		{ trigger: "user", tool: true, notice: true },
+	] as const)("ignores creation/persistence timestamp gaps: $trigger tool=$tool notice=$notice", async (shape) => {
+		const { h, session, requests, sentMessages } = await setup({ ...shape, advanceMs: 7 });
+		const customType = shape.notice ? "handoff-notice" : "task-notification";
+		const index = sentMessages.findIndex((m) => m.role === "custom" && m.customType === customType);
+		expect(index).toBeGreaterThanOrEqual(0);
+		const before = sentMessages[index];
+		const rebuilt = session.messages[index];
+		expect(rebuilt.timestamp).toBe(before.timestamp + 7);
+		expect({ ...rebuilt, timestamp: undefined }).toEqual({ ...before, timestamp: undefined });
+		await vi.advanceTimersByTimeAsync(54 * 60_000);
+		expect(stops(h)).toEqual([]);
+		expect(warms(h)).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(54 * 60_000);
+		expect(warms(h)).toHaveLength(2);
+		expect(requests[1]).toBe(requests[0]);
+		expect(requests[2]).toBe(requests[0]);
+	});
+
 	it("replays the request at the first and later refreshes despite custom-message reconstruction and non-context writes", async () => {
 		const { h, session, requests, sentMessages } = await setup();
 		const customIndex = sentMessages.findIndex((m) => m.role === "custom");
