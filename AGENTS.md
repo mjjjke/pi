@@ -51,6 +51,7 @@ Binding for Chord v2 (`packages/chord/src/`) and its tests, when writing and whe
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. It runs `packages/*` only. Otherwise run specific tests from the package root:
   - Vitest: `node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/specific.test.ts`
   - `packages/tui` (`node:test`): `node --test test/specific.test.ts`
+- Run tests with an isolated `HOME` (a temp dir) and `PI_CACHE_RETENTION` unset: the user's `~/.pi/agent` settings and that variable otherwise change cache and settings behavior, and tests pass or fail by machine state.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
 - When regressions tests for fixing a github issue, add a comment with the github issue number next to the test.
