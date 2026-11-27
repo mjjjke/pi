@@ -425,7 +425,8 @@ Other operations change the current session without replacing the runtime:
 | Thinking-level change (settings, keybinding, `pi.setThinkingLevel()`) | `thinking_level_select` |
 | `!` or `!!` command | `user_bash` (can intercept) |
 | Extension dialog or custom screen waits for the user | `ui_prompt_start`, `ui_prompt_end` |
-| Idle prompt-cache refresh | `cache_warming_decision` |
+| Idle prompt-cache warming starts or ends | `cache_warming_state` |
+| Prompt-cache refresh decision | `cache_warming_decision` |
 | Extension registers or removes an MCP server after startup | `mcp_servers_change` |
 
 <a id="events-and-concurrency"></a>
@@ -964,6 +965,28 @@ pi.on("provider_stream_event", (event, ctx) => {
 ```
 
 `event.data` is not necessarily the original HTTP bytes or SSE frame. Treat it as read-only because mutation can affect normalization. Handlers are awaited in stream order, so slow handlers delay stream consumption. Handler errors are reported without changing the provider response. See [`debug-provider.ts`](../examples/extensions/debug-provider.ts) for an opt-in viewer that groups raw events by assistant message.
+
+#### cache_warming_state
+
+Notification when idle cache warming starts or ends. This lets an extension keep the machine awake while a refresh is scheduled between agent runs, without waiting for the next refresh decision.
+
+```typescript
+pi.on("cache_warming_state", (event, ctx) => {
+  if (event.active) {
+    // Hold the extension's idle-warming lock.
+    // event.idleSince: start of the idle-cap clock, epoch milliseconds
+    // event.nextWarmAt: scheduled refresh time, epoch milliseconds
+  } else {
+    // Release the lock. event.reason explains why warming ended.
+  }
+});
+```
+
+`active: true` fires when the agent settles with an armed refresh in the idle phase. If a streaming refresh is still in flight at settlement, it fires only when that refresh arms the next timer. `idleSince` is the last real request's start time: the warmer measures its idle cap from that point, not from settlement. It does not imply that a refresh has already succeeded or that the next decision will approve one.
+
+`active: false` fires when that idle-warming run ends, including a new request (`"new request"`), cancellation/disposal (`"inactive"`), mode changes, context changes, economics, an extension veto, a missed refresh deadline, or the idle cap. Events alternate between true and false; refreshes and their best-effort failures do not repeat the active notification. Streaming-only runs emit nothing, including normal streaming-mode settlement (`"agent run settled"`).
+
+Handlers return nothing and cannot override warming. They start in registration order without waiting for earlier handlers' promises; warming never waits for them, and errors are reported without affecting warming. During synchronous disposal, every release handler starts before its extension context is invalidated. Update lock ownership synchronously; asynchronous continuations have the usual stale-context restrictions. These events are not persisted or sent to the model.
 
 #### cache_warming_decision
 

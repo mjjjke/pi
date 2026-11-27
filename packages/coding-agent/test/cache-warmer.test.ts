@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
@@ -18,6 +21,7 @@ import {
 	type CacheWarmingAction,
 	type CacheWarmingDecision,
 	type CacheWarmingDecisionEvent,
+	type CacheWarmingState,
 	type CacheWarmRequest,
 	formatCacheWarmingStatus,
 	formatCacheWarmingUsage,
@@ -26,7 +30,12 @@ import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
-import { type SessionEntry, SessionManager, type UsageEntry } from "../src/core/session-manager.ts";
+import {
+	type SessionEntry,
+	SessionManager,
+	sessionEntryToContextMessages,
+	type UsageEntry,
+} from "../src/core/session-manager.ts";
 import type { CacheWarmingMode } from "../src/core/settings-manager.ts";
 import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 
@@ -88,13 +97,17 @@ function fakeRuntime(
 		mode?: CacheWarmingMode;
 		maxIdleHours?: number;
 		branch?: SessionEntry[];
+		sessionManager?: SessionManager;
+		onState?: (state: CacheWarmingState) => void | Promise<void>;
 	} = {},
 ) {
 	const calls: Array<{ model: Model<Api>; options: ModelsSimpleStreamOptions | undefined }> = [];
 	const events: CacheWarmingDecisionEvent[] = [];
+	const states: CacheWarmingState[] = [];
 	const warmedEntries: UsageEntry[] = [];
-	const usageManager = SessionManager.inMemory();
+	const usageManager = options.sessionManager ?? SessionManager.inMemory();
 	const appendUsage = vi.fn(usageManager.appendUsage.bind(usageManager));
+	const appendCustomEntry = vi.fn(usageManager.appendCustomEntry.bind(usageManager));
 	const state = { mode: options.mode ?? "idle", branch: options.branch ?? branchWithPrompt(100_000) };
 	const warmer = new CacheWarmer(
 		{
@@ -105,16 +118,20 @@ function fakeRuntime(
 				} as unknown as AssistantMessageEventStream;
 			},
 		},
-		{ appendUsage, getBranch: () => state.branch },
+		{ appendUsage, appendCustomEntry, getBranch: () => state.branch },
 		() => state.mode,
 		async (event) => {
 			events.push(event);
 			return options.decide?.(event) ?? event.action;
 		},
 		options.maxIdleHours === undefined ? undefined : () => options.maxIdleHours!,
+		(state) => {
+			states.push(state);
+			return options.onState?.(state);
+		},
 	);
 	warmer.onWarmed = (entry) => warmedEntries.push(entry);
-	return { warmer, calls, events, warmedEntries, appendUsage, state };
+	return { warmer, calls, events, states, warmedEntries, appendUsage, appendCustomEntry, usageManager, state };
 }
 
 function request(model: Model<Api> = adaptiveModel, options: ModelsSimpleStreamOptions = {}): CacheWarmRequest {
@@ -437,7 +454,7 @@ describe("cache warming", () => {
 		expect(streaming.warmer.status.reason).toBe("agent run settled");
 	});
 
-	it("aborts replaced requests and does not record failed refreshes", async () => {
+	it("aborts replaced requests and does not record usage for failed refreshes", async () => {
 		vi.useFakeTimers();
 		let release!: () => void;
 		const pending = fakeRuntime({
@@ -461,6 +478,319 @@ describe("cache warming", () => {
 		expect(failed.appendUsage).not.toHaveBeenCalled();
 		expect(failed.warmer.hasWarmCache(adaptiveModel, 300_000)).toBe(false);
 		failed.warmer.cancel();
+	});
+
+	it.each(["error", "aborted", "throw"] as const)(
+		"records one failed %s refresh and keeps scheduling",
+		async (failure) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(0);
+			let attempts = 0;
+			const runtime = fakeRuntime({
+				branch: branchWithPrompt(400_000),
+				result: async (model) => {
+					if (++attempts !== 2) return response(model);
+					if (failure === "throw") throw new Error("provider unavailable");
+					return { ...response(model, failure), errorMessage: "provider unavailable" };
+				},
+			});
+			runtime.warmer.start(request(), current);
+			await vi.advanceTimersByTimeAsync(1_000);
+			runtime.warmer.onAgentSettled();
+			await vi.advanceTimersByTimeAsync(539_000);
+			expect(runtime.appendCustomEntry).toHaveBeenCalledExactlyOnceWith("cache_warm_stop", {
+				reason: "refresh failed",
+				errorMessage: "provider unavailable",
+				...(failure === "throw" ? {} : { stopReason: failure }),
+				successfulRefreshes: 1,
+				startedAt: 0,
+				idleStartedAt: 1_000,
+				lastRefreshAt: 270_000,
+				refreshDeadlineAt: 555_000,
+			});
+			expect(runtime.warmer.status.state).toBe("scheduled");
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(runtime.calls).toHaveLength(3);
+			expect(runtime.appendUsage).toHaveBeenCalledTimes(2);
+			expect(runtime.appendCustomEntry).toHaveBeenCalledTimes(1);
+			const entry = runtime.usageManager.getEntries().find((entry) => entry.type === "custom");
+			expect(entry).toMatchObject({
+				type: "custom",
+				customType: "cache_warm_stop",
+				timestamp: new Date(540_000).toISOString(),
+			});
+			if (!entry) throw new Error("expected a stop entry");
+			expect(sessionEntryToContextMessages(entry)).toEqual([]);
+			runtime.warmer.cancel();
+		},
+	);
+
+	it.each([
+		"expected savings below threshold",
+		"cache economics unavailable",
+		"stopped by extension",
+		"cache refresh deadline missed",
+		"conversation context changed",
+		"cache warming disabled",
+		"0.5-hour idle limit reached",
+		"one-hour safety limit reached",
+	])("records a scheduled run stopping once: %s", async (reason) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const runtime = fakeRuntime({
+			branch: branchWithPrompt(
+				reason === "cache economics unavailable"
+					? 0
+					: reason === "expected savings below threshold"
+						? 5_000
+						: 400_000,
+			),
+			decide: reason === "stopped by extension" ? () => "stop" : undefined,
+		});
+		let matches = true;
+		runtime.warmer.start(request(), () => matches);
+		if (reason === "conversation context changed") matches = false;
+		if (reason === "cache warming disabled") {
+			runtime.state.mode = "off";
+			runtime.warmer.onModeChanged();
+		} else if (reason === "cache refresh deadline missed") {
+			vi.setSystemTime(285_001);
+			vi.clearAllTimers();
+			const internal = runtime.warmer as unknown as { run: object; refresh: (run: object) => Promise<void> };
+			await internal.refresh(internal.run);
+		} else {
+			if (reason === "0.5-hour idle limit reached") runtime.warmer.onAgentSettled();
+			await vi.advanceTimersByTimeAsync(
+				reason === "one-hour safety limit reached"
+					? 3_600_000
+					: reason === "0.5-hour idle limit reached"
+						? 1_800_000
+						: 270_000,
+			);
+		}
+		runtime.warmer.onAgentSettled();
+		runtime.warmer.onModeChanged();
+		runtime.warmer.cancel();
+		await vi.advanceTimersByTimeAsync(3_600_000);
+		expect(runtime.appendCustomEntry).toHaveBeenCalledTimes(1);
+		expect(runtime.appendCustomEntry).toHaveBeenCalledWith(
+			"cache_warm_stop",
+			expect.objectContaining({ reason, startedAt: 0, successfulRefreshes: runtime.appendUsage.mock.calls.length }),
+		);
+	});
+
+	it("does not audit the normal end of a streaming-mode turn", () => {
+		const runtime = fakeRuntime({ mode: "streaming" });
+		runtime.warmer.start(request(), current);
+		runtime.warmer.onAgentSettled();
+		expect(runtime.warmer.status.reason).toBe("agent run settled");
+		expect(runtime.appendCustomEntry).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["new request", "new request"],
+		["cancel", "inactive"],
+		["economics", "expected savings below threshold"],
+		["extension", "stopped by extension"],
+		["deadline", "cache refresh deadline missed"],
+		["idle cap", "0.5-hour idle limit reached"],
+		["context", "conversation context changed"],
+		["mode off", "cache warming disabled"],
+		["mode streaming", "agent run settled"],
+	])("announces idle warming and exactly one release for %s", async (ending, reason) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const runtime = fakeRuntime({
+			branch: branchWithPrompt(400_000),
+			decide: ending === "extension" ? () => "stop" : undefined,
+		});
+		let matches = true;
+		runtime.warmer.start(request(), () => matches);
+		expect(runtime.states).toEqual([]);
+		await vi.advanceTimersByTimeAsync(5_000);
+		runtime.warmer.onAgentSettled();
+		runtime.warmer.onAgentSettled();
+		expect(runtime.states).toEqual([{ active: true, idleSince: 0, nextWarmAt: 270_000 }]);
+		if (ending === "new request") runtime.warmer.start(request(), current);
+		else if (ending === "cancel") runtime.warmer.cancel();
+		else if (ending === "mode off" || ending === "mode streaming") {
+			runtime.state.mode = ending === "mode off" ? "off" : "streaming";
+			runtime.warmer.onModeChanged();
+		} else if (ending === "deadline") {
+			vi.setSystemTime(285_001);
+			vi.clearAllTimers();
+			const internal = runtime.warmer as unknown as { run: object; refresh: (run: object) => Promise<void> };
+			await internal.refresh(internal.run);
+		} else {
+			if (ending === "context") matches = false;
+			if (ending === "economics") runtime.state.branch = branchWithPrompt(5_000);
+			await vi.advanceTimersByTimeAsync(ending === "idle cap" ? 1_795_000 : 265_000);
+		}
+		expect(runtime.states).toEqual([
+			{ active: true, idleSince: 0, nextWarmAt: 270_000 },
+			{ active: false, reason },
+		]);
+		runtime.warmer.cancel();
+		runtime.warmer.cancel();
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(runtime.states).toHaveLength(2);
+	});
+
+	it("does not announce streaming-only or never-scheduled runs", async () => {
+		vi.useFakeTimers();
+		const streaming = fakeRuntime({ mode: "streaming" });
+		streaming.warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		streaming.warmer.onAgentSettled();
+		streaming.warmer.cancel();
+		expect(streaming.states).toEqual([]);
+		const expired = fakeRuntime();
+		expired.warmer.start(request(), current);
+		vi.setSystemTime(Date.now() + 1_800_000);
+		expired.warmer.onAgentSettled();
+		expect(expired.states).toEqual([]);
+		expired.warmer.start(request(unknownModel), current);
+		expired.warmer.onAgentSettled();
+		expect(expired.states).toEqual([]);
+	});
+
+	it.each(["length", "error"] as const)(
+		"announces no repeated state across idle refreshes: %s",
+		async (stopReason) => {
+			vi.useFakeTimers();
+			const runtime = fakeRuntime({
+				branch: branchWithPrompt(400_000),
+				result: async (model) => response(model, stopReason),
+			});
+			runtime.warmer.start(request(), current);
+			runtime.warmer.onAgentSettled();
+			await vi.advanceTimersByTimeAsync(810_000);
+			expect(runtime.calls).toHaveLength(3);
+			expect(runtime.states.map((state) => state.active)).toEqual([true]);
+			runtime.warmer.cancel();
+			expect(runtime.states.map((state) => state.active)).toEqual([true, false]);
+			runtime.warmer.start(request(), current);
+			runtime.warmer.onAgentSettled();
+			expect(runtime.states.map((state) => state.active)).toEqual([true, false, true]);
+			runtime.warmer.cancel();
+		},
+	);
+
+	it("announces idle warming only once a streaming refresh in flight arms its next timer", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		let release!: () => void;
+		const runtime = fakeRuntime({
+			branch: branchWithPrompt(400_000),
+			result: (model) =>
+				new Promise((resolve) => {
+					release = () => resolve(response(model));
+				}),
+		});
+		runtime.warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		runtime.warmer.onAgentSettled();
+		expect(runtime.states).toEqual([]);
+		release();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(runtime.states).toEqual([{ active: true, idleSince: 0, nextWarmAt: 540_000 }]);
+		runtime.warmer.cancel();
+		expect(runtime.states.at(-1)).toEqual({ active: false, reason: "inactive" });
+	});
+
+	it.each(["throw", "reject"] as const)("isolates state callback failures: %s", async (failure) => {
+		vi.useFakeTimers();
+		const runtime = fakeRuntime({
+			branch: branchWithPrompt(400_000),
+			onState: () => {
+				if (failure === "throw") throw new Error("observer failed");
+				return Promise.reject(new Error("observer failed"));
+			},
+		});
+		runtime.warmer.start(request(), current);
+		runtime.warmer.onAgentSettled();
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(runtime.calls).toHaveLength(1);
+		expect(runtime.warmer.status.state).toBe("scheduled");
+		runtime.warmer.cancel();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(runtime.states.map((state) => state.active)).toEqual([true, false]);
+	});
+
+	it("persists stop entries to the session file without adding model context", async () => {
+		vi.useFakeTimers();
+		const dir = mkdtempSync(join(tmpdir(), "cache-warmer-session-"));
+		try {
+			const sessionManager = SessionManager.create(dir, dir);
+			sessionManager.appendMessage({ role: "user", content: "test", timestamp: Date.now() });
+			const before = sessionManager.buildSessionContext().messages;
+			const runtime = fakeRuntime({ sessionManager, branch: branchWithPrompt(400_000), decide: () => "stop" });
+			runtime.warmer.start(request(), current);
+			runtime.warmer.onAgentSettled();
+			await vi.advanceTimersByTimeAsync(270_000);
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("expected a session file");
+			expect(readFileSync(file, "utf8")).toContain('"customType":"cache_warm_stop"');
+			const reopened = SessionManager.open(file);
+			expect(reopened.getEntries().filter((entry) => entry.type === "custom")).toMatchObject([
+				{
+					customType: "cache_warm_stop",
+					data: { reason: "stopped by extension", successfulRefreshes: 0, lastRefreshAt: null },
+				},
+			]);
+			expect(sessionManager.buildSessionContext().messages).toEqual(before);
+			expect(reopened.buildSessionContext().messages).toEqual(before);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores late failures of a refresh replaced by new activity", async () => {
+		vi.useFakeTimers();
+		let reject!: (error: Error) => void;
+		const runtime = fakeRuntime({
+			result: () =>
+				new Promise((_resolve, rejectResult) => {
+					reject = rejectResult;
+				}),
+		});
+		runtime.warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(270_000);
+		runtime.warmer.start(request(), current);
+		reject(new Error("cancelled old refresh"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(runtime.appendCustomEntry).not.toHaveBeenCalled();
+		runtime.warmer.cancel();
+	});
+
+	it("keeps refresh failures best-effort even if the audit append fails", async () => {
+		vi.useFakeTimers();
+		const runtime = fakeRuntime({ result: async (model) => response(model, "error") });
+		runtime.appendCustomEntry.mockImplementation(() => {
+			throw new Error("disk full");
+		});
+		runtime.warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(540_000);
+		expect(runtime.calls).toHaveLength(2);
+		expect(runtime.appendCustomEntry).toHaveBeenCalledTimes(2);
+		expect(runtime.warmer.status.state).toBe("scheduled");
+		runtime.warmer.cancel();
+	});
+
+	it("does not record ordinary activity or requests that never scheduled warming", async () => {
+		vi.useFakeTimers();
+		const runtime = fakeRuntime();
+		runtime.warmer.start(request(), current);
+		runtime.warmer.start(request(), current);
+		runtime.warmer.cancel();
+		runtime.warmer.cancel();
+		runtime.warmer.start(request(unknownModel), current);
+		runtime.warmer.start(request(budgetModel, { reasoning: "high" }), current);
+		runtime.warmer.start(request(adaptiveModel, { cacheRetention: "none" }), current);
+		runtime.state.mode = "off";
+		runtime.warmer.start(request(), current);
+		await vi.advanceTimersByTimeAsync(3_600_000);
+		expect(runtime.appendCustomEntry).not.toHaveBeenCalled();
 	});
 
 	it("formats status and usage entries", () => {

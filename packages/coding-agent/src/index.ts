@@ -94,6 +94,7 @@ export type {
 	BuildSystemPromptOptions,
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
+	CacheWarmingStateEvent,
 	CompactionEntryDraft,
 	CompactOptions,
 	ContextEditEntryDraft,

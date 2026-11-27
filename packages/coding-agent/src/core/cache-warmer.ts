@@ -48,6 +48,15 @@ export interface CacheWarmingDecisionEventResult {
 	action?: CacheWarmingAction;
 }
 
+/** Idle cache-warming transitions; observers cannot change warming policy. */
+export interface CacheWarmingState {
+	active: boolean;
+	reason?: string;
+	/** Start of the run's idle-cap clock (the last real request), in epoch milliseconds. */
+	idleSince?: number;
+	nextWarmAt?: number;
+}
+
 export interface CacheWarmingStatus {
 	/** "scheduled": a refresh timer is armed; "refreshing": a warm request is in flight. */
 	state: "inactive" | "scheduled" | "refreshing";
@@ -75,6 +84,11 @@ interface ActiveRun extends CacheWarmRequest {
 	/** Latest safe time to send this refresh, leaving half the original expiry margin. */
 	refreshDeadlineAt: number;
 	startedAt: number;
+	idleStartedAt?: number;
+	lastRefreshAt?: number;
+	successfulRefreshes: number;
+	/** Only runs that armed a timer have warming to stop. */
+	scheduled: boolean;
 	controller: AbortController;
 	phase: "streaming" | "idle";
 	nextWarmAt: number;
@@ -90,6 +104,8 @@ interface ActiveRun extends CacheWarmRequest {
  */
 export class CacheWarmer {
 	private run?: ActiveRun;
+	private idleActive = false;
+	private readonly onState: (state: CacheWarmingState) => void | Promise<void>;
 	private lastWarm?: {
 		provider: string;
 		model: string;
@@ -100,7 +116,7 @@ export class CacheWarmer {
 	private readonly getMaxIdleHours: () => number;
 	private inactive: CacheWarmingStatus;
 	private readonly models: Pick<ModelRuntime, "streamSimple">;
-	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">;
+	private readonly sessionManager: Pick<SessionManager, "appendUsage" | "appendCustomEntry" | "getBranch">;
 	private readonly getMode: () => CacheWarmingMode;
 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
@@ -109,16 +125,18 @@ export class CacheWarmer {
 
 	constructor(
 		models: Pick<ModelRuntime, "streamSimple">,
-		sessionManager: Pick<SessionManager, "appendUsage" | "getBranch">,
+		sessionManager: Pick<SessionManager, "appendUsage" | "appendCustomEntry" | "getBranch">,
 		getMode: () => CacheWarmingMode,
 		decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction> = async (event) => event.action,
 		getMaxIdleHours: () => number = () => SETTINGS_DEFAULTS.cacheWarmingMaxIdleHours,
+		onState: (state: CacheWarmingState) => void | Promise<void> = () => {},
 	) {
 		this.models = models;
 		this.sessionManager = sessionManager;
 		this.getMode = getMode;
 		this.decide = decide;
 		this.getMaxIdleHours = getMaxIdleHours;
+		this.onState = onState;
 		this.inactive = { state: "inactive", reason: "waiting for first request" };
 	}
 
@@ -155,7 +173,7 @@ export class CacheWarmer {
 	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
 	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
 		this.lastWarm = undefined;
-		this.clearRun();
+		this.clearRun("new request");
 		const mode = this.getMode();
 		if (mode === "off") {
 			this.stop("cache warming disabled");
@@ -186,6 +204,8 @@ export class CacheWarmer {
 			delayMs,
 			refreshDeadlineAt: 0,
 			startedAt: Date.now(),
+			successfulRefreshes: 0,
+			scheduled: false,
 			controller: new AbortController(),
 			phase: "streaming",
 			nextWarmAt: 0,
@@ -197,6 +217,7 @@ export class CacheWarmer {
 	onAgentSettled(): void {
 		const run = this.run;
 		if (!run) return;
+		run.idleStartedAt ??= Date.now();
 		if (this.getMode() === "streaming") {
 			this.stop("agent run settled");
 			return;
@@ -206,7 +227,10 @@ export class CacheWarmer {
 		const deadline = run.startedAt + hours * 3_600_000;
 		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop(`${hours}-hour idle limit reached`);
+			return;
 		}
+		if (run.timer !== undefined)
+			this.notifyState({ active: true, idleSince: run.startedAt, nextWarmAt: run.nextWarmAt });
 	}
 
 	/** Reconcile an active run after the persisted warming mode changes. */
@@ -222,17 +246,46 @@ export class CacheWarmer {
 		this.stop("inactive");
 	}
 
-	private clearRun(): void {
+	private clearRun(reason: string): void {
 		const run = this.run;
 		if (!run) return;
 		this.run = undefined;
 		if (run.timer) clearTimeout(run.timer);
 		run.controller.abort();
+		this.notifyState({ active: false, reason });
+	}
+
+	private notifyState(state: CacheWarmingState): void {
+		if (state.active === this.idleActive) return;
+		this.idleActive = state.active;
+		try {
+			void Promise.resolve(this.onState(state)).catch(() => {});
+		} catch {
+			// Notification failures must not affect warming or run teardown.
+		}
 	}
 
 	private stop(reason: string, stopped?: Pick<CacheWarmingStatus, "decision" | "extensionOverride">): void {
-		this.clearRun();
+		const run = this.run;
+		this.clearRun(reason);
+		if (run?.scheduled && reason !== "inactive" && reason !== "agent run settled") this.recordStop(run, reason);
 		this.inactive = { state: "inactive", reason, ...stopped };
+	}
+
+	private recordStop(run: ActiveRun, reason: string, failure?: { stopReason?: string; errorMessage?: string }): void {
+		try {
+			this.sessionManager.appendCustomEntry("cache_warm_stop", {
+				reason,
+				...failure,
+				successfulRefreshes: run.successfulRefreshes,
+				startedAt: run.startedAt,
+				idleStartedAt: run.idleStartedAt ?? null,
+				lastRefreshAt: run.lastRefreshAt ?? null,
+				refreshDeadlineAt: run.refreshDeadlineAt,
+			});
+		} catch {
+			// Audit writes are best-effort too; never interrupt an agent run or timer cleanup.
+		}
 	}
 
 	private schedule(run: ActiveRun): void {
@@ -248,8 +301,11 @@ export class CacheWarmer {
 			this.stop(run.phase === "idle" ? `${hours}-hour idle limit reached` : "one-hour safety limit reached");
 			return;
 		}
+		run.scheduled = true;
 		run.timer = setTimeout(() => void this.refresh(run), Math.max(0, run.nextWarmAt - Date.now()));
 		run.timer.unref?.();
+		if (run.phase === "idle")
+			this.notifyState({ active: true, idleSince: run.startedAt, nextWarmAt: run.nextWarmAt });
 	}
 
 	private getIdleLimitHours(run: ActiveRun): number {
@@ -295,6 +351,8 @@ export class CacheWarmer {
 				.result();
 			if (!this.validateRun(run)) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+				run.successfulRefreshes++;
+				run.lastRefreshAt = Date.now();
 				this.lastWarm = {
 					provider: message.provider,
 					model: message.responseModel ?? message.model,
@@ -310,9 +368,19 @@ export class CacheWarmer {
 					extensionOverride ? "extension override" : undefined,
 				);
 				this.onWarmed?.(entry);
+			} else {
+				this.recordStop(run, "refresh failed", {
+					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
+				});
 			}
-		} catch {
-			// Cache warming is best-effort and must not affect the active agent run.
+		} catch (error) {
+			// A replaced/cancelled refresh belongs to normal activity, not an idle failure.
+			if (this.run === run) {
+				this.recordStop(run, "refresh failed", {
+					errorMessage: error instanceof Error ? error.message : typeof error === "string" ? error : undefined,
+				});
+			}
 		}
 		if (this.run === run) this.schedule(run);
 	}

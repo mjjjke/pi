@@ -48,6 +48,7 @@ import type {
 	BoundaryResult,
 	CacheWarmingDecisionEvent,
 	CacheWarmingDecisionEventResult,
+	CacheWarmingStateEvent,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -1376,6 +1377,10 @@ export class ExtensionRunner {
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent, signal?: AbortSignal): Promise<RunnerEmitResult<TEvent>> {
+		if (event.type === "cache_warming_state") {
+			await this.emitCacheWarmingState(event);
+			return undefined as RunnerEmitResult<TEvent>;
+		}
 		if (event.type === "session_background_compaction" && (event.phase === "discarded" || event.phase === "failed")) {
 			await this.emitBackgroundTerminal(event, false, signal);
 			return undefined as RunnerEmitResult<TEvent>;
@@ -1411,6 +1416,32 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	private async emitCacheWarmingState(event: CacheWarmingStateEvent): Promise<void> {
+		const ctx = this.createContext(event.type);
+		const pending: Promise<void>[] = [];
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) {
+				if (this.isInvalidated()) break;
+				// Disposal is synchronous: start every release observer before the runtime invalidates.
+				pending.push(
+					(async () => {
+						try {
+							await handler(event, ctx);
+						} catch (error) {
+							this.emitError({
+								extensionPath: ext.path,
+								event: event.type,
+								error: error instanceof Error ? error.message : String(error),
+								stack: error instanceof Error ? error.stack : undefined,
+							});
+						}
+					})(),
+				);
+			}
+		}
+		await Promise.all(pending);
 	}
 
 	/** Returns the event's own action unless a handler overrides it; the last override wins. */

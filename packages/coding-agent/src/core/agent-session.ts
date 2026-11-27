@@ -2303,7 +2303,6 @@ export class AgentSession {
 	}
 
 	private async _emitAgentSettled(): Promise<void> {
-		this._cacheWarmer?.onAgentSettled();
 		this._isAgentRunActive = false;
 		// The final flush can accept a trigger after the continuation loop exited. Its
 		// queue handle still owns scheduling, but it needs a new run after settlement.
@@ -2324,6 +2323,7 @@ export class AgentSession {
 		}
 		this._isEmittingAgentSettled = true;
 		try {
+			this._cacheWarmer?.onAgentSettled();
 			const aborted = this._agentRunAbortRequested;
 			await this._extensionRunner.emit({ type: "agent_settled", aborted });
 			this._emit({ type: "agent_settled", aborted });
@@ -2870,15 +2870,15 @@ export class AgentSession {
 			// Dispose must succeed even if an abort hook throws.
 		}
 
+		if (this._cacheWarmer) {
+			this._cacheWarmer.onWarmed = undefined;
+			this._cacheWarmer.cancel();
+		}
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
-		if (this._cacheWarmer) {
-			this._cacheWarmer.onWarmed = undefined;
-			this._cacheWarmer.cancel();
-		}
 		if (!options?.keepSessionResources) cleanupSessionResources(this.sessionId);
 	}
 

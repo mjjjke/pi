@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import type { CacheWarmingStateEvent, ExtensionFactory } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -151,6 +151,7 @@ describe("createAgentSession stream options", () => {
 	async function createCacheWarmingSession(
 		populate?: (manager: SessionManager, model: Model<Api>) => void,
 		settings: Partial<Settings> = {},
+		extensionFactory?: ExtensionFactory,
 	) {
 		const model: Model<Api> = {
 			...createModel("anthropic-messages"),
@@ -170,13 +171,25 @@ describe("createAgentSession stream options", () => {
 		});
 		const sessionManager = SessionManager.inMemory(cwd);
 		populate?.(sessionManager, model);
+		const settingsManager = SettingsManager.inMemory({ cacheWarming: "idle", ...settings });
+		let resourceLoader: DefaultResourceLoader | undefined;
+		if (extensionFactory) {
+			resourceLoader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				settingsManager,
+				extensionFactories: [extensionFactory],
+			});
+			await resourceLoader.reload();
+		}
 		const { session } = await createAgentSession({
 			cwd,
 			agentDir,
 			model,
 			modelRuntime: getModelRuntime(modelRegistry),
-			settingsManager: SettingsManager.inMemory({ cacheWarming: "idle", ...settings }),
+			settingsManager,
 			sessionManager,
+			resourceLoader,
 		});
 		return {
 			session,
@@ -187,6 +200,108 @@ describe("createAgentSession stream options", () => {
 			},
 		};
 	}
+
+	it("delivers cache warming transitions through pi.on without letting handler errors affect warming", async () => {
+		const events: CacheWarmingStateEvent[] = [];
+		const idle: boolean[] = [];
+		const errors: string[] = [];
+		const fixture = await createCacheWarmingSession(undefined, {}, (pi) => {
+			pi.on("cache_warming_state", async () => {
+				throw new Error("observer failed");
+			});
+			pi.on("cache_warming_state", (event, ctx) => {
+				events.push(event);
+				if (event.active) idle.push(ctx.isIdle());
+			});
+		});
+		fixture.session.extensionRunner.onError((error) => {
+			errors.push(error.event ?? "unknown");
+		});
+		try {
+			vi.useFakeTimers();
+			vi.setSystemTime(0);
+			await fixture.session.prompt("test");
+			expect(events).toEqual([{ type: "cache_warming_state", active: true, idleSince: 0, nextWarmAt: 270_000 }]);
+			await vi.advanceTimersByTimeAsync(270_000);
+			expect(fixture.providerCalls()).toBe(2);
+			expect(events).toHaveLength(1);
+			await fixture.session.prompt("next");
+			expect(events).toEqual([
+				{ type: "cache_warming_state", active: true, idleSince: 0, nextWarmAt: 270_000 },
+				{ type: "cache_warming_state", active: false, reason: "new request" },
+				{ type: "cache_warming_state", active: true, idleSince: 270_000, nextWarmAt: 540_000 },
+			]);
+			fixture.session.setCacheWarmingMode("off");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(events.at(-1)).toEqual({
+				type: "cache_warming_state",
+				active: false,
+				reason: "cache warming disabled",
+			});
+			expect(idle).toEqual([true, true]);
+			expect(errors).toEqual(Array(4).fill("cache_warming_state"));
+		} finally {
+			fixture.dispose();
+		}
+	});
+
+	it("starts every idle-warming release handler before disposal invalidates extensions", async () => {
+		const first: boolean[] = [];
+		const second: boolean[] = [];
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const fixture = await createCacheWarmingSession(undefined, {}, (pi) => {
+			pi.on("cache_warming_state", async (event) => {
+				first.push(event.active);
+				if (!event.active) await pending;
+			});
+			pi.on("cache_warming_state", (event) => {
+				second.push(event.active);
+			});
+		});
+		try {
+			await fixture.session.prompt("test");
+			fixture.session.dispose();
+			expect(first).toEqual([true, false]);
+			expect(second).toEqual([true, false]);
+		} finally {
+			release();
+			fixture.dispose();
+		}
+	});
+
+	it.each(["resume", "reload"] as const)("wires idle-warming notifications after %s", async (loading) => {
+		const events: CacheWarmingStateEvent[] = [];
+		let registrations = 0;
+		const fixture = await createCacheWarmingSession(
+			loading === "resume"
+				? (manager, model) => {
+						manager.appendModelChange(model.provider, model.id);
+						manager.appendMessage({ role: "user", content: "old", timestamp: Date.now() });
+						manager.appendMessage(createDoneMessage(model.api, 100_000));
+					}
+				: undefined,
+			{},
+			(pi) => {
+				registrations++;
+				pi.on("cache_warming_state", (event) => {
+					events.push(event);
+				});
+			},
+		);
+		try {
+			if (loading === "reload") await fixture.session.reload();
+			expect(registrations).toBe(loading === "reload" ? 2 : 1);
+			expect(events).toEqual([]);
+			await fixture.session.prompt("test");
+			fixture.session.dispose();
+			expect(events.map((event) => event.active)).toEqual([true, false]);
+		} finally {
+			fixture.dispose();
+		}
+	});
 
 	it("schedules cache warming after a completed session request", async () => {
 		const fixture = await createCacheWarmingSession();

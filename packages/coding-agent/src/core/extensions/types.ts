@@ -63,7 +63,7 @@ import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ShellConfig } from "../../utils/shell.ts";
 import type { BackgroundCompactionEvent } from "../background-compaction-owner.ts";
 import type { BashResult } from "../bash-executor.ts";
-import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
+import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult, CacheWarmingState } from "../cache-warmer.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { CompactionJobPhase, CompactionJobStartResult } from "../compaction-job.ts";
 import type { RequestCwdChange } from "../cwd-change.ts";
@@ -1780,6 +1780,11 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 	return event.toolName === toolName;
 }
 
+/** Notification of idle cache warming starting or ending; return values cannot affect warming. */
+export interface CacheWarmingStateEvent extends CacheWarmingState {
+	type: "cache_warming_state";
+}
+
 /** Union of all event types */
 export type ExtensionEvent =
 	| ProjectTrustEvent
@@ -1789,6 +1794,7 @@ export type ExtensionEvent =
 	| ContextEvent
 	| ContextWithSystemEvent
 	| CacheWarmingDecisionEvent
+	| CacheWarmingStateEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
@@ -2073,6 +2079,7 @@ export interface ExtensionAPI {
 		event: "cache_warming_decision",
 		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
 	): () => void;
+	on(event: "cache_warming_state", handler: ExtensionHandler<CacheWarmingStateEvent>): () => void;
 	on(
 		event: "before_provider_request",
 		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,
