@@ -362,8 +362,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 			thinkingDisplay: options.thinkingDisplay ?? settingsManager.getThinkingDisplay(),
-			// Replaces the agent loop's default identity; read per request so telemetry changes apply at once.
-			identity: getClientIdentity(settingsManager),
+			// Replaces the agent loop's default identity.
+			identity: getClientIdentity(),
 			transformHeaders: async (headers) =>
 				headerRunner?.hasHandlers("before_provider_headers")
 					? headerRunner.emitBeforeProviderHeaders(headers)

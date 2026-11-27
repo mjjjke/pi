@@ -251,7 +251,7 @@ describe("exclusive tool execution", () => {
 	it.each([
 		["exclusive", "parallel", "exclusive"],
 		["parallel", "exclusive", "parallel"],
-	] as const)("skips calls still waiting behind a barrier on abort (%j)", async (...names) => {
+	] as const)("answers calls still waiting behind a barrier with aborted results (%j, #9986)", async (...names) => {
 		const controller = new AbortController();
 		const gate = deferred();
 		const batch = startBatch(names, { gates: { "0": gate }, signal: controller.signal });
@@ -259,11 +259,15 @@ describe("exclusive tool execution", () => {
 		controller.abort();
 		gate.resolve();
 		const messages = await batch.done;
-		expect(batch.trace).toEqual(["start:0", "execute:0", "end:0"]);
-		expect(messages.flatMap((m) => (m.role === "toolResult" ? [m.toolCallId] : []))).toEqual(["0"]);
+		expect(batch.trace).toEqual(["start:0", "execute:0", "end:0", "start:1", "end:1", "start:2", "end:2"]);
+		expect(messages.filter((m) => m.role === "toolResult")).toMatchObject([
+			{ toolCallId: "0" },
+			{ toolCallId: "1", isError: true, content: [{ text: "Operation aborted" }] },
+			{ toolCallId: "2", isError: true, content: [{ text: "Operation aborted" }] },
+		]);
 	});
 
-	it("pairs started preflight calls on abort and does not admit later segments", async () => {
+	it("pairs started preflight calls on abort and answers later segments without running them", async () => {
 		const controller = new AbortController();
 		const batch = startBatch(["parallel", "parallel", "exclusive", "parallel"], {
 			signal: controller.signal,
@@ -275,11 +279,14 @@ describe("exclusive tool execution", () => {
 			},
 		});
 		const messages = await batch.done;
-		expect(batch.trace).toEqual(["start:0", "start:1", "end:1", "end:0"]);
-		expect(messages.filter((m) => m.role === "toolResult")).toMatchObject([
-			{ toolCallId: "0", isError: true, content: [{ text: "Operation aborted" }] },
-			{ toolCallId: "1", isError: true, content: [{ text: "Operation aborted" }] },
-		]);
+		expect(batch.trace).toEqual(["start:0", "start:1", "end:1", "end:0", "start:2", "end:2", "start:3", "end:3"]);
+		expect(messages.filter((m) => m.role === "toolResult")).toMatchObject(
+			["0", "1", "2", "3"].map((toolCallId) => ({
+				toolCallId,
+				isError: true,
+				content: [{ text: "Operation aborted" }],
+			})),
+		);
 	});
 
 	it.each(["tool", "config"] as const)(

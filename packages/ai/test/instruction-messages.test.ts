@@ -482,17 +482,17 @@ describe("mid-conversation instruction messages", () => {
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["user", "developer", "user"]);
 	});
 
-	it("excludes only the first occurrence when a system snapshot object is reused", () => {
+	it("renders only the first occurrence as the prompt when a system snapshot object is reused", () => {
 		const model = openAIResponsesModel();
 		const snapshot: Message = { role: "system", content: "", sections: { rules: "Base rules" }, timestamp: 1 };
 		const input = convertResponsesMessages(
 			model,
 			normalizeContext({ messages: [snapshot, { role: "user", content: "First", timestamp: 2 }, snapshot] }),
 			new Set(),
-			{ includeSystemPrompt: false },
 		);
-		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["user", "developer"]);
-		expect(input[1]).toMatchObject({ content: 'Updated system prompt section "rules":\n\nBase rules' });
+		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "user", "developer"]);
+		expect(input[0]).toMatchObject({ content: "Base rules" });
+		expect(input[2]).toMatchObject({ content: 'Updated system prompt section "rules":\n\nBase rules' });
 	});
 
 	it.each(["null", "omitted"] as const)("tracks the initial sections snapshot with %s content", (kind) => {
@@ -518,8 +518,6 @@ describe("mid-conversation instruction messages", () => {
 		]);
 		expect(withPrompt[0]).toMatchObject({ content: "Base rules" });
 		expect(withPrompt[1]).toMatchObject({ content: [{ type: "input_text", text: "Plan boundary" }] });
-		const withoutPrompt = convertResponsesMessages(model, context, new Set(), { includeSystemPrompt: false });
-		expect(withoutPrompt.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "user"]);
 	});
 
 	it("does not promote a later system update when an aborted assistant is filtered", () => {
@@ -535,13 +533,12 @@ describe("mid-conversation instruction messages", () => {
 				],
 			}),
 			new Set(),
-			{ includeSystemPrompt: false },
 		);
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual(["developer", "developer", "user"]);
 		expect(input[1]).toMatchObject({ content: "Later update" });
 	});
 
-	it("keeps a leading snapshot out of Codex input when developers follow it", () => {
+	it("keeps a leading snapshot first in Codex input when developers follow it", () => {
 		const model = openAIResponsesModel();
 		const context = normalizeContext({
 			messages: [
@@ -552,17 +549,21 @@ describe("mid-conversation instruction messages", () => {
 				{ role: "system", content: "Later update", timestamp: 4 },
 			],
 		});
-		const input = convertResponsesMessages(model, context, new Set(), { includeSystemPrompt: false });
+		const input = convertResponsesMessages(model, context, new Set());
 		expect(input.map((item) => ("role" in item ? item.role : item.type))).toEqual([
+			"developer",
 			"developer",
 			"user",
 			"assistant",
 			"developer",
 		]);
-		expect(input[3]).toMatchObject({ content: "Later update" });
+		expect(input[0]).toMatchObject({ content: "Base prompt" });
+		expect(input[1]).toMatchObject({ content: [{ text: "Plan boundary" }] });
+		expect(input[4]).toMatchObject({ content: "Later update" });
 	});
 
-	it("sends the initial snapshot as Codex instructions without duplicating it in input", async () => {
+	// Upstream v1.6.0 (#12273) sends the Codex system prompt as the first developer input item, not `instructions`.
+	it("sends the initial snapshot as the first Codex input item without duplicating it", async () => {
 		const model: Model<"openai-codex-responses"> = {
 			...openAIResponsesModel(),
 			api: "openai-codex-responses",
@@ -589,15 +590,22 @@ describe("mid-conversation instruction messages", () => {
 				throw new Error("payload captured before network request");
 			},
 		}).result();
-		expect(payload?.instructions).toBe("Base rules");
-		expect(payload?.input?.map((item) => item.role)).toEqual(["developer", "developer", "user", "developer"]);
-		expect(payload?.input?.[0]).toMatchObject({ content: [{ text: "Plan boundary" }] });
-		expect(payload?.input?.[1]).toMatchObject({ content: [{ text: "No edits" }] });
-		expect(payload?.input?.[3]).toMatchObject({ content: "Later update" });
+		expect(payload?.instructions).toBeUndefined();
+		expect(payload?.input?.map((item) => item.role)).toEqual([
+			"developer",
+			"developer",
+			"developer",
+			"user",
+			"developer",
+		]);
+		expect(payload?.input?.[0]).toMatchObject({ content: "Base rules" });
+		expect(payload?.input?.[1]).toMatchObject({ content: [{ text: "Plan boundary" }] });
+		expect(payload?.input?.[2]).toMatchObject({ content: [{ text: "No edits" }] });
+		expect(payload?.input?.[4]).toMatchObject({ content: "Later update" });
 		expect(JSON.stringify(payload).match(/Base rules/g)).toHaveLength(1);
 	});
 
-	it("sends carried standing values as developer items right after the Codex instructions", async () => {
+	it("sends carried standing values as developer items right after the Codex system prompt", async () => {
 		const model: Model<"openai-codex-responses"> = {
 			...openAIResponsesModel(),
 			api: "openai-codex-responses",
@@ -623,10 +631,11 @@ describe("mid-conversation instruction messages", () => {
 				throw new Error("payload captured before network request");
 			},
 		}).result();
-		expect(payload?.instructions).toBe("Checkpoint rules");
-		expect(payload?.input?.map((item) => item.role)).toEqual(["developer", "user", "user"]);
-		expect(payload?.input?.[0]).toMatchObject({ content: [{ text: "Carried mode" }] });
-		expect(JSON.stringify(payload?.input?.[1])).toContain("Summary of earlier work");
+		expect(payload?.instructions).toBeUndefined();
+		expect(payload?.input?.map((item) => item.role)).toEqual(["developer", "developer", "user", "user"]);
+		expect(payload?.input?.[0]).toMatchObject({ content: "Checkpoint rules" });
+		expect(payload?.input?.[1]).toMatchObject({ content: [{ text: "Carried mode" }] });
+		expect(JSON.stringify(payload?.input?.[2])).toContain("Summary of earlier work");
 	});
 
 	it("skips blank instruction messages for OpenAI Responses", () => {

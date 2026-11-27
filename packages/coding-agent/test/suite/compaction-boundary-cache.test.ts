@@ -144,8 +144,10 @@ describe("compaction boundary keeps the cached prefix (A5)", () => {
 			expect(result.stopReason, result.errorMessage).toBe("stop");
 		}
 		expect(bodies[0]).toContain("Compaction boundary (not a request)");
+		// Codex sends the system prompt as the first input item (upstream #12273): the history check covers it.
+		expect(JSON.parse(bodies[0])).not.toHaveProperty("instructions");
 		expectPromptPrefixStable(bodies[0], bodies[1], {
-			fixed: ["instructions", "tools", "prompt_cache_key"],
+			fixed: ["tools", "prompt_cache_key"],
 			history: "input",
 		});
 	});

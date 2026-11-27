@@ -57,13 +57,13 @@ class ListMouseRegion extends MouseRegion {
 	content: Component;
 	zones: readonly ListMouseZone[];
 	private readonly onEvent: (event: TuiMouseEvent) => TuiMouseEventResult | undefined;
-	private readonly paint: (lines: string[], width: number) => string[];
+	private readonly paint: (lines: readonly string[], width: number) => readonly string[];
 
 	constructor(
 		child: Component,
 		zones: readonly ListMouseZone[],
 		onEvent: (event: TuiMouseEvent) => TuiMouseEventResult | undefined,
-		paint: (lines: string[], width: number) => string[],
+		paint: (lines: readonly string[], width: number) => readonly string[],
 	) {
 		super(child, onEvent);
 		this.content = child;
@@ -72,7 +72,7 @@ class ListMouseRegion extends MouseRegion {
 		this.paint = paint;
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		const lines = renderComponent(this.content, width);
 		recordMouseLayout(this, [{ component: this.content, originX: 0, originY: 0, width, height: lines.length }]);
 		return this.paint(lines, width);
@@ -153,14 +153,21 @@ export class ListMouse<K> {
 	}
 
 	/** Validate manual identity on every render path, even without a provider or visible rows. */
-	paintHover(lines: string[], width: number): string[] {
+	paintHover(lines: string[], width: number): string[];
+	paintHover(lines: readonly string[], width: number): readonly string[];
+	paintHover(lines: readonly string[], width: number): readonly string[] {
 		if (!this.hover || this.hover.region) return lines;
 		const hover = this.hover;
 		const row = this.rows.find((row) => hover.y >= row.y && hover.y < row.y + row.height);
 		return this.paintRows(lines, width, row, false);
 	}
 
-	private paintRows(lines: string[], width: number, row: ListMouseRow<K> | undefined, region: boolean): string[] {
+	private paintRows(
+		lines: readonly string[],
+		width: number,
+		row: ListMouseRow<K> | undefined,
+		region: boolean,
+	): readonly string[] {
 		const hover = this.hover;
 		if (!hover || hover.region !== region) return lines;
 		const zone = row?.zones.find((zone) => hover.x >= zone.x && hover.x < zone.x + zone.width);

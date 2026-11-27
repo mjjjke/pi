@@ -169,6 +169,19 @@ describe("AssistantMessageComponent", () => {
 		expect(lines[lines.length - 1].startsWith(OSC133_ZONE_END + OSC133_ZONE_FINAL)).toBe(true);
 	});
 
+	// #9549: container output is reused across frames, so markers must not be added to it in place.
+	test("adds OSC 133 zone markers once across repeated renders", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(createAssistantMessage([{ type: "text", text: "hello" }]));
+		const first = component.render(40);
+		const second = component.render(40);
+
+		expect(second).toBe(first);
+		expect(second[0]!.split(OSC133_ZONE_START)).toHaveLength(2);
+		expect(second[second.length - 1]!.split(OSC133_ZONE_END)).toHaveLength(2);
+	});
+
 	test("does not add OSC 133 zone markers when assistant message contains tool calls", () => {
 		initTheme("dark");
 
@@ -441,11 +454,11 @@ describe("AssistantMessageComponent", () => {
 		const commentary = JSON.stringify({ v: 1, id: "msg_1", phase: "commentary" });
 		const finalAnswer = JSON.stringify({ v: 1, id: "msg_2", phase: "final_answer" });
 
-		function renderLines(message: AssistantMessage, hideThinking = false): string[] {
+		function renderLines(message: AssistantMessage, hideThinking = false): readonly string[] {
 			return new AssistantMessageComponent(message, hideThinking).render(80);
 		}
 
-		function lineWith(lines: string[], text: string): string | undefined {
+		function lineWith(lines: readonly string[], text: string): string | undefined {
 			return lines.find((line) => stripAnsi(line).includes(text));
 		}
 

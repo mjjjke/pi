@@ -14,7 +14,14 @@ import {
 	type TerminalColorScheme,
 	type TerminalColors,
 } from "./terminal-colors.ts";
-import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
+import {
+	getCapabilities,
+	getImageLineExtent,
+	getMaxKittyImageRows,
+	isImageLine,
+	setCellDimensions,
+	stripImageSequences,
+} from "./terminal-image.ts";
 import { type LinkPolicy, TerminalLinkFilter, webLinkPolicy } from "./terminal-links.ts";
 import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
 
@@ -146,9 +153,9 @@ export interface Component {
 	 * Render the component to lines for the given viewport width
 	 * @param width - Current viewport width
 	 * @param height - Allocated height in fullscreen layout; undefined during natural-size measurement
-	 * @returns Array of strings, each representing a line
+	 * @returns Lines to draw. Components may return a cached array: callers must not modify it.
 	 */
-	render(width: number, height?: number): string[];
+	render(width: number, height?: number): readonly string[];
 
 	/** Optional natural height measurement without changing rendered input/hover geometry. */
 	measureHeight?(width: number): number;
@@ -389,12 +396,89 @@ type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | Blocked
 type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusRestoreState;
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
+/** Concatenated child output of a container, kept across frames. */
+export interface ChildLines {
+	readonly width: number;
+	readonly children: readonly Component[];
+	readonly parts: readonly (readonly string[])[];
+	readonly lines: string[];
+}
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let index = 0; index < a.length; index++) {
+		if (a[index] !== b[index]) return false;
+	}
+	return true;
+}
+
+/**
+ * Render children and concatenate their lines.
+ *
+ * Returns `previous` unchanged when the children and their lines are unchanged. Unchanged subtrees
+ * then keep array identity, so every ancestor container skips its copy too. Without this, each
+ * frame of a long fullscreen transcript copied every rendered line once per nesting level.
+ * Callers must treat the returned lines as read-only, like any component's cached render output.
+ * `height` is passed to every child; callers pass it only for a single-child transparent wrapper.
+ */
+export function renderChildLines(
+	children: readonly Component[],
+	width: number,
+	previous: ChildLines | undefined,
+	height?: number,
+): ChildLines {
+	const parts = children.map((child) => renderComponent(child, width, height));
+	if (
+		previous?.width === width &&
+		previous.children.length === children.length &&
+		children.every(
+			(child, index) => child === previous.children[index] && sameLines(parts[index]!, previous.parts[index]!),
+		)
+	) {
+		return previous;
+	}
+	const lines: string[] = [];
+	for (const part of parts) {
+		for (const line of part) lines.push(line);
+	}
+	return { width, children: [...children], parts, lines };
+}
+
+/** Forward a mouse event to the child of a vertical child layout that covers its row, keeping leave ownership. */
+export function dispatchMouseToChildLines(
+	layout: ChildLines,
+	event: TuiMouseEvent,
+): TuiMouseDispatchResult | undefined {
+	let childY = 0;
+	for (let index = 0; index < layout.children.length; index++) {
+		const childHeight = layout.parts[index]!.length;
+		if (event.y >= childY && event.y < childY + childHeight) {
+			return forwardMouseEvent(layout.children[index]!, { ...event, y: event.y - childY, height: childHeight });
+		}
+		childY += childHeight;
+	}
+	return undefined;
+}
+
+/** Child rectangles of a vertical child layout, for geometry-only hover validation. */
+export function childLinesMouseTargets(layout: ChildLines, originX: number, originY: number): TuiMouseDispatchTarget[] {
+	const targets: TuiMouseDispatchTarget[] = [];
+	let childY = originY;
+	for (let index = 0; index < layout.children.length; index++) {
+		const height = layout.parts[index]!.length;
+		targets.push({ component: layout.children[index]!, originX, originY: childY, width: layout.width, height });
+		childY += height;
+	}
+	return targets;
+}
+
 /**
  * Container - a component that contains other components
  */
 export class Container implements Component {
 	children: Component[] = [];
-	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
+	private childLines?: ChildLines;
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -419,43 +503,27 @@ export class Container implements Component {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
 		if (event.y < 0 || event.y >= event.height) return undefined;
-		const mouseChildren =
-			this.mouseLayout?.width === event.width
-				? this.mouseLayout.children
-				: this.children.map((component) => ({ component, height: renderComponent(component, event.width).length }));
-		let childY = 0;
-		for (const { component: child, height: childHeight } of mouseChildren) {
-			if (event.y >= childY && event.y < childY + childHeight) {
-				const result = forwardMouseEvent(child, {
-					...event,
-					y: event.y - childY,
-					height: childHeight,
-				});
-				if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
-				return result;
-			}
-			childY += childHeight;
-		}
-		return undefined;
+		const layout =
+			this.childLines?.width === event.width
+				? this.childLines
+				: renderChildLines(this.children, event.width, undefined);
+		const result = dispatchMouseToChildLines(layout, event);
+		if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
+		return result;
 	}
 
-	render(width: number, height?: number): string[] {
-		const lines: string[] = [];
-		const mouseChildren: Array<{ component: Component; height: number }> = [];
-		const mouseTargets: TuiMouseDispatchTarget[] = [];
-		for (const child of this.children) {
-			const originY = lines.length;
-			// A single-child container is a transparent wrapper, including its height budget.
-			const childLines = renderComponent(child, width, this.children.length === 1 ? height : undefined);
-			mouseChildren.push({ component: child, height: childLines.length });
-			mouseTargets.push({ component: child, originX: 0, originY, width, height: childLines.length });
-			for (const line of childLines) {
-				lines.push(line);
-			}
-		}
-		this.mouseLayout = { width, children: mouseChildren };
-		recordMouseLayout(this, mouseTargets);
-		return lines;
+	render(width: number, height?: number): readonly string[] {
+		const previous = this.childLines;
+		// A single-child container is a transparent wrapper, including its height budget.
+		this.childLines = renderChildLines(
+			this.children,
+			width,
+			previous,
+			this.children.length === 1 ? height : undefined,
+		);
+		// Unchanged layouts keep their recorded child rectangles; long transcripts skip the per-frame rebuild.
+		if (this.childLines !== previous) recordMouseLayout(this, childLinesMouseTargets(this.childLines, 0, 0));
+		return this.childLines.lines;
 	}
 }
 
@@ -496,6 +564,33 @@ export function compositeTuiLine(
 	return visibleWidth(result) <= totalWidth ? result : sliceByColumn(result, 0, totalWidth, true);
 }
 
+/**
+ * Drop image placements that intersect an overlay rectangle (`row` is viewport-relative).
+ * Terminals draw images above text, so an overlay cannot paint over them. The renderers delete a
+ * placement once its line changes and draw it again when the overlay no longer covers it.
+ * Images beside the overlay stay; on the row holding such an image's sequence the overlay is not
+ * drawn, because `compositeTuiLine` passes image lines through.
+ */
+function hideImagesUnderOverlay(lines: string[], overlay: OverlayBounds, viewportStart: number): void {
+	if (overlay.height === 0) return;
+	// Kitty images extend downward, so an image line above the viewport can still reach into it.
+	for (let index = Math.max(0, viewportStart - getMaxKittyImageRows()); index < lines.length; index++) {
+		const line = lines[index]!;
+		const extent = getImageLineExtent(line);
+		if (!extent) continue;
+		const firstRow = index + extent.firstRow - viewportStart;
+		const lastRow = index + extent.lastRow - viewportStart;
+		if (
+			firstRow < overlay.row + overlay.height &&
+			lastRow >= overlay.row &&
+			extent.startCol < overlay.col + overlay.width &&
+			extent.endCol > overlay.col
+		) {
+			lines[index] = stripImageSequences(line);
+		}
+	}
+}
+
 export type TuiMode = "regular" | "fullscreen";
 
 export interface TuiStopOptions {
@@ -531,6 +626,12 @@ export interface TUI extends Component {
 	onTerminalFocusChange(listener: (focused: boolean) => void): () => void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
+	/**
+	 * Sets the handler called on SIGTSTP while this TUI owns the terminal (from start() until stop()),
+	 * or clears it with undefined.
+	 * The listener is removed on stop(), so a child that owns the terminal afterwards is suspended normally.
+	 */
+	setSuspendSignalHandler(handler: (() => void) | undefined): void;
 	queryTerminalColors(options: {
 		timeoutMs: number;
 		onLateReply?: (colors: TerminalColors) => void;
@@ -570,7 +671,17 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
+	private suspendSignalHandler: (() => void) | undefined;
+	private readonly suspendSignalListener = (): void => this.suspendSignalHandler?.();
+	// From start() until stop(). Unlike `stopped`, false before the first start().
+	private ownsTerminal = false;
+	private suspendSignalListening = false;
 	private renderRequested = false;
+	/**
+	 * Whether a render request since the last frame may have changed component output. Only
+	 * `requestViewRender()` leaves it false, so a renderer may reuse the previous frame's output.
+	 */
+	protected contentChanged = true;
 	private immediateRenderScheduled = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
@@ -689,6 +800,8 @@ export abstract class TuiBase extends Container implements TUI {
 		overlayFocusRestore: OverlayFocusRestorePolicy;
 	}): void {
 		const generation = this.lifecycleGeneration;
+		// Focused components draw a cursor, so a focus change must not reuse earlier output.
+		this.contentChanged = true;
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
 		const previousFocusedOverlay = previousFocus
@@ -1021,6 +1134,8 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = false;
 		process.off("exit", this.exitRestoreHandler);
 		process.on("exit", this.exitRestoreHandler);
+		this.ownsTerminal = true;
+		this.updateSuspendSignalListener();
 		this.beforeTerminalStart();
 		if (generation !== this.lifecycleGeneration) return;
 		this.terminal.start(
@@ -1076,6 +1191,23 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 	}
 
+	setSuspendSignalHandler(handler: (() => void) | undefined): void {
+		this.suspendSignalHandler = handler;
+		this.updateSuspendSignalListener();
+	}
+
+	// Listen only while the TUI owns the terminal. After stop(), a child (external editor,
+	// interactive command) owns it, and a listener would keep SIGTSTP from stopping the process.
+	// Only real changes touch the listener: removing the last one restores the default action,
+	// so an off/on pair would let a SIGTSTP in between stop the process with the TUI running.
+	private updateSuspendSignalListener(): void {
+		const listen = this.ownsTerminal && this.suspendSignalHandler !== undefined;
+		if (listen === this.suspendSignalListening) return;
+		this.suspendSignalListening = listen;
+		if (listen) process.on("SIGTSTP", this.suspendSignalListener);
+		else process.off("SIGTSTP", this.suspendSignalListener);
+	}
+
 	private queryCellSize(): void {
 		// Only query if terminal supports images (cell size is only used for image rendering)
 		if (!getCapabilities().images) {
@@ -1101,10 +1233,15 @@ export abstract class TuiBase extends Container implements TUI {
 		this.terminal.showCursor();
 		this.terminal.stop();
 		this.afterTerminalStop(options);
+		// Last, so a SIGTSTP during the restore above is caught (and dropped when the listener
+		// goes) instead of stopping the process with the terminal half restored.
+		this.ownsTerminal = false;
+		this.updateSuspendSignalListener();
 	}
 
 	renderNow(force = false): void {
 		if (force) this.resetRenderState();
+		this.contentChanged = true;
 		this.renderRequested = false;
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
@@ -1117,12 +1254,19 @@ export abstract class TuiBase extends Container implements TUI {
 			this.requestImmediateRender();
 			return;
 		}
+		this.contentChanged = true;
+		this.requestViewRender();
+	}
+
+	/** Request a frame for a change that leaves component output unchanged, such as a scroll position. */
+	protected requestViewRender(): void {
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
 	}
 
 	private requestImmediateRender(): void {
+		this.contentChanged = true;
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;
@@ -1535,8 +1679,9 @@ export abstract class TuiBase extends Container implements TUI {
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
-		// Composite each overlay
+		// Composite each overlay, back to front. Hiding images per overlay also hides images drawn by overlays below it.
 		for (const { overlayLines, row, col, w } of rendered) {
+			hideImagesUnderOverlay(result, { row, col, width: w, height: overlayLines.length }, viewportStart);
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
 				if (idx >= 0 && idx < result.length) {
@@ -1603,7 +1748,7 @@ export abstract class TuiBase extends Container implements TUI {
 	 * directly after CURSOR_MARKER is dropped because the terminal cursor is drawn there. Fake cursors
 	 * of components without focus have no CURSOR_MARKER and stay visible.
 	 */
-	protected resolveFakeCursors(lines: string[]): string[] {
+	protected resolveFakeCursors(lines: readonly string[]): string[] {
 		return lines.map((line) => {
 			if (!line.includes(FAKE_CURSOR_START)) return line;
 			const resolved = this.showHardwareCursor ? line.replace(FOCUSED_FAKE_CURSOR, "$1$2") : line;

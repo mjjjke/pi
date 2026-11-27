@@ -28,6 +28,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { writeDiagnosticsToStderr } from "../diagnostics-stderr.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -348,10 +349,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		for (const warning of runtimeHost.session.sessionManager.getLoadWarnings()) {
 			process.stderr.write(`Warning: ${warning}\n`);
 		}
+		// stderr, never stdout: stdout carries the RPC protocol.
+		writeDiagnosticsToStderr(runtimeHost.takeUnreportedDiagnostics());
 	});
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		// Subscribe before binding so events emitted by session_start handlers (e.g. appended entries) reach the client.
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		unsubscribe = session.subscribe((event) => {
+			output(toJsonEvent(event));
+			if (event.type === "agent_settled") {
+				checkShutdownRequested();
+			}
+		});
+		unsubscribeBackpressure = session.agent.subscribe(async () => {
+			await waitForRawStdoutBackpressure();
+		});
 		await session.bindExtensions({
 			uiContext: createExtensionUIContext(),
 			mode: "rpc",
@@ -393,25 +408,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
 			},
 		});
-
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			output(toJsonEvent(event));
-			if (event.type === "agent_settled") {
-				checkShutdownRequested();
-			}
-		});
-		unsubscribeBackpressure = session.agent.subscribe(async () => {
-			await waitForRawStdoutBackpressure();
-		});
 	};
 
 	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
+		const signals: NodeJS.Signals[] = ["SIGTERM", "SIGHUP"];
 
 		for (const signal of signals) {
 			const exitCode = signal === "SIGHUP" ? 129 : 143;
@@ -838,10 +838,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		// The caller already attempted abort and handlers. Invalidate unconditionally even when
 		// those phases exhausted the budget; credential writes get only the remaining time.
 		await withinBudget(() => runtimeHost.dispose({ handlersDispatched: true }));
-		killTrackedDetachedChildren();
 		if (shutdownSignal !== "SIGTERM") {
 			await withinBudget(() => flushRawStdout());
 		}
+		// dispose() only starts killing a running `bash` command, which on Windows loses the race with
+		// exit. After the last await, so it also catches a shell spawned after the abort.
+		killTrackedDetachedChildren();
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}

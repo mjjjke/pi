@@ -68,6 +68,12 @@ const FORK_MID_CONVO_SYSTEM_MESSAGE_MODELS = new Set([
 	"openai:gpt-5.4-nano",
 	"openai:gpt-5.5-pro",
 	"openai:gpt-5.6-cyber",
+	// Added with the v1.7.0 catalog.
+	"openai:gpt-6-astra-healthcare",
+	"openai:gpt-6-cyber",
+	"openai:gpt-6.1-sol-healthcare",
+	"openai:gpt-6.2-astra-healthcare",
+	"openai:gpt-6.2-sol-healthcare",
 ]);
 
 /** Fork compat patch: flags the fork sets on top of the upstream data. */

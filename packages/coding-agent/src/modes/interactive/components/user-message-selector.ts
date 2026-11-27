@@ -220,7 +220,7 @@ export class UserMessageSelectorComponent extends Container {
 		);
 	}
 
-	render(width: number, height = this.measureHeight(width)): string[] {
+	render(width: number, height = this.measureHeight(width)): readonly string[] {
 		const chromeHeight = this.measureHeight(width) - this.messageList.measureHeight();
 		// Preserve all chrome only when a complete item and counter still fit (or the whole list, when it is
 		// shorter than that). Otherwise the list owns the viewport; the selection always has priority.

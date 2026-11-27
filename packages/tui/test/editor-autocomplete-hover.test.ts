@@ -118,7 +118,7 @@ describe("Editor autocomplete hover forwarding", () => {
 			// Exercise the forwarding contract with a composite suggestion list.
 			class CompositeList extends SelectList {
 				override render(width: number) {
-					const lines = menu.render(width);
+					const lines = [...menu.render(width)];
 					recordMouseLayout(this, [{ component: menu, originX: 0, originY: 0, width, height: lines.length }]);
 					return lines;
 				}

@@ -1,6 +1,6 @@
 import type { Component } from "./tui.ts";
 
 /** Link identities belong to retained sources, never to render-call order or cache misses. */
-export function renderComponent(component: Component, width: number, height?: number): string[] {
+export function renderComponent(component: Component, width: number, height?: number): readonly string[] {
 	return component.render(width, height);
 }

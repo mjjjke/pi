@@ -746,10 +746,6 @@ async function executeToolCallsSequential(
 		await emitToolResultMessage(toolResultMessage, emit);
 		finalizedCalls.push(finalized);
 		messages.push(toolResultMessage);
-
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	return {
@@ -788,9 +784,8 @@ async function executeToolCallsWithExclusive(
 				emit,
 			)),
 		);
-		// Like the sequential path, unprepared calls get no start/end or result on
-		// abort. Within an admitted segment, the parallel path pairs every start.
-		if (signal?.aborted) break;
+		// After an abort, later segments still run through preparation, which answers each call
+		// with "Operation aborted" without hooks or execution, like the sequential path (#9986).
 		start = end;
 	}
 	return emitToolBatchResults(finalizedCalls, emit);
@@ -842,9 +837,6 @@ async function executeToolCallsParallelSegment(
 			} satisfies FinalizedToolCallOutcome;
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
-			if (signal?.aborted) {
-				break;
-			}
 			continue;
 		}
 
@@ -870,9 +862,6 @@ async function executeToolCallsParallelSegment(
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
-		if (signal?.aborted) {
-			break;
-		}
 	}
 
 	return Promise.all(finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))));
@@ -949,6 +938,15 @@ async function prepareToolCall(
 	signal: AbortSignal | undefined,
 	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	// Once aborted, skip preparation and the hooks; callers still record this result, so no call
+	// is left without one (#9986).
+	if (signal?.aborted) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		};
+	}
 	const tool = tools.find((t) => t.name === toolCall.name);
 	if (!tool) {
 		return {
@@ -989,13 +987,6 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
-		}
-		if (signal?.aborted) {
-			return {
-				kind: "immediate",
-				result: createErrorToolResult("Operation aborted"),
-				isError: true,
-			};
 		}
 		return {
 			kind: "prepared",
@@ -1041,8 +1032,9 @@ export interface RunToolCallOptions extends ToolCallHooks {
  * messages. Tools that call other tools use this so the hooks (for example permission checks)
  * apply to those calls too.
  *
- * Never rejects for tool failures: unknown tools, validation errors, blocked calls, and thrown
- * errors come back as `isError: true`.
+ * Never rejects for tool failures: an aborted `signal`, unknown tools, validation errors, blocked
+ * calls, and thrown errors come back as `isError: true`. An aborted `signal` is checked first,
+ * before the hooks run.
  */
 export async function runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions): Promise<AgentToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;

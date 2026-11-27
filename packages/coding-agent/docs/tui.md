@@ -23,6 +23,8 @@ A component renders an array of terminal lines for an available width. It can op
 
 Fullscreen layout calls `render(width, height)` on leaves with their allocated height, not the terminal height. During natural-size measurement, `height` is undefined. A height-aware component can implement `measureHeight(width)` to report its preferred height without changing input or hover geometry during vertical layout measurement. Plain single-child `Container` wrappers forward the allocated height; multi-child layout should use `VStack` or `HStack`. When space is tight, prioritize actionable content over optional chrome.
 
+Treat lines returned by `render()` as read-only, including `super.render()` in a subclass. Built-in components such as `Container`, `Box`, `Text`, and `Markdown` return the same cached array while nothing changed, so modifying it in place corrupts later frames. Copy first, for example `const lines = [...super.render(width)]`, and cache the result if it is expensive. Return a new array when your output changes: parents reuse an unchanged array without reading it again.
+
 Every rendered line must fit within the supplied width. Measure visible terminal columns rather than string length because ANSI escapes, wide characters, emoji, and combining characters change display width.
 
 Use `visibleWidth()`, `truncateToWidth()`, `sliceByColumn()`, and `wrapTextWithAnsi()` instead of implementing terminal-width handling yourself. Pi resets styling and hyperlinks after every line, so reapply styles on each rendered line.

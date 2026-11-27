@@ -92,7 +92,8 @@ function prefix(before: string, after: string, transport: "anthropic" | "respons
 							? raw.replace(/,"cache_control":\{"type":"ephemeral"\}(\}\]\})$/, "$1")
 							: raw,
 				}
-			: { fixed: ["instructions", ...(tools && hasTools ? ["tools"] : [])], history: "input" },
+			: // Codex sends the system prompt as the first input item (upstream #12273): the history check covers it.
+				{ fixed: tools && hasTools ? ["tools"] : [], history: "input" },
 	);
 }
 

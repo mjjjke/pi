@@ -20,7 +20,7 @@ export class MouseRegion implements Component {
 		this.onMouse = onMouse;
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const lines = renderComponent(this.child, width);
 		recordMouseLayout(this, [{ component: this.child, originX: 0, originY: 0, width, height: lines.length }]);
 		return lines;

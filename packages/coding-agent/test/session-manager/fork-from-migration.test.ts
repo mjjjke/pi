@@ -100,7 +100,14 @@ describe("forkFrom migrates the copied source (§4.2, Astra M7)", () => {
 		const sourceBefore = readFileSync(source, "utf8");
 		const sessionDir = join(dir, "sessions");
 		mkdirSync(sessionDir);
-		const args: Args = { messages: [], fileArgs: [], unknownFlags: new Map(), diagnostics: [], fork: source };
+		const args: Args = {
+			messages: [],
+			fileArgs: [],
+			unknownFlags: new Map(),
+			diagnostics: [],
+			resumeFlags: [],
+			fork: source,
+		};
 		const forked = await createSessionManager(args, dir, sessionDir, SettingsManager.inMemory());
 		expectCanonicalFork(forked, source, sourceBefore);
 	});

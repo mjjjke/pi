@@ -18,7 +18,10 @@ Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json
 | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
 | `thinkingDisplay` | `"updates" \| "summarized"` | `"updates"` | How Anthropic models with progress updates (Claude Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5, Fable 5) return thinking. `"updates"` hides reasoning and returns only the short progress notes written before tool calls (beta `thinking-display-updates-2026-08-18`); `"summarized"` returns reasoning summaries. Other models always use summaries. Progress updates render as plain assistant Markdown and stay visible when thinking blocks are hidden. Changes apply to the next request; switching mid-session costs one message-cache miss (system prompt and tools stay cached). |
-| `showCacheMissNotices` | boolean | `false` | Show notices for significant cache misses, successful cache warming, compaction usage, and provider recovery. |
+| `notices.cacheMisses` | boolean | `false` | Show a notice when a response re-bills a significant part of the prompt cache, such as after a model switch or an idle gap. |
+| `notices.cacheWarming` | boolean | `false` | Show the cost of cache warming requests. |
+| `notices.compactionCosts` | boolean | `false` | Show the cost of compactions and branch summaries. |
+| `notices.reasoningDrops` | boolean | `false` | Show a notice when a provider drops reasoning items from a request, such as OpenAI reasoning items after a prefix mismatch or Anthropic thinking blocks during recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"idle"` | Keep eligible provider prompt caches warm during active runs and, with `"idle"`, between runs until `cacheWarmingMaxIdleHours` after the last real request under long retention, or 30 minutes under short retention. `"streaming"` warms only during active runs. Global setting only. |
 | `cacheWarmingMaxIdleHours` | number | `16` | Maximum idle warming hours under long retention since the last real request started (not since the last refresh). Short retention always stops after 30 minutes, regardless of this setting. Positive finite number; invalid values use `16`. Global setting only. |
 
@@ -165,11 +168,10 @@ Resource arrays support glob exclusions with `!pattern`, exact inclusion with `+
 
 The built-in extensions are named `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search` in `extensions`. They load by default; `-builtin:mcp` disables one. A `+builtin:<name>` or `-builtin:<name>` entry in project settings overrides the user setting. `pi config` lists them under Built-in. `--no-extensions` disables them too, and `-e builtin:<name>` loads one explicitly.
 
-## Updates, telemetry, and warnings
+## Updates and warnings
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `collapseChangelog` | boolean | `false` | Show a condensed changelog after an update. Also condenses extension package changelogs to one line per package. |
-| `enableInstallTelemetry` | boolean | `true` | Enable anonymous install/update reporting and selected provider attribution headers. Does not control update checks. |
 | `enableAnalytics` | boolean | `false` | Opt in to analytics data sharing. Currently used only by the experimental first-run setup. |
 | `warnings.anthropicExtraUsage` | boolean | `true` | Warn when Anthropic subscription authentication may use paid extra usage. |

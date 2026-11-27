@@ -241,7 +241,8 @@ describe("final-wire prompt prefix stability", () => {
 	});
 
 	it.each([false, true])(
-		"preserves Codex instructions, tools and every old input item after onPayload and zstd serialization (v4 bootstrap=%s)",
+		// Upstream v1.6.0 (#12273) sends the Codex system prompt as the first developer input item, not `instructions`.
+		"preserves the Codex system prompt, tools and every old input item after onPayload and zstd serialization (v4 bootstrap=%s)",
 		async (bootstrap) => {
 			const model = bootstrap ? withInstructions(codexModel) : codexModel;
 			const tokenPayload = Buffer.from(
@@ -249,8 +250,9 @@ describe("final-wire prompt prefix stability", () => {
 			).toString("base64url");
 			const bodies: string[] = [];
 			const onPayload = vi.fn(async (value: unknown) => {
-				const payload = value as { instructions: string };
-				return { ...payload, instructions: payload.instructions + hookText };
+				const payload = value as { input: Array<{ content: unknown }> };
+				const [prompt, ...rest] = payload.input;
+				return { ...payload, input: [{ ...prompt, content: `${prompt!.content}${hookText}` }, ...rest] };
 			});
 			for (const context of turns(model, bootstrap)) {
 				const result = await streamCodex(model, normalizeContext(context), {
@@ -281,22 +283,25 @@ describe("final-wire prompt prefix stability", () => {
 			expect(bodies).toHaveLength(2);
 			for (const body of bodies) {
 				const payload = JSON.parse(body);
-				expect(payload.instructions).toContain(hookText);
+				expect(payload.instructions).toBeUndefined();
+				expect(payload.input[0].role).toBe("developer");
+				expect(payload.input[0].content).toContain(hookText);
 				expect(payload.input.find((item: { type: string }) => item.type === "function_call_output").output).toBe(
 					adversarial,
 				);
 				if (bootstrap) {
-					expect(payload.instructions).not.toContain("collaboration_mode");
-					expect(payload.input.slice(0, 3).map((item: { role: string }) => item.role)).toEqual([
+					expect(payload.input[0].content).not.toContain("collaboration_mode");
+					expect(payload.input.slice(0, 4).map((item: { role: string }) => item.role)).toEqual([
+						"developer",
 						"developer",
 						"developer",
 						"user",
 					]);
-					expect(JSON.stringify(payload.input[0])).toContain("collaboration_mode");
+					expect(JSON.stringify(payload.input[1])).toContain("collaboration_mode");
 				}
 			}
 			expectPromptPrefixStable(bodies[0]!, bodies[1]!, {
-				fixed: ["instructions", "tools", "prompt_cache_key"],
+				fixed: ["tools", "prompt_cache_key"],
 				history: "input",
 			});
 		},

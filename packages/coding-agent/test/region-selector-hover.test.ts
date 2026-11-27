@@ -1,4 +1,4 @@
-import { type Container, Input, setKeybindings, setPointerHoverBackground, type TUI } from "@earendil-works/pi-tui";
+import { type Container, setKeybindings, setPointerHoverBackground, type TUI } from "@earendil-works/pi-tui";
 import xterm from "@xterm/headless";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { TuiAltScreen } from "../../tui/src/tui-alt-screen.ts";
@@ -72,7 +72,7 @@ function create(surface: (typeof surfaces)[number], count = 15) {
 	return { selector, row, activated, dispose };
 }
 
-async function backgrounds(lines: string[], width = 80) {
+async function backgrounds(lines: readonly string[], width = 80) {
 	const terminal = new xterm.Terminal({ cols: width, rows: lines.length + 1, allowProposedApi: true });
 	try {
 		await new Promise<void>((resolve) => terminal.write(lines.map((line) => `${line}\x1b[0m`).join("\r\n"), resolve));
@@ -178,13 +178,12 @@ describe("region selector hover", () => {
 			const f = create(surface, 3);
 			try {
 				const move = mouse(f.selector, f.row, { type: "move", button: "none" });
-				const input = f.selector.children.find((child) => child instanceof Input) as Input;
-				input.setValue("no-match-xyz");
-				f.selector.handleInput?.("");
+				// Type and erase the query: since upstream #12245, input that leaves the query unchanged does not refilter.
+				const query = "no-match-xyz";
+				f.selector.handleInput?.(query);
 				expect(cache(f.selector).size).toBe(0);
 				expect(move?.hoverValid?.()).toBe(false);
-				input.setValue("");
-				f.selector.handleInput?.("");
+				for (const _ of query) f.selector.handleInput?.("\x7f");
 				expect(cache(f.selector).size).toBe(3);
 				expect(f.selector.render(80).join("")).not.toContain(hover);
 				expect(move?.hoverValid?.()).toBe(false);

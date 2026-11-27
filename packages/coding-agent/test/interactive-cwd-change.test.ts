@@ -26,7 +26,7 @@ function deferred() {
 }
 
 function footerRebindHarness(height = 1) {
-	const frames: string[][] = [];
+	const frames: (readonly string[])[] = [];
 	const footerContainer = new Container();
 	const oldFooter = {
 		render: vi.fn(() => Array.from({ length: height }, () => "old custom footer")),

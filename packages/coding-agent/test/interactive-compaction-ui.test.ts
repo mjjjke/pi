@@ -59,7 +59,17 @@ function fixture(showCosts = false) {
 	Object.defineProperties(mode, {
 		sessionManager: { value: manager },
 		session: { value: { stagedMessages: [], isStreaming: false } },
-		settingsManager: { value: { getShowCacheMissNotices: () => showCosts, getShowTerminalProgress: () => false } },
+		settingsManager: {
+			value: {
+				getNotices: () => ({
+					cacheMisses: false,
+					cacheWarming: false,
+					compactionCosts: showCosts,
+					reasoningDrops: false,
+				}),
+				getShowTerminalProgress: () => false,
+			},
+		},
 	});
 	return { mode, manager, chat, output: () => stripAnsi(chat.render(80).join("\n")) };
 }

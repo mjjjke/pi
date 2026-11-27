@@ -64,7 +64,7 @@ for (const automatic of [false, true]) {
 					expect(rows).toHaveLength(3);
 					const title = automatic ? "Light Theme" : "Theme";
 					const exitRow = before.findIndex((line) =>
-						exit === "title" ? line.trim() === title : line.includes("Enter to select"),
+						exit === "title" ? line.trim() === title : line.includes(" to select · "),
 					);
 					expect(exitRow).toBeGreaterThan(0);
 					const selected = before.findIndex((line) => line.includes("→"));

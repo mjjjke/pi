@@ -11,6 +11,7 @@ import type { StartMessagePersistence } from "../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, waitForRawStdoutBackpressure, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
+import { writeDiagnosticsToStderr } from "./diagnostics-stderr.ts";
 import { toJsonEvent } from "./json-event.ts";
 
 /**
@@ -53,10 +54,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	};
 
 	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
+		const signals: NodeJS.Signals[] = ["SIGTERM", "SIGHUP"];
 
 		for (const signal of signals) {
 			const exitCode = signal === "SIGHUP" ? 129 : 143;
@@ -81,10 +79,25 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		for (const warning of runtimeHost.session.sessionManager.getLoadWarnings()) {
 			console.error(`Warning: ${warning}`);
 		}
+		writeDiagnosticsToStderr(runtimeHost.takeUnreportedDiagnostics());
 	});
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		// Subscribe before binding so events emitted by session_start handlers (e.g. appended entries) reach the JSON output.
+		unsubscribe?.();
+		unsubscribeBackpressure?.();
+		unsubscribe = session.subscribe((event) => {
+			if (mode === "json") {
+				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
+			}
+		});
+		unsubscribeBackpressure =
+			mode === "json"
+				? session.agent.subscribe(async () => {
+						await waitForRawStdoutBackpressure();
+					})
+				: undefined;
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
 			commandContextActions: {
@@ -114,20 +127,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
 			},
 		});
-
-		unsubscribe?.();
-		unsubscribeBackpressure?.();
-		unsubscribe = session.subscribe((event) => {
-			if (mode === "json") {
-				writeRawStdout(`${JSON.stringify(toJsonEvent(event))}\n`);
-			}
-		});
-		unsubscribeBackpressure =
-			mode === "json"
-				? session.agent.subscribe(async () => {
-						await waitForRawStdoutBackpressure();
-					})
-				: undefined;
 	};
 
 	try {

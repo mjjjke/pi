@@ -106,7 +106,7 @@ async function create(surface: (typeof surfaces)[number], count = 15) {
 	};
 }
 
-async function backgrounds(lines: string[], width = 80) {
+async function backgrounds(lines: readonly string[], width = 80) {
 	const terminal = new xterm.Terminal({ cols: width, rows: lines.length + 1, allowProposedApi: true });
 	try {
 		await new Promise<void>((resolve) => terminal.write(lines.map((line) => `${line}\x1b[0m`).join("\r\n"), resolve));

@@ -23,7 +23,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, Model } from "../src/types.ts";
 import { applyForkModelData } from "../src/providers/fork-model-capabilities.ts";
 import {
-	assertExactModelIds,
 	createModelDataManifest,
 	MODEL_DATA_MANIFEST_FILE,
 	type ModelDataManifest,
@@ -39,6 +38,17 @@ export interface PinnedModelData {
 }
 
 type ProviderGroups = Record<string, Record<string, Model<Api>>>;
+
+/** Throw unless both id sets are equal (upstream v1.7.0 dropped this helper from model-data.ts). */
+function assertExactModelIds(label: string, expected: Iterable<string>, actual: Iterable<string>): void {
+	const expectedIds = new Set(expected);
+	const actualIds = new Set(actual);
+	const missing = [...expectedIds].filter((id) => !actualIds.has(id)).sort();
+	const extra = [...actualIds].filter((id) => !expectedIds.has(id)).sort();
+	if (missing.length === 0 && extra.length === 0) return;
+	const difference = [missing.length > 0 ? `missing: ${missing.join(", ")}` : "", extra.length > 0 ? `extra: ${extra.join(", ")}` : ""];
+	throw new Error(`${label} model IDs do not match (${difference.filter(Boolean).join("; ")})`);
+}
 
 export function buildPinnedModelData(sourceDataDir: string, providerIds: readonly string[]): PinnedModelData {
 	const sourceProviderIds = readdirSync(sourceDataDir)
