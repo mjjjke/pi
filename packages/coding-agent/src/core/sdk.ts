@@ -373,15 +373,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Warm only requests for the selected model. Requests a virtual selection routed, or that an
 	// extension redirected, may not be repeated by the next request, so warming them could be wasted.
 	const cacheContextIsCurrent = (requestModel: Model<any>) => {
-		const messages = agent.state.messages;
+		// Projections reconstruct custom/summary messages at turn boundaries. Snapshot the
+		// converted content, not their identities (or mutable objects), so an unchanged
+		// projection stays current and in-place edits still invalidate the cached prefix.
+		const messages = convertToLlmWithBlockImages(agent.state.messages).map((message) => JSON.stringify(message));
 		return () => {
 			const currentModel = agent.state.model;
-			const currentMessages = agent.state.messages;
+			const currentMessages = convertToLlmWithBlockImages(agent.state.messages);
 			return (
 				currentModel.provider === requestModel.provider &&
 				currentModel.id === requestModel.id &&
 				messages.length <= currentMessages.length &&
-				messages.every((message, index) => currentMessages[index] === message)
+				messages.every((message, index) => JSON.stringify(currentMessages[index]) === message)
 			);
 		};
 	};
@@ -428,8 +431,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Detached prefix summaries share the session id but must not replace its warmer.
 			// Only ordinary session requests restart warming. Keep warming while
 			// the current transcript still extends the request's prefix. Agent state may
-			// shallow-copy the messages array or refresh the model object without changing
-			// the provider request, so top-level object identity is not a valid cache key.
+			// rebuild projected messages or refresh the model object without changing
+			// the provider request, so object identity is not a valid cache key.
 			if (options?.sessionId === sessionManager.getSessionId() && !options.disableContinuation) {
 				cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
 			}
